@@ -1,0 +1,19 @@
+# Model weights - too large for GitHub
+*.gguf
+*.safetensors
+*.bin
+
+# macOS junk
+.DS_Store
+
+# Xcode
+*.xcuserstate
+xcuserdata/
+DerivedData/
+build/
+
+# Python
+__pycache__/
+*.pyc
+.env
+swift-llama-cpp/
