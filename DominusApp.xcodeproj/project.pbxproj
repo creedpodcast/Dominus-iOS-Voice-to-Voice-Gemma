@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		1C162F572F46B066005487FF /* SwiftLlama in Frameworks */ = {isa = PBXBuildFile; productRef = 1C162F562F46B066005487FF /* SwiftLlama */; };
+		1C162F582F46B066005487FF /* FluidAudio in Frameworks */ = {isa = PBXBuildFile; productRef = 1C162F5A2F46B066005487FF /* FluidAudio */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -42,6 +43,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				1C162F572F46B066005487FF /* SwiftLlama in Frameworks */,
+				1C162F582F46B066005487FF /* FluidAudio in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -85,6 +87,7 @@
 			name = DominusApp;
 			packageProductDependencies = (
 				1C162F562F46B066005487FF /* SwiftLlama */,
+				1C162F5A2F46B066005487FF /* FluidAudio */,
 			);
 			productName = DominusApp;
 			productReference = 1C162F3D2F46AE46005487FF /* DominusApp.app */;
@@ -116,6 +119,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				1C162F552F46B066005487FF /* XCRemoteSwiftPackageReference "swift-llama-cpp" */,
+				1C162F592F46B066005487FF /* XCRemoteSwiftPackageReference "FluidAudio" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 1C162F3E2F46AE46005487FF /* Products */;
@@ -373,6 +377,14 @@
 				minimumVersion = 1.2.0;
 			};
 		};
+		1C162F592F46B066005487FF /* XCRemoteSwiftPackageReference "FluidAudio" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/FluidInference/FluidAudio";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 0.13.6;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -380,6 +392,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 1C162F552F46B066005487FF /* XCRemoteSwiftPackageReference "swift-llama-cpp" */;
 			productName = SwiftLlama;
+		};
+		1C162F5A2F46B066005487FF /* FluidAudio */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 1C162F592F46B066005487FF /* XCRemoteSwiftPackageReference "FluidAudio" */;
+			productName = FluidAudio;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
