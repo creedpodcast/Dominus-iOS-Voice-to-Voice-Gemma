@@ -2,6 +2,15 @@
   "originHash" : "306d2f77583e579f77fd4ca6f71037afdca4f163b1969ada829401d6dcf1c464",
   "pins" : [
     {
+      "identity" : "fluidaudio",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/FluidInference/FluidAudio",
+      "state" : {
+        "revision" : "57551cd90e0bbec342766244358bcf08afb05290",
+        "version" : "0.13.6"
+      }
+    },
+    {
       "identity" : "swift-llama-cpp",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/pgorzelany/swift-llama-cpp",
