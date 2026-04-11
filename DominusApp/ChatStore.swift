@@ -200,11 +200,14 @@ final class ChatStore: ObservableObject {
             for try await token in stream {
                 assistantText += token
 
+                // Strip llama.cpp internal artifacts from display
+                let displayText = cleanLlamaArtifacts(assistantText)
+
                 // update UI message as you already do
                 conversations[convoIndex].messages[assistantIndex] = ChatMessage(
                     id: assistantID,
                     role: .assistant,
-                    content: assistantText,
+                    content: displayText,
                     timestamp: assistantTS
                 )
 
@@ -248,6 +251,22 @@ final class ChatStore: ObservableObject {
         }
 
         isGenerating = false
+    }
+
+    private func cleanLlamaArtifacts(_ text: String) -> String {
+        let artifacts = [
+            "### Using cached processing",
+            "### Cached",
+            "<start_of_turn>",
+            "<end_of_turn>",
+            "<bos>",
+            "<eos>",
+        ]
+        var result = text
+        for artifact in artifacts {
+            result = result.replacingOccurrences(of: artifact, with: "")
+        }
+        return result.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func trimLLMHistory(_ llm: [LlamaChatMessage]) -> [LlamaChatMessage] {
