@@ -57,22 +57,28 @@ final class ChatStore: ObservableObject {
     @Published var isLoading: Bool = false
     @Published var loadStatus: String = "Idle"
     @Published var loadProgress: Double = 0.0
-    
-    // ✅ NEW: toggle between text-only and text+voice
+
     @Published var voiceEnabled: Bool = false {
         didSet {
-            if voiceEnabled == false {
-                SpeechManager.shared.stopAndClear()            }
+            if !voiceEnabled {
+                SpeechManager.shared.stopAndClear()
+            }
         }
     }
 
     private let engine = GemmaEngine()
+
+    /// Core identity — kept intentionally short to conserve token budget.
     private let systemPrompt = "You are Dominus — you think like Socrates. You never just answer; you question, challenge, and push the user deeper than they intended to go. You explore philosophy, religion, science, consciousness, and human nature fearlessly. You disagree when warranted, admit uncertainty honestly, and always finish your thought completely."
-    private let maxTurnsToKeep = 12
+
+    /// Keep only the last 4 turns (8 messages) of raw conversation in the prompt.
+    /// Older context is covered by RAG memory retrieval instead.
+    private let maxTurnsToKeep = 4
 
     private var saveURL: URL {
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-        return docs.appendingPathComponent("conversations.json")
+        FileManager.default
+            .urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("conversations.json")
     }
 
     init() {
@@ -151,17 +157,26 @@ final class ChatStore: ObservableObject {
         autoTitleIfNeeded(convoIndex: convoIndex, userText: trimmed)
         saveToDisk()
 
-        var llmMessages: [LlamaChatMessage] = [
-            .init(role: .system, content: systemPrompt)
-        ]
+        // ── Build LLM context ──────────────────────────────────────────────
+        // 1. Retrieve semantically relevant memories for this query
+        let memoryContext = MemoryRetriever.shared.retrieve(query: trimmed, topK: 5)
 
+        // 2. Compose system prompt (inject memory only when it exists)
+        var fullSystemPrompt = systemPrompt
+        if !memoryContext.isEmpty {
+            fullSystemPrompt += "\n\n\(memoryContext)"
+        }
+
+        // 3. Build message list: system + last N turns of raw history
+        var llmMessages: [LlamaChatMessage] = [
+            .init(role: .system, content: fullSystemPrompt)
+        ]
         llmMessages += conversations[convoIndex].messages.map { m in
             switch m.role {
-            case .user: return .init(role: .user, content: m.content)
+            case .user:      return .init(role: .user,      content: m.content)
             case .assistant: return .init(role: .assistant, content: m.content)
             }
         }
-
         llmMessages = trimLLMHistory(llmMessages)
 
         do {
@@ -171,16 +186,13 @@ final class ChatStore: ObservableObject {
             conversations[convoIndex].messages.append(placeholder)
 
             let assistantIndex = conversations[convoIndex].messages.count - 1
-            let assistantID = conversations[convoIndex].messages[assistantIndex].id
-            let assistantTS = conversations[convoIndex].messages[assistantIndex].timestamp
+            let assistantID    = conversations[convoIndex].messages[assistantIndex].id
+            let assistantTS    = conversations[convoIndex].messages[assistantIndex].timestamp
 
             var assistantText = ""
-
-            // NEW: streaming TTS chunk buffer
-            var ttsBuffer = ""
+            var ttsBuffer     = ""
             var lastEnqueuedAtCount = 0
 
-            // If voice is on, stop any prior speech and clear the queue
             if voiceEnabled {
                 SpeechManager.shared.stopAndClear()
             }
@@ -188,10 +200,7 @@ final class ChatStore: ObservableObject {
             for try await token in stream {
                 assistantText += token
 
-                // Strip llama.cpp internal artifacts from display
                 let displayText = cleanLlamaArtifacts(assistantText)
-
-                // update UI message as you already do
                 conversations[convoIndex].messages[assistantIndex] = ChatMessage(
                     id: assistantID,
                     role: .assistant,
@@ -199,23 +208,14 @@ final class ChatStore: ObservableObject {
                     timestamp: assistantTS
                 )
 
-                // NEW: Feed TTS progressively
                 if voiceEnabled {
                     ttsBuffer += token
-
-                    // Conditions to enqueue a chunk early:
-                    // 1) sentence boundary
-                    // 2) newline
-                    // 3) buffer is getting long (start speaking even before punctuation)
-                    let hitSentenceEnd = ttsBuffer.contains(".") || ttsBuffer.contains("?") || ttsBuffer.contains("!")
-                    let hitNewline = ttsBuffer.contains("\n")
+                    let hitSentenceEnd  = ttsBuffer.contains(".") || ttsBuffer.contains("?") || ttsBuffer.contains("!")
+                    let hitNewline      = ttsBuffer.contains("\n")
                     let bufferLongEnough = ttsBuffer.count >= 80
-
-                    // Avoid enqueuing constantly (must have grown since last enqueue)
-                    let hasNewContent = assistantText.count - lastEnqueuedAtCount >= 25
+                    let hasNewContent   = assistantText.count - lastEnqueuedAtCount >= 25
 
                     if hasNewContent && (hitSentenceEnd || hitNewline || bufferLongEnough) {
-                        // Enqueue the current buffer as a chunk and reset
                         SpeechManager.shared.enqueue(ttsBuffer)
                         lastEnqueuedAtCount = assistantText.count
                         ttsBuffer = ""
@@ -223,13 +223,23 @@ final class ChatStore: ObservableObject {
                 }
             }
 
-            // After streaming ends: speak whatever is left (if any)
             if voiceEnabled && !ttsBuffer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 SpeechManager.shared.enqueue(ttsBuffer)
             }
 
             conversations[convoIndex].updatedAt = Date()
             saveToDisk()
+
+            // ── Store exchange in long-term memory (fire-and-forget) ──────
+            let cleanedAssistant = conversations[convoIndex].messages[assistantIndex].content
+            if !cleanedAssistant.isEmpty {
+                MemoryRetriever.shared.remember(
+                    conversationID: conversations[convoIndex].id,
+                    userText: trimmed,
+                    assistantText: cleanedAssistant
+                )
+            }
+
         } catch {
             conversations[convoIndex].messages.append(
                 ChatMessage(role: .assistant, content: "Error: \(error.localizedDescription)")
@@ -240,6 +250,8 @@ final class ChatStore: ObservableObject {
 
         isGenerating = false
     }
+
+    // MARK: - Helpers
 
     private func cleanLlamaArtifacts(_ text: String) -> String {
         let artifacts = [
@@ -257,6 +269,7 @@ final class ChatStore: ObservableObject {
         return result.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// Keep system message + last N turns (each turn = 1 user + 1 assistant message).
     private func trimLLMHistory(_ llm: [LlamaChatMessage]) -> [LlamaChatMessage] {
         let maxMessages = 1 + (maxTurnsToKeep * 2)
         if llm.count <= maxMessages { return llm }
@@ -264,21 +277,30 @@ final class ChatStore: ObservableObject {
         return [llm[0]] + tail
     }
 
+    /// Auto-title a new conversation from the first user message.
     private func autoTitleIfNeeded(convoIndex: Int, userText: String) {
+        guard conversations[convoIndex].title == "New Chat" else { return }
         let userCount = conversations[convoIndex].messages.filter { $0.role == .user }.count
-        if conversations[convoIndex].title == "New Chat" && userCount == 1 {
-            let words = userText.split(separator: " ").prefix(5).map(String.init)
-            if !words.isEmpty {
-                conversations[convoIndex].title = words.joined(separator: " ")
-            }
+        guard userCount == 1 else { return }
+
+        // Use up to 7 words; cap at 45 characters so sidebar stays clean
+        let words = userText.split(separator: " ").prefix(7).map(String.init)
+        guard !words.isEmpty else { return }
+        var title = words.joined(separator: " ")
+        if title.count > 45 {
+            title = String(title.prefix(45)).trimmingCharacters(in: .whitespaces) + "…"
         }
+        // Capitalise first letter
+        conversations[convoIndex].title = title.prefix(1).uppercased() + title.dropFirst()
     }
+
+    // MARK: - Persistence
 
     private func loadFromDisk() {
         do {
-            let data = try Data(contentsOf: saveURL)
+            let data    = try Data(contentsOf: saveURL)
             let decoded = try JSONDecoder().decode([Conversation].self, from: data)
-            conversations = decoded.sorted(by: { $0.updatedAt > $1.updatedAt })
+            conversations = decoded.sorted { $0.updatedAt > $1.updatedAt }
         } catch {
             conversations = []
         }
@@ -286,11 +308,11 @@ final class ChatStore: ObservableObject {
 
     private func saveToDisk() {
         do {
-            let sorted = conversations.sorted(by: { $0.updatedAt > $1.updatedAt })
-            let data = try JSONEncoder().encode(sorted)
+            let sorted = conversations.sorted { $0.updatedAt > $1.updatedAt }
+            let data   = try JSONEncoder().encode(sorted)
             try data.write(to: saveURL, options: [.atomic])
         } catch {
-            // no-op
+            // no-op — non-fatal
         }
     }
 }
