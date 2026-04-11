@@ -7,9 +7,9 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		1C162F572F46B066005487FF /* SwiftLlama in Frameworks */ = {isa = PBXBuildFile; productRef = 1C162F562F46B066005487FF /* SwiftLlama */; };
 		1CBD7B9D2F89DA7E00F4D2C9 /* gemma-2-2b-it-Q4_K_M.gguf in Resources */ = {isa = PBXBuildFile; fileRef = 1CBD7B9C2F89DA7E00F4D2C9 /* gemma-2-2b-it-Q4_K_M.gguf */; };
-		1C162F582F46B066005487FF /* FluidAudio in Frameworks */ = {isa = PBXBuildFile; productRef = 1C162F5A2F46B066005487FF /* FluidAudio */; };
+		1CE31F7B2F8A127400F9EBE5 /* SwiftLlama in Frameworks */ = {isa = PBXBuildFile; productRef = 1CE31F7A2F8A127400F9EBE5 /* SwiftLlama */; };
+		1CE31F7E2F8A142700F9EBE5 /* FluidAudio in Frameworks */ = {isa = PBXBuildFile; productRef = 1CE31F7D2F8A142700F9EBE5 /* FluidAudio */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -44,8 +44,8 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				1C162F572F46B066005487FF /* SwiftLlama in Frameworks */,
-				1C162F582F46B066005487FF /* FluidAudio in Frameworks */,
+				1CE31F7B2F8A127400F9EBE5 /* SwiftLlama in Frameworks */,
+				1CE31F7E2F8A142700F9EBE5 /* FluidAudio in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -97,8 +97,8 @@
 			);
 			name = DominusApp;
 			packageProductDependencies = (
-				1C162F562F46B066005487FF /* SwiftLlama */,
-				1C162F5A2F46B066005487FF /* FluidAudio */,
+				1CE31F7A2F8A127400F9EBE5 /* SwiftLlama */,
+				1CE31F7D2F8A142700F9EBE5 /* FluidAudio */,
 			);
 			productName = DominusApp;
 			productReference = 1C162F3D2F46AE46005487FF /* DominusApp.app */;
@@ -129,8 +129,8 @@
 			mainGroup = 1C162F342F46AE45005487FF;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
-				1C162F552F46B066005487FF /* XCRemoteSwiftPackageReference "swift-llama-cpp" */,
-				1C162F592F46B066005487FF /* XCRemoteSwiftPackageReference "FluidAudio" */,
+				1CE31F792F8A127400F9EBE5 /* XCRemoteSwiftPackageReference "swift-llama-cpp" */,
+				1CE31F7C2F8A142700F9EBE5 /* XCRemoteSwiftPackageReference "FluidAudio" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 1C162F3E2F46AE46005487FF /* Products */;
@@ -381,7 +381,7 @@
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */
-		1C162F552F46B066005487FF /* XCRemoteSwiftPackageReference "swift-llama-cpp" */ = {
+		1CE31F792F8A127400F9EBE5 /* XCRemoteSwiftPackageReference "swift-llama-cpp" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/pgorzelany/swift-llama-cpp";
 			requirement = {
@@ -389,25 +389,25 @@
 				minimumVersion = 1.2.0;
 			};
 		};
-		1C162F592F46B066005487FF /* XCRemoteSwiftPackageReference "FluidAudio" */ = {
+		1CE31F7C2F8A142700F9EBE5 /* XCRemoteSwiftPackageReference "FluidAudio" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/FluidInference/FluidAudio";
 			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 0.13.6;
+				branch = main;
+				kind = branch;
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
-		1C162F562F46B066005487FF /* SwiftLlama */ = {
+		1CE31F7A2F8A127400F9EBE5 /* SwiftLlama */ = {
 			isa = XCSwiftPackageProductDependency;
-			package = 1C162F552F46B066005487FF /* XCRemoteSwiftPackageReference "swift-llama-cpp" */;
+			package = 1CE31F792F8A127400F9EBE5 /* XCRemoteSwiftPackageReference "swift-llama-cpp" */;
 			productName = SwiftLlama;
 		};
-		1C162F5A2F46B066005487FF /* FluidAudio */ = {
+		1CE31F7D2F8A142700F9EBE5 /* FluidAudio */ = {
 			isa = XCSwiftPackageProductDependency;
-			package = 1C162F592F46B066005487FF /* XCRemoteSwiftPackageReference "FluidAudio" */;
+			package = 1CE31F7C2F8A142700F9EBE5 /* XCRemoteSwiftPackageReference "FluidAudio" */;
 			productName = FluidAudio;
 		};
 /* End XCSwiftPackageProductDependency section */

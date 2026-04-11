@@ -1,33 +1,21 @@
 import AVFoundation
-import FluidAudio
 
 @MainActor
-final class SpeechManager: NSObject, AVAudioPlayerDelegate {
+final class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
 
     static let shared = SpeechManager()
 
-    private let tts = KokoroTtsManager(defaultVoice: "af_heart")
-    private var isInitialized = false
+    private let synth = AVSpeechSynthesizer()
     private var queue: [String] = []
-    private var isProcessing = false
-    private var currentTask: Task<Void, Never>?
-    private var audioPlayer: AVAudioPlayer?
+    private var isSpeakingChunk = false
+    private var preferredVoice: AVSpeechSynthesisVoice?
 
     var onAllSpeechFinished: (() -> Void)?
 
     override init() {
         super.init()
-        Task { await self.setupTTS() }
-    }
-
-    private func setupTTS() async {
-        do {
-            try await tts.initialize()
-            isInitialized = true
-            print("🎙 Kokoro TTS ready")
-        } catch {
-            print("🎙 Kokoro TTS init error:", error)
-        }
+        synth.delegate = self
+        preferredVoice = pickBestEnglishVoice()
     }
 
     func enqueue(_ text: String) {
@@ -39,62 +27,40 @@ final class SpeechManager: NSObject, AVAudioPlayerDelegate {
 
     func stopAndClear() {
         queue.removeAll()
-        isProcessing = false
-        currentTask?.cancel()
-        currentTask = nil
-        audioPlayer?.stop()
-        audioPlayer = nil
+        isSpeakingChunk = false
+        if synth.isSpeaking {
+            synth.stopSpeaking(at: .immediate)
+        }
     }
 
     private func startIfNeeded() {
-        guard !isProcessing, !queue.isEmpty else { return }
-        isProcessing = true
-        synthesizeAndPlay(queue.removeFirst())
+        guard !isSpeakingChunk else { return }
+        guard !queue.isEmpty else { return }
+        isSpeakingChunk = true
+        speakNext()
     }
 
-    private func synthesizeAndPlay(_ text: String) {
-        currentTask = Task {
-            do {
-                let session = AVAudioSession.sharedInstance()
-                try session.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
-                try session.setActive(true)
-
-                let wavData = try await tts.synthesize(text: text)
-                guard !Task.isCancelled else { return }
-
-                let player = try AVAudioPlayer(data: wavData)
-                player.delegate = self
-                self.audioPlayer = player
-                player.prepareToPlay()
-                player.play()
-            } catch {
-                guard !Task.isCancelled else { return }
-                print("🎙 Kokoro synthesis error:", error)
-                playNext()
-            }
-        }
-    }
-
-    private func playNext() {
+    private func speakNext() {
         guard !queue.isEmpty else {
-            isProcessing = false
+            isSpeakingChunk = false
             onAllSpeechFinished?()
             return
         }
-        synthesizeAndPlay(queue.removeFirst())
+
+        do {
+            let session = AVAudioSession.sharedInstance()
+            try session.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
+            try session.setActive(true)
+        } catch {
+            print("TTS audio session error:", error)
+        }
+
+        let chunk = queue.removeFirst()
+        let utt = AVSpeechUtterance(string: chunk)
+        utt.rate = AVSpeechUtteranceDefaultSpeechRate
+        utt.voice = preferredVoice ?? AVSpeechSynthesisVoice(language: "en-US")
+        synth.speak(utt)
     }
-
-    // MARK: - AVAudioPlayerDelegate
-
-    nonisolated func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
-        Task { @MainActor in self.playNext() }
-    }
-
-    nonisolated func audioPlayerDecodeErrorDidOccur(_ player: AVAudioPlayer, error: Error?) {
-        Task { @MainActor in self.playNext() }
-    }
-
-    // MARK: - Clean
 
     private func clean(_ text: String) -> String {
         var s = text.replacingOccurrences(of: "```", with: "")
@@ -108,5 +74,30 @@ final class SpeechManager: NSObject, AVAudioPlayerDelegate {
         .map(String.init)
         .joined()
         return s.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func pickBestEnglishVoice() -> AVSpeechSynthesisVoice? {
+        let english = AVSpeechSynthesisVoice.speechVoices().filter { $0.language.hasPrefix("en") }
+        guard let best = english.max(by: { $0.quality.rawValue < $1.quality.rawValue }) else {
+            print("🎙 No English voices found.")
+            return nil
+        }
+        print("🎙 Voice selected:", best.name, "|", best.language, "| quality:", best.quality.rawValue)
+        return best
+    }
+
+    // MARK: - Delegate
+
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
+        speakNext()
+    }
+
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
+        if !queue.isEmpty {
+            speakNext()
+        } else {
+            isSpeakingChunk = false
+            onAllSpeechFinished?()
+        }
     }
 }
