@@ -157,12 +157,21 @@ final class ChatStore: ObservableObject {
         autoTitleIfNeeded(convoIndex: convoIndex, userText: trimmed)
         saveToDisk()
 
+        // ── Auto-extract personal facts from user message ──────────────────
+        ProfileStore.shared.extractAndSave(from: trimmed)
+
         // ── Build LLM context ──────────────────────────────────────────────
-        // 1. Retrieve semantically relevant memories for this query
+        // 1. User profile — always injected first
+        let profileBlock = ProfileStore.shared.systemPromptBlock()
+
+        // 2. Retrieve semantically relevant memories for this query
         let memoryContext = MemoryRetriever.shared.retrieve(query: trimmed, topK: 5)
 
-        // 2. Compose system prompt (inject memory only when it exists)
+        // 3. Compose full system prompt
         var fullSystemPrompt = systemPrompt
+        if !profileBlock.isEmpty {
+            fullSystemPrompt += "\n\n\(profileBlock)"
+        }
         if !memoryContext.isEmpty {
             fullSystemPrompt += "\n\n\(memoryContext)"
         }
@@ -256,7 +265,10 @@ final class ChatStore: ObservableObject {
     private func cleanLlamaArtifacts(_ text: String) -> String {
         let artifacts = [
             "### Using cached processing",
+            "### Cached processing",
             "### Cached",
+            "<start_of_turn>model",
+            "<start_of_turn>user",
             "<start_of_turn>",
             "<end_of_turn>",
             "<bos>",
