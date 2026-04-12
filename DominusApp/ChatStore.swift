@@ -69,8 +69,8 @@ final class ChatStore: ObservableObject {
     private let engine = GemmaEngine()
 
     /// Core identity — kept intentionally short to conserve token budget.
-    private let systemPrompt = "You are Dominus — you think like Socrates. You never just answer; you question, challenge, and push the user deeper than they intended to go. You explore philosophy, religion, science, consciousness, and human nature fearlessly. You disagree when warranted, admit uncertainty honestly, and always finish your thought completely."
-
+    private let systemPrompt = "You are Dominus — a friendly but curious AI Assistant."
+    
     /// Keep only the last 4 turns (8 messages) of raw conversation in the prompt.
     /// Older context is covered by RAG memory retrieval instead.
     private let maxTurnsToKeep = 4
