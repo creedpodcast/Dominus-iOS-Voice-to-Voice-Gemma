@@ -66,6 +66,9 @@ final class ChatStore: ObservableObject {
         }
     }
 
+    /// Tracks the current generation so it can be cancelled instantly
+    private var generationTask: Task<Void, Never>?
+
     private let engine = GemmaEngine()
 
     /// Core identity — kept intentionally short to conserve token budget.
@@ -142,7 +145,18 @@ final class ChatStore: ObservableObject {
         saveToDisk()
     }
 
-    func send(_ userText: String) async {
+    /// Stops the current generation without sending anything new.
+    func stopGeneration() {
+        generationTask?.cancel()
+    }
+
+    /// Non-async entry point — cancels any in-progress generation instantly, then starts fresh.
+    func send(_ userText: String) {
+        generationTask?.cancel()
+        generationTask = Task { await _send(userText) }
+    }
+
+    private func _send(_ userText: String) async {
         loadModelIfNeeded()
         guard isLoaded else { return }
         guard let convoIndex = indexForSelectedConversation() else { return }
@@ -207,6 +221,9 @@ final class ChatStore: ObservableObject {
             }
 
             for try await token in stream {
+                // Exit immediately if a new message was sent
+                try Task.checkCancellation()
+
                 assistantText += token
 
                 let displayText = cleanLlamaArtifacts(assistantText)
@@ -250,9 +267,20 @@ final class ChatStore: ObservableObject {
             }
 
         } catch {
-            conversations[convoIndex].messages.append(
-                ChatMessage(role: .assistant, content: "Error: \(error.localizedDescription)")
-            )
+            // SwiftLlama throws LlamaError instead of CancellationError when the task
+            // is cancelled mid-stream — check Task.isCancelled to handle both cases
+            if Task.isCancelled || error is CancellationError {
+                // User interrupted — keep partial response, remove empty placeholder
+                if let idx = conversations[convoIndex].messages.indices.last,
+                   conversations[convoIndex].messages[idx].content.isEmpty {
+                    conversations[convoIndex].messages.removeLast()
+                }
+                SpeechManager.shared.stopAndClear()
+            } else {
+                conversations[convoIndex].messages.append(
+                    ChatMessage(role: .assistant, content: "Error: \(error.localizedDescription)")
+                )
+            }
             conversations[convoIndex].updatedAt = Date()
             saveToDisk()
         }

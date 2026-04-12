@@ -20,7 +20,6 @@
 		1C162F542F46AED5005487FF /* Exceptions for "DominusApp" folder in "DominusApp" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
-				"gemma-2-2b-it-Q4_K_M.gguf",
 				Info.plist,
 			);
 			target = 1C162F3C2F46AE46005487FF /* DominusApp */;

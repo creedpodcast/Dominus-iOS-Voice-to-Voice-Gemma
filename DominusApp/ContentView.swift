@@ -244,30 +244,33 @@ struct ContentView: View {
                     speech.transcript = ""
                     if !spoken.isEmpty {
                         micDidSend = true
-                        Task { await store.send(spoken) }
+                        store.send(spoken)
                     }
                 }
             }
 
             // Send button
             Button {
-                let current = prompt
-                prompt = ""
-                Task { await store.send(current) }
-            } label: {
-                if store.isGenerating {
-                    ProgressView().frame(width: 36)
+                if store.isGenerating && prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    // Nothing typed — just stop
+                    store.stopGeneration()
                 } else {
-                    Image(systemName: "arrow.up.circle.fill")
-                        .font(.system(size: 28))
-                        .foregroundColor(.blue)
+                    // Text ready — stop current and send new
+                    let current = prompt
+                    prompt = ""
+                    store.send(current)
                 }
+            } label: {
+                Image(systemName: store.isGenerating ? "stop.circle.fill" : "arrow.up.circle.fill")
+                    .font(.system(size: 28))
+                    .foregroundColor(store.isGenerating ? .orange : .blue)
             }
             .disabled(
-                store.isGenerating ||
-                store.isLoading    ||
-                !store.isLoaded    ||
-                prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                store.isLoading ||
+                !store.isLoaded ||
+                // Always tappable while generating (acts as stop button)
+                // Only disabled when idle with empty prompt
+                (!store.isGenerating && prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             )
         }
         .padding(.horizontal)
