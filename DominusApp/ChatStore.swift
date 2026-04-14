@@ -204,7 +204,7 @@ final class ChatStore: ObservableObject {
         llmMessages = trimLLMHistory(llmMessages)
 
         do {
-            let stream = try await engine.streamChat(llmMessages, temperature: 0.7, seed: 42)
+            let stream = try await engine.streamChat(llmMessages, temperature: 0.7, seed: UInt32.random(in: 1 ... UInt32.max))
 
             let placeholder = ChatMessage(role: .assistant, content: "")
             conversations[convoIndex].messages.append(placeholder)
@@ -323,6 +323,10 @@ final class ChatStore: ObservableObject {
         var result = text
         for artifact in artifacts {
             result = result.replacingOccurrences(of: artifact, with: "")
+        }
+        // Collapse multiple blank lines left behind by stripped tokens
+        while result.contains("\n\n\n") {
+            result = result.replacingOccurrences(of: "\n\n\n", with: "\n\n")
         }
         return result.trimmingCharacters(in: .whitespacesAndNewlines)
     }
