@@ -145,9 +145,10 @@ final class ChatStore: ObservableObject {
         saveToDisk()
     }
 
-    /// Stops the current generation without sending anything new.
+    /// Stops the current generation and any in-progress speech immediately.
     func stopGeneration() {
         generationTask?.cancel()
+        SpeechManager.shared.stopAndClear()
     }
 
     /// Non-async entry point — cancels any in-progress generation instantly, then starts fresh.
@@ -212,9 +213,9 @@ final class ChatStore: ObservableObject {
             let assistantID    = conversations[convoIndex].messages[assistantIndex].id
             let assistantTS    = conversations[convoIndex].messages[assistantIndex].timestamp
 
-            var assistantText = ""
-            var ttsBuffer     = ""
-            var lastEnqueuedAtCount = 0
+            var assistantText  = ""
+            var ttsBuffer      = ""
+            var didEnqueueTTS  = false   // tracks whether TTS was actually triggered
 
             if voiceEnabled {
                 SpeechManager.shared.stopAndClear()
@@ -236,21 +237,37 @@ final class ChatStore: ObservableObject {
 
                 if voiceEnabled {
                     ttsBuffer += token
-                    let hitSentenceEnd  = ttsBuffer.contains(".") || ttsBuffer.contains("?") || ttsBuffer.contains("!")
-                    let hitNewline      = ttsBuffer.contains("\n")
-                    let bufferLongEnough = ttsBuffer.count >= 80
-                    let hasNewContent   = assistantText.count - lastEnqueuedAtCount >= 25
 
-                    if hasNewContent && (hitSentenceEnd || hitNewline || bufferLongEnough) {
-                        SpeechManager.shared.enqueue(ttsBuffer)
-                        lastEnqueuedAtCount = assistantText.count
+                    // Speak at natural sentence boundaries only — sounds human, not robotic
+                    let sentenceEnded = ttsBuffer.last == "." || ttsBuffer.last == "?" || ttsBuffer.last == "!"
+                    // Safety fallback: flush if a very long clause has no punctuation
+                    let tooLong = ttsBuffer.count >= 200
+
+                    if sentenceEnded || tooLong {
+                        // Clean artifacts from TTS buffer before speaking
+                        let chunk = cleanLlamaArtifacts(ttsBuffer)
+                        if !chunk.isEmpty {
+                            SpeechManager.shared.enqueue(chunk)
+                            didEnqueueTTS = true
+                        }
                         ttsBuffer = ""
                     }
                 }
             }
 
             if voiceEnabled && !ttsBuffer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                SpeechManager.shared.enqueue(ttsBuffer)
+                let finalChunk = cleanLlamaArtifacts(ttsBuffer)
+                if !finalChunk.isEmpty {
+                    SpeechManager.shared.enqueue(finalChunk)
+                    didEnqueueTTS = true
+                }
+            }
+
+            // If nothing was enqueued (e.g. entire response was a llama artifact like
+            // "### Using cached processing"), onAllSpeechFinished will never fire.
+            // Notify the speech manager manually so STT restarts.
+            if voiceEnabled && !didEnqueueTTS {
+                SpeechManager.shared.onAllSpeechFinished?()
             }
 
             conversations[convoIndex].updatedAt = Date()
@@ -295,6 +312,7 @@ final class ChatStore: ObservableObject {
             "### Using cached processing",
             "### Cached processing",
             "### Cached",
+            "Using cached processing",
             "<start_of_turn>model",
             "<start_of_turn>user",
             "<start_of_turn>",

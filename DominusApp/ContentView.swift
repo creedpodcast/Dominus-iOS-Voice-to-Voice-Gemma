@@ -32,18 +32,13 @@ struct ContentView: View {
         .task {
             store.boot()
             store.loadModelIfNeeded()
-
-            SpeechManager.shared.onAllSpeechFinished = {
-                Task { @MainActor in
-                    await restartListeningIfNeeded(triggerVoiceFinished: true)
-                }
-            }
+            setupVoiceCallbacks()
         }
         .onChange(of: store.isGenerating) { generating in
-            if !generating {
-                Task { @MainActor in
-                    await restartListeningIfNeeded(triggerVoiceFinished: false)
-                }
+            guard sessionActive else { return }
+            if !generating && store.voiceEnabled {
+                // Generation done, TTS is starting — arm VAD for voice interrupt
+                speech.monitorForVAD = true
             }
         }
         // Rename alert — uses a TextField so the user can edit inline
@@ -61,21 +56,65 @@ struct ContentView: View {
 
     // MARK: - Restart listening
 
-    @MainActor
-    private func restartListeningIfNeeded(triggerVoiceFinished: Bool) async {
-        guard sessionActive              else { return }
-        guard !speech.isListening        else { return }
-        guard store.isLoaded && !store.isLoading else { return }
+    private func setupVoiceCallbacks() {
 
-        if store.voiceEnabled {
-            guard triggerVoiceFinished  else { return }
-        } else {
-            guard !triggerVoiceFinished else { return }
+        // STT ended — either send what was captured, or switch to VAD and wait
+        speech.onSTTEnded = {
+            Task { @MainActor in
+                guard self.sessionActive else { return }
+                guard !self.store.isGenerating, !SpeechManager.shared.isSpeaking else { return }
+
+                let spoken = self.speech.transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+                self.speech.transcript = ""
+
+                if !spoken.isEmpty && !self.micDidSend {
+                    // User said something — send it
+                    self.micDidSend = true
+                    self.store.send(spoken)
+                    // STT restarts after AI finishes speaking via onAllSpeechFinished
+                } else {
+                    // Nothing said — don't restart STT in a loop
+                    // Switch to VAD and wait for the user to actually start talking
+                    self.speech.monitorForVAD = true
+                    print("👂 Waiting for voice via VAD...")
+                }
+            }
         }
 
-        micDidSend = false
-        SpeechManager.shared.stopAndClear()
-        try? speech.startListening()
+        // AI finished speaking → start STT directly (user is likely ready to respond)
+        SpeechManager.shared.onAllSpeechFinished = {
+            Task { @MainActor in
+                guard self.sessionActive else { return }
+                self.speech.monitorForVAD = false
+                self.micDidSend = false
+                self.speech.transcript = ""
+                try? self.speech.startListening()
+                print("🔁 TTS done — STT started")
+            }
+        }
+
+        // VAD detected voice — works for both:
+        // • Interrupting AI while it's speaking
+        // • Starting STT after idle timeout
+        speech.onVoiceActivityDetected = {
+            Task { @MainActor in
+                guard self.sessionActive else { return }
+
+                // Stop AI if active
+                if SpeechManager.shared.isSpeaking || self.store.isGenerating {
+                    print("🎤 VAD: interrupting AI")
+                    SpeechManager.shared.stopAndClear()
+                    self.store.stopGeneration()
+                }
+
+                // Start capturing what the user is saying
+                self.speech.monitorForVAD = false
+                self.micDidSend = false
+                self.speech.transcript = ""
+                try? self.speech.startListening()
+                print("🎤 VAD: STT started")
+            }
+        }
     }
 
     // MARK: - Root layout
@@ -220,15 +259,16 @@ struct ContentView: View {
             // Mic button — tap once to start session, tap again to stop
             Button {
                 if !sessionActive {
-                    sessionActive = true
-                    micDidSend    = false
+                    sessionActive            = true
+                    micDidSend               = false
                     speech.autoStopOnSilence = true
                     SpeechManager.shared.stopAndClear()
                     try? speech.startListening()
                 } else {
-                    sessionActive = false
+                    sessionActive        = false
+                    speech.monitorForVAD = false
                     SpeechManager.shared.stopAndClear()
-                    if speech.isListening { speech.stopListening() }
+                    speech.tearDownVoiceSession()
                 }
             } label: {
                 Image(systemName: sessionActive ? "stop.circle.fill" : "mic")
@@ -237,17 +277,6 @@ struct ContentView: View {
                     .padding(6)
             }
             .disabled(store.isLoading || !store.isLoaded)
-            // Auto-send when silence timer fires and stopListening() is called
-            .onChange(of: speech.isListening) { listening in
-                if !listening && sessionActive && !micDidSend {
-                    let spoken = speech.transcript.trimmingCharacters(in: .whitespacesAndNewlines)
-                    speech.transcript = ""
-                    if !spoken.isEmpty {
-                        micDidSend = true
-                        store.send(spoken)
-                    }
-                }
-            }
 
             // Send button
             Button {
