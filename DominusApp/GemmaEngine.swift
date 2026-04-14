@@ -101,13 +101,31 @@ final class GemmaEngine: ObservableObject {
             )
         )
 
-        return try await freshLlama.streamCompletion(
+        let innerStream = try await freshLlama.streamCompletion(
             of: messages,
             samplingConfig: .init(
                 temperature: temperature,
                 seed: seed
             )
         )
+
+        // Wrap in a new stream that explicitly captures freshLlama, preventing ARC from
+        // deallocating the LlamaService the moment streamChat() returns its value.
+        // Without this, freshLlama goes out of scope at the return site and is immediately
+        // freed — causing "ggml_metal_free: deallocating" mid-generation and zero tokens.
+        return AsyncThrowingStream { continuation in
+            Task { [freshLlama] in
+                do {
+                    for try await token in innerStream {
+                        continuation.yield(token)
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+                _ = freshLlama  // keep strong ref alive until stream is fully exhausted
+            }
+        }
     }
 
     private func startStagedProgress() {

@@ -74,9 +74,10 @@ final class ChatStore: ObservableObject {
     /// Core identity — kept intentionally short to conserve token budget.
     private let systemPrompt = "You are Dominus — a friendly but curious AI Assistant."
     
-    /// Keep only the last 4 turns (8 messages) of raw conversation in the prompt.
-    /// Older context is covered by RAG memory retrieval instead.
-    private let maxTurnsToKeep = 4
+    /// Keep only the last 1 turn (2 messages) of raw conversation in the prompt.
+    /// This keeps the prompt structure clean and prevents Gemma chat-template
+    /// corruption from long histories. Older context is covered by RAG retrieval.
+    private let maxTurnsToKeep = 1
 
     private var saveURL: URL {
         FileManager.default
