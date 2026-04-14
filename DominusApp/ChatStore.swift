@@ -332,10 +332,17 @@ final class ChatStore: ObservableObject {
     }
 
     /// Keep system message + last N turns (each turn = 1 user + 1 assistant message).
+    /// IMPORTANT: The tail must always start with a user message.
+    /// SwiftLlama merges the system message into the first user turn for Gemma's chat
+    /// template. If the tail starts with an assistant message, the system prompt lands
+    /// in the wrong place and the prompt begins with <start_of_turn>model — which causes
+    /// Gemma to immediately predict <end_of_turn> and generate nothing.
     private func trimLLMHistory(_ llm: [LlamaChatMessage]) -> [LlamaChatMessage] {
         let maxMessages = 1 + (maxTurnsToKeep * 2)
         if llm.count <= maxMessages { return llm }
-        let tail = llm.suffix(maxMessages - 1)
+        var tail = Array(llm.suffix(maxMessages - 1))
+        // Drop any leading assistant messages so the tail always starts user → assistant
+        while tail.first?.role == .assistant { tail.removeFirst() }
         return [llm[0]] + tail
     }
 
