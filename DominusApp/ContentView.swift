@@ -313,20 +313,19 @@ struct ContentView: View {
                 Button {
                     handlePTTTap()
                 } label: {
-                    Image(systemName: pttIcon)
-                        .font(.system(size: 20))
-                        .foregroundColor(pttColor)
-                        .padding(6)
-                        // Pulse ring when listening to signal recording is active
-                        .overlay(
-                            Group {
-                                if pttState == .listening {
-                                    Circle()
-                                        .stroke(Color.red.opacity(0.35), lineWidth: 2)
-                                        .padding(-4)
-                                }
-                            }
-                        )
+                    ZStack {
+                        // Pulse ring — sits behind the icon, explicitly sized so it's visible
+                        if pttState == .listening {
+                            Circle()
+                                .stroke(Color.red.opacity(0.5), lineWidth: 2)
+                                .frame(width: 46, height: 46)
+                        }
+                        Image(systemName: pttIcon)
+                            .font(.system(size: 22))
+                            .foregroundColor(pttColor)
+                            .frame(width: 32, height: 32)
+                    }
+                    .frame(width: 46, height: 46)
                 }
                 .disabled(store.isLoading || !store.isLoaded)
 
