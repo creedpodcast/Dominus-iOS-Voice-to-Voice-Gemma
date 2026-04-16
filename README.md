@@ -1,22 +1,32 @@
-# Dominus — On-Device iOS Voice-to-Voice AI
+# Dominus — On-Device iOS AI Assistant
 
-Dominus is a fully local, privacy-first AI chat app for iPhone. No internet connection required. No data leaves your device. The model runs entirely on-device using llama.cpp.
-
----
-
-## What it does
-
-- **Voice-to-voice conversation** — speak to Dominus, it responds out loud
-- **Text chat** — full keyboard input with streaming token-by-token responses
-- **Long-term memory** — remembers past conversations using on-device semantic search
-- **Multiple chat sessions** — create, rename, and delete conversation threads
-- **Fully offline** — model inference, speech recognition, and text-to-speech all run locally
+Dominus is a fully local, privacy-first AI assistant for iPhone. No internet connection required. No data leaves your device. Everything — model inference, speech recognition, text-to-speech, and memory — runs entirely on-device.
 
 ---
 
-## How it thinks
+## Current State (Foundation Build)
 
-Dominus is prompted to think like Socrates. It never just answers — it questions, challenges, and pushes the conversation deeper. It explores philosophy, religion, science, consciousness, and human nature without restriction. It disagrees when warranted and admits uncertainty honestly.
+This branch represents the stable foundation of the project. Text chat with long-term memory and user profile is fully working. Voice mode is next to be rebuilt using industry-standard architecture.
+
+### Working
+- Text chat with Gemma 2B (streaming, token-by-token)
+- RAG long-term memory (semantic search + keyword fallback)
+- User profile with auto-extraction ("my name is X" → stored as fact)
+- Multiple conversation threads (create, rename, delete, switch)
+- Generation interrupt (send new message cancels current response)
+- Stop button (cancel generation without sending)
+- Llama artifact filtering (strips template tokens from output)
+
+### Planned (to be built on feature branches)
+- [ ] Hands-free voice-to-voice conversation mode
+- [ ] VAD (Voice Activity Detection) for barge-in / interrupting AI mid-sentence
+- [ ] Echo cancellation via unified audio session
+- [ ] Pre-roll audio buffer for syllable-safe STT handoff
+- [ ] Persistent LlamaService (fix Metal memory churn)
+- [ ] Context window increase (2048 → 4096)
+- [ ] Memory retrieval clamping (prevent context overflow)
+- [ ] WhisperKit for more accurate on-device STT
+- [ ] Silero VAD for smarter silence detection
 
 ---
 
@@ -25,93 +35,74 @@ Dominus is prompted to think like Socrates. It never just answers — it questio
 ### Model
 | Component | Details |
 |---|---|
-| LLM | Gemma 2B IT Q4_K_M (GGUF) |
+| LLM | Gemma 2 2B IT Q4_K_M (GGUF) |
 | Inference engine | [SwiftLlama](https://github.com/pgorzelany/swift-llama-cpp) v1.2.0 (llama.cpp wrapper) |
-| Context window | 2048 tokens |
+| Context window | 2048 tokens (to be increased to 4096) |
 | Batch size | 512 |
 | GPU acceleration | Metal (on-device) |
 
-### Voice
+### Voice (basic — rebuild planned)
 | Component | Details |
 |---|---|
 | Speech-to-Text | `SFSpeechRecognizer` + `AVAudioEngine` (Apple, on-device) |
 | Text-to-Speech | `AVSpeechSynthesizer` (Apple, on-device, best available English voice) |
-| Silence detection | Auto-stop after 0.9s of no new transcript — triggers send |
-| Streaming TTS | Response is spoken in chunks as tokens arrive, not after full generation |
+| Silence detection | Auto-stop after 0.9s of no new transcript |
+| Streaming TTS | Response spoken in chunks as tokens arrive |
 
 ### Memory (RAG)
 | Component | Details |
 |---|---|
 | Vector embeddings | `NLEmbedding.sentenceEmbedding` — Apple built-in 512-dim model |
 | Similarity | vDSP cosine similarity (hardware-accelerated via Accelerate framework) |
-| Storage | SQLite3 (system-provided `libsqlite3`, no third-party dependency) |
+| Storage | SwiftData (on-device persistence) |
 | Retrieval | Top-5 semantically relevant past exchanges injected into system prompt |
-| Raw history | Last 4 turns kept in context (down from 12) — older turns live in RAG |
+| Raw history | Last 4 turns kept in context — older turns covered by RAG |
 
-### Token budget per generation (approximate)
-```
-System prompt       ~20 tokens
-RAG memory context  ~350 tokens  (5 retrieved exchanges)
-Raw recent turns    ~400 tokens  (4 turns)
-Response headroom   ~1,024 tokens
-─────────────────────────────────
-Total               ~1,794 / 2,048 tokens
-```
+### User Profile
+| Component | Details |
+|---|---|
+| Auto-extraction | Pattern matching on user messages ("my name is X", "I live in Y", etc.) |
+| Storage | SwiftData (`ProfileFact` entity) |
+| Injection | All known facts prepended to every system prompt |
 
 ---
 
-## App structure
+## App Structure
 
 ```
 DominusApp/
-├── DominusAppApp.swift          Entry point
-├── ContentView.swift            UI — sidebar, chat view, input bar
-├── ChatStore.swift              State manager — conversations, send(), RAG wiring
-├── GemmaEngine.swift            LLM engine — model loading, streaming generation
-├── SpeechManager.swift          TTS — AVSpeechSynthesizer queue
-├── SpeechRecognitionManager.swift  STT — AVAudioEngine + SFSpeechRecognizer
-├── LoadingView.swift            Model loading progress overlay
-└── Memory/
-    ├── MemoryEmbedder.swift     NLEmbedding vectorisation + vDSP cosine similarity
-    ├── MemoryStore.swift        SQLite3 persistence layer
-    └── MemoryRetriever.swift    remember() + retrieve() public interface
+├── DominusAppApp.swift              Entry point
+├── ContentView.swift                UI — sidebar, chat view, input bar
+├── ChatStore.swift                  State — conversations, send(), RAG + profile wiring
+├── GemmaEngine.swift                LLM — model loading, streaming generation
+├── SpeechManager.swift              TTS — AVSpeechSynthesizer queue
+├── SpeechRecognitionManager.swift   STT — AVAudioEngine + SFSpeechRecognizer
+├── LoadingView.swift                Model loading progress overlay
+├── Memory/
+│   ├── MemoryEmbedder.swift         NLEmbedding vectorisation + cosine similarity
+│   ├── MemoryStore.swift            SwiftData persistence layer
+│   └── MemoryRetriever.swift        remember() + retrieve() public interface
+└── Profile/
+    ├── ProfileStore.swift           Fact extraction, storage, and system prompt injection
+    └── UserProfile.swift            SwiftData ProfileFact entity
 ```
 
 ---
 
-## UI features
-
-- **Swipe left** on a chat → Delete
-- **Swipe right** on a chat → Rename
-- **Long-press** any chat → context menu (Rename / Delete)
-- Chat title auto-generated from first user message (up to 7 words)
-- Voice / Text toggle in the detail header
-- New Chat button in the sidebar toolbar
-
----
-
-## Device requirements
+## Device Requirements
 
 | Requirement | Details |
 |---|---|
 | Device | iPhone 13 Pro Max or newer recommended |
-| RAM | 6 GB unified memory (model uses ~1.4 GB) |
+| RAM | 6 GB unified memory (model uses ~1.5 GB + KV cache) |
 | iOS | 17.0+ |
 | Storage | ~1.5 GB for model file |
 
 ---
 
-## Known constraints
+## Known Issues (to be fixed)
 
-- **TTS quality** — currently uses `AVSpeechSynthesizer`. A neural TTS model (e.g. Kokoro-82M) would sound more natural but requires ~1.6 GB additional RAM, which exceeds safe limits on a 6 GB device when combined with the LLM.
-- **Context cutoffs** — partially mitigated by RAG + reduced raw history. Full fix requires a model with a larger native context window.
-- **Cold start** — model takes ~10–15 seconds to load on first launch.
-
----
-
-## Planned
-
-- [ ] Upgrade to Gemma 3n E2B Q4_K_M (~3.4 GB, better quality, same device)
-- [ ] WhisperKit for more accurate on-device STT
-- [ ] Silero VAD for smarter silence detection
-- [ ] User profile / persistent facts injected into system prompt
+- **Fresh LlamaService per generation** — creates a new llama.cpp context every turn, churning Metal GPU memory. Causes crashes after ~10 turns. Fix: use persistent LlamaService.
+- **Context window too small** — 2048 tokens overflows when system prompt + profile + memories + history exceed ceiling. Fix: increase to 4096.
+- **Memory retrieval unclamped** — top-5 full exchanges with no character limit can push 1000+ tokens into system prompt. Fix: clamp to top-3 at 400 chars each.
+- **Voice mode primitive** — no hands-free loop, no VAD, no echo cancellation. Needs full rebuild.
