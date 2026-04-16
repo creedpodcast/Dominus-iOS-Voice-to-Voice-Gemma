@@ -1,5 +1,13 @@
 import SwiftUI
 
+// MARK: - PTT State
+
+private enum PTTState {
+    case idle       // ready — tap to speak
+    case listening  // recording user speech — tap when done
+    case aiTalking  // AI generating / speaking — tap to interrupt
+}
+
 struct ContentView: View {
 
     @StateObject private var store  = ChatStore()
@@ -12,9 +20,8 @@ struct ContentView: View {
     @State private var renameConvoID: UUID?
     @State private var renameText: String = ""
 
-    // Voice session state
-    @State private var micDidSend: Bool    = false
-    @State private var sessionActive: Bool = false
+    // Push-to-talk state
+    @State private var pttState: PTTState = .idle
 
     var body: some View {
         ZStack {
@@ -34,14 +41,15 @@ struct ContentView: View {
             store.loadModelIfNeeded()
             setupVoiceCallbacks()
         }
+        // When generation ends, check if we can return to idle
         .onChange(of: store.isGenerating) { generating in
-            guard sessionActive else { return }
-            if !generating && store.voiceEnabled {
-                // Generation done, TTS is starting — arm VAD for voice interrupt
-                speech.monitorForVAD = true
+            guard pttState == .aiTalking else { return }
+            if !generating && !SpeechManager.shared.isSpeaking {
+                // Both generation and speech finished — ready for next turn
+                returnToIdle()
             }
         }
-        // Rename alert — uses a TextField so the user can edit inline
+        // Rename alert
         .alert("Rename Chat", isPresented: $showingRenameAlert) {
             TextField("Chat title", text: $renameText)
                 .autocorrectionDisabled()
@@ -54,66 +62,96 @@ struct ContentView: View {
         }
     }
 
-    // MARK: - Restart listening
+    // MARK: - Voice callbacks (PTT)
 
     private func setupVoiceCallbacks() {
 
-        // STT ended — either send what was captured, or switch to VAD and wait
+        // STT ended unexpectedly (error / OS timeout after ~1 min) while user was recording
         speech.onSTTEnded = {
             Task { @MainActor in
-                guard self.sessionActive else { return }
-                guard !self.store.isGenerating, !SpeechManager.shared.isSpeaking else { return }
-
-                let spoken = self.speech.transcript.trimmingCharacters(in: .whitespacesAndNewlines)
-                self.speech.transcript = ""
-
-                if !spoken.isEmpty && !self.micDidSend {
-                    // User said something — send it
-                    self.micDidSend = true
-                    self.store.send(spoken)
-                    // STT restarts after AI finishes speaking via onAllSpeechFinished
-                } else {
-                    // Nothing said — don't restart STT in a loop
-                    // Switch to VAD and wait for the user to actually start talking
-                    self.speech.monitorForVAD = true
-                    print("👂 Waiting for voice via VAD...")
-                }
+                guard self.pttState == .listening else { return }
+                // Nothing to send — cancel back to idle
+                self.returnToIdle()
             }
         }
 
-        // AI finished speaking → start STT directly (user is likely ready to respond)
+        // AI finished speaking — if generation is also done, return to idle
         SpeechManager.shared.onAllSpeechFinished = {
             Task { @MainActor in
-                guard self.sessionActive else { return }
-                self.speech.monitorForVAD = false
-                self.micDidSend = false
-                self.speech.transcript = ""
-                try? self.speech.startListening()
-                print("🔁 TTS done — STT started")
+                guard self.pttState == .aiTalking else { return }
+                if !self.store.isGenerating {
+                    self.returnToIdle()
+                }
+                // If still generating, more TTS chunks will arrive — stay in aiTalking
             }
         }
+    }
 
-        // VAD detected voice — works for both:
-        // • Interrupting AI while it's speaking
-        // • Starting STT after idle timeout
-        speech.onVoiceActivityDetected = {
-            Task { @MainActor in
-                guard self.sessionActive else { return }
+    // MARK: - PTT button logic
 
-                // Stop AI if active
-                if SpeechManager.shared.isSpeaking || self.store.isGenerating {
-                    print("🎤 VAD: interrupting AI")
-                    SpeechManager.shared.stopAndClear()
-                    self.store.stopGeneration()
-                }
+    private func handlePTTTap() {
+        switch pttState {
 
-                // Start capturing what the user is saying
-                self.speech.monitorForVAD = false
-                self.micDidSend = false
-                self.speech.transcript = ""
-                try? self.speech.startListening()
-                print("🎤 VAD: STT started")
+        case .idle:
+            // ── Start recording ──────────────────────────────────────────
+            speech.autoStopOnSilence = false   // user taps to stop, not silence timer
+            SpeechManager.shared.stopAndClear()
+            try? speech.startListening()
+            pttState = .listening
+
+        case .listening:
+            // ── User done speaking — stop and send ───────────────────────
+            speech.stopListening()
+            let spoken = speech.transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+            speech.transcript = ""
+            guard !spoken.isEmpty else {
+                // Nothing was captured — cancel
+                returnToIdle()
+                return
             }
+            store.send(spoken)
+            pttState = .aiTalking
+
+        case .aiTalking:
+            // ── Interrupt AI — stop generation + TTS, start listening ────
+            SpeechManager.shared.stopAndClear()
+            store.stopGeneration()
+            speech.transcript = ""
+            speech.autoStopOnSilence = false
+            try? speech.startListening()
+            pttState = .listening
+        }
+    }
+
+    /// Tears down the audio session and returns button to idle.
+    private func returnToIdle() {
+        speech.tearDownVoiceSession()
+        pttState = .idle
+    }
+
+    // MARK: - PTT button appearance
+
+    private var pttIcon: String {
+        switch pttState {
+        case .idle:      return "mic"
+        case .listening: return "stop.circle.fill"
+        case .aiTalking: return "mic.fill"
+        }
+    }
+
+    private var pttColor: Color {
+        switch pttState {
+        case .idle:      return .blue
+        case .listening: return .red
+        case .aiTalking: return .green
+        }
+    }
+
+    private var pttLabel: String {
+        switch pttState {
+        case .idle:      return "Tap to speak"
+        case .listening: return "Tap when done"
+        case .aiTalking: return "Tap to interrupt"
         }
     }
 
@@ -164,7 +202,6 @@ struct ContentView: View {
                 .foregroundStyle(.secondary)
         }
         .tag(convo.id)
-        // ── Trailing swipe: Delete ──────────────────────────────────────
         .swipeActions(edge: .trailing, allowsFullSwipe: true) {
             Button(role: .destructive) {
                 store.deleteConversation(convo)
@@ -172,7 +209,6 @@ struct ContentView: View {
                 Label("Delete", systemImage: "trash")
             }
         }
-        // ── Leading swipe: Rename ───────────────────────────────────────
         .swipeActions(edge: .leading, allowsFullSwipe: false) {
             Button {
                 beginRename(convo)
@@ -181,7 +217,6 @@ struct ContentView: View {
             }
             .tint(.blue)
         }
-        // ── Long-press context menu ─────────────────────────────────────
         .contextMenu {
             Button {
                 beginRename(convo)
@@ -252,58 +287,74 @@ struct ContentView: View {
     // MARK: - Input bar
 
     private var inputBar: some View {
-        HStack(spacing: 8) {
-            TextField("Type a message…", text: $prompt)
-                .textFieldStyle(.roundedBorder)
-
-            // Mic button — tap once to start session, tap again to stop
-            Button {
-                if !sessionActive {
-                    sessionActive            = true
-                    micDidSend               = false
-                    speech.autoStopOnSilence = true
-                    SpeechManager.shared.stopAndClear()
-                    try? speech.startListening()
-                } else {
-                    sessionActive        = false
-                    speech.monitorForVAD = false
-                    SpeechManager.shared.stopAndClear()
-                    speech.tearDownVoiceSession()
-                }
-            } label: {
-                Image(systemName: sessionActive ? "stop.circle.fill" : "mic")
-                    .font(.system(size: 20))
-                    .foregroundColor(sessionActive ? .orange : .blue)
-                    .padding(6)
+        VStack(spacing: 0) {
+            // PTT hint label — visible only during active voice turns
+            if pttState != .idle {
+                Text(pttLabel)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.top, 6)
             }
-            .disabled(store.isLoading || !store.isLoaded)
 
-            // Send button
-            Button {
-                if store.isGenerating && prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    // Nothing typed — just stop
-                    store.stopGeneration()
+            HStack(spacing: 8) {
+
+                // Text field — shows live STT transcript while listening
+                if pttState == .listening {
+                    TextField("Listening…", text: $speech.transcript)
+                        .textFieldStyle(.roundedBorder)
+                        .disabled(true)
+                        .foregroundColor(.primary)
                 } else {
-                    // Text ready — stop current and send new
-                    let current = prompt
-                    prompt = ""
-                    store.send(current)
+                    TextField("Type a message…", text: $prompt)
+                        .textFieldStyle(.roundedBorder)
                 }
-            } label: {
-                Image(systemName: store.isGenerating ? "stop.circle.fill" : "arrow.up.circle.fill")
-                    .font(.system(size: 28))
-                    .foregroundColor(store.isGenerating ? .orange : .blue)
+
+                // PTT button
+                Button {
+                    handlePTTTap()
+                } label: {
+                    Image(systemName: pttIcon)
+                        .font(.system(size: 20))
+                        .foregroundColor(pttColor)
+                        .padding(6)
+                        // Pulse ring when listening to signal recording is active
+                        .overlay(
+                            Group {
+                                if pttState == .listening {
+                                    Circle()
+                                        .stroke(Color.red.opacity(0.35), lineWidth: 2)
+                                        .padding(-4)
+                                }
+                            }
+                        )
+                }
+                .disabled(store.isLoading || !store.isLoaded)
+
+                // Send / stop button (text mode only — hidden during PTT session)
+                if pttState == .idle {
+                    Button {
+                        if store.isGenerating && prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            store.stopGeneration()
+                        } else {
+                            let current = prompt
+                            prompt = ""
+                            store.send(current)
+                        }
+                    } label: {
+                        Image(systemName: store.isGenerating ? "stop.circle.fill" : "arrow.up.circle.fill")
+                            .font(.system(size: 28))
+                            .foregroundColor(store.isGenerating ? .orange : .blue)
+                    }
+                    .disabled(
+                        store.isLoading ||
+                        !store.isLoaded ||
+                        (!store.isGenerating && prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    )
+                }
             }
-            .disabled(
-                store.isLoading ||
-                !store.isLoaded ||
-                // Always tappable while generating (acts as stop button)
-                // Only disabled when idle with empty prompt
-                (!store.isGenerating && prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            )
+            .padding(.horizontal)
+            .padding(.vertical, 10)
         }
-        .padding(.horizontal)
-        .padding(.vertical, 10)
     }
 }
 
