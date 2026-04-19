@@ -1,5 +1,13 @@
 import SwiftUI
 
+// MARK: - PTT State
+
+private enum PTTState {
+    case idle       // ready — tap to speak
+    case listening  // recording user speech — tap when done
+    case aiTalking  // AI generating / speaking — tap to interrupt
+}
+
 struct ContentView: View {
 
     @StateObject private var store  = ChatStore()
@@ -12,9 +20,15 @@ struct ContentView: View {
     @State private var renameConvoID: UUID?
     @State private var renameText: String = ""
 
-    // Voice session state
-    @State private var micDidSend: Bool    = false
-    @State private var sessionActive: Bool = false
+    // Push-to-talk state
+    @State private var pttState: PTTState = .idle
+
+    // Pulse animation for the recording ring
+    @State private var pulseScale: CGFloat = 1.0
+    @State private var pulseOpacity: Double = 0.6
+
+    // Remember whether voice was on before PTT so we can restore it
+    @State private var voiceWasEnabled: Bool = false
 
     var body: some View {
         ZStack {
@@ -32,21 +46,16 @@ struct ContentView: View {
         .task {
             store.boot()
             store.loadModelIfNeeded()
-
-            SpeechManager.shared.onAllSpeechFinished = {
-                Task { @MainActor in
-                    await restartListeningIfNeeded(triggerVoiceFinished: true)
-                }
-            }
+            setupVoiceCallbacks()
         }
+        // When generation ends, check if we can return to idle
         .onChange(of: store.isGenerating) { generating in
-            if !generating {
-                Task { @MainActor in
-                    await restartListeningIfNeeded(triggerVoiceFinished: false)
-                }
+            guard pttState == .aiTalking else { return }
+            if !generating && !SpeechManager.shared.isSpeaking {
+                returnToIdle()
             }
         }
-        // Rename alert — uses a TextField so the user can edit inline
+        // Rename alert
         .alert("Rename Chat", isPresented: $showingRenameAlert) {
             TextField("Chat title", text: $renameText)
                 .autocorrectionDisabled()
@@ -59,23 +68,122 @@ struct ContentView: View {
         }
     }
 
-    // MARK: - Restart listening
+    // MARK: - Voice callbacks
 
-    @MainActor
-    private func restartListeningIfNeeded(triggerVoiceFinished: Bool) async {
-        guard sessionActive              else { return }
-        guard !speech.isListening        else { return }
-        guard store.isLoaded && !store.isLoading else { return }
+    private func setupVoiceCallbacks() {
 
-        if store.voiceEnabled {
-            guard triggerVoiceFinished  else { return }
-        } else {
-            guard !triggerVoiceFinished else { return }
+        // STT ended unexpectedly (error / OS 1-min timeout) — reset
+        speech.onSTTEnded = {
+            Task { @MainActor in
+                guard self.pttState == .listening else { return }
+                self.returnToIdle()
+            }
         }
 
-        micDidSend = false
-        SpeechManager.shared.stopAndClear()
-        try? speech.startListening()
+        // AI finished speaking — if generation is also done, return to idle
+        SpeechManager.shared.onAllSpeechFinished = {
+            Task { @MainActor in
+                guard self.pttState == .aiTalking else { return }
+                if !self.store.isGenerating {
+                    self.returnToIdle()
+                }
+            }
+        }
+    }
+
+    // MARK: - PTT button handler
+
+    private func handlePTTTap() {
+        switch pttState {
+
+        case .idle:
+            // Save voice state and force it ON so AI always speaks back
+            voiceWasEnabled      = store.voiceEnabled
+            store.voiceEnabled   = true
+            // Start recording — no auto-silence, user taps to stop
+            speech.autoStopOnSilence = false
+            SpeechManager.shared.stopAndClear()
+            try? speech.startListening()
+            startPulse()
+            pttState = .listening
+
+        case .listening:
+            // User done — stop recording and send
+            stopPulse()
+            speech.stopListening()
+            let spoken = speech.transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+            speech.transcript = ""
+            guard !spoken.isEmpty else {
+                returnToIdle()
+                return
+            }
+            store.send(spoken)
+            pttState = .aiTalking
+
+        case .aiTalking:
+            // Interrupt AI immediately — stop both generation and voice
+            SpeechManager.shared.stopAndClear()
+            store.stopGeneration()
+            speech.transcript = ""
+            speech.autoStopOnSilence = false
+            try? speech.startListening()
+            startPulse()
+            pttState = .listening
+        }
+    }
+
+    private func returnToIdle() {
+        stopPulse()
+        speech.tearDownVoiceSession()
+        store.voiceEnabled = voiceWasEnabled   // restore previous voice preference
+        pttState = .idle
+    }
+
+    // MARK: - Pulse animation
+
+    private func startPulse() {
+        pulseScale   = 1.0
+        pulseOpacity = 0.7
+        withAnimation(
+            .easeInOut(duration: 0.75)
+            .repeatForever(autoreverses: true)
+        ) {
+            pulseScale   = 1.55
+            pulseOpacity = 0.0
+        }
+    }
+
+    private func stopPulse() {
+        withAnimation(.easeOut(duration: 0.15)) {
+            pulseScale   = 1.0
+            pulseOpacity = 0.0
+        }
+    }
+
+    // MARK: - PTT button appearance
+
+    private var pttIcon: String {
+        switch pttState {
+        case .idle:      return "mic"
+        case .listening: return "waveform"
+        case .aiTalking: return "mic.fill"
+        }
+    }
+
+    private var pttColor: Color {
+        switch pttState {
+        case .idle:      return .blue
+        case .listening: return .red
+        case .aiTalking: return .green
+        }
+    }
+
+    private var pttLabel: String {
+        switch pttState {
+        case .idle:      return ""
+        case .listening: return "Listening… tap when done"
+        case .aiTalking: return "Tap to interrupt"
+        }
     }
 
     // MARK: - Root layout
@@ -125,7 +233,6 @@ struct ContentView: View {
                 .foregroundStyle(.secondary)
         }
         .tag(convo.id)
-        // ── Trailing swipe: Delete ──────────────────────────────────────
         .swipeActions(edge: .trailing, allowsFullSwipe: true) {
             Button(role: .destructive) {
                 store.deleteConversation(convo)
@@ -133,7 +240,6 @@ struct ContentView: View {
                 Label("Delete", systemImage: "trash")
             }
         }
-        // ── Leading swipe: Rename ───────────────────────────────────────
         .swipeActions(edge: .leading, allowsFullSwipe: false) {
             Button {
                 beginRename(convo)
@@ -142,11 +248,8 @@ struct ContentView: View {
             }
             .tint(.blue)
         }
-        // ── Long-press context menu ─────────────────────────────────────
         .contextMenu {
-            Button {
-                beginRename(convo)
-            } label: {
+            Button { beginRename(convo) } label: {
                 Label("Rename", systemImage: "pencil")
             }
             Button(role: .destructive) {
@@ -163,25 +266,14 @@ struct ContentView: View {
         showingRenameAlert = true
     }
 
-    // MARK: - Detail header
+    // MARK: - Detail header (title only — no extra toggle buttons)
 
     private var detailHeader: some View {
         HStack {
             Text(store.selectedConversation()?.title ?? "Dominus")
                 .font(.headline)
                 .lineLimit(1)
-
             Spacer()
-
-            Button {
-                store.voiceEnabled.toggle()
-            } label: {
-                HStack(spacing: 5) {
-                    Image(systemName: store.voiceEnabled ? "speaker.wave.2.fill" : "text.bubble")
-                    Text(store.voiceEnabled ? "Voice" : "Text")
-                }
-                .font(.subheadline)
-            }
         }
         .padding(.horizontal)
         .padding(.top, 10)
@@ -213,68 +305,82 @@ struct ContentView: View {
     // MARK: - Input bar
 
     private var inputBar: some View {
-        HStack(spacing: 8) {
-            TextField("Type a message…", text: $prompt)
-                .textFieldStyle(.roundedBorder)
+        VStack(spacing: 4) {
 
-            // Mic button — tap once to start session, tap again to stop
-            Button {
-                if !sessionActive {
-                    sessionActive = true
-                    micDidSend    = false
-                    speech.autoStopOnSilence = true
-                    SpeechManager.shared.stopAndClear()
-                    try? speech.startListening()
-                } else {
-                    sessionActive = false
-                    SpeechManager.shared.stopAndClear()
-                    if speech.isListening { speech.stopListening() }
-                }
-            } label: {
-                Image(systemName: sessionActive ? "stop.circle.fill" : "mic")
-                    .font(.system(size: 20))
-                    .foregroundColor(sessionActive ? .orange : .blue)
-                    .padding(6)
+            // Status hint — shown only when voice session is active
+            if pttState != .idle {
+                Text(pttLabel)
+                    .font(.caption)
+                    .foregroundStyle(pttColor.opacity(0.85))
+                    .transition(.opacity)
             }
-            .disabled(store.isLoading || !store.isLoaded)
-            // Auto-send when silence timer fires and stopListening() is called
-            .onChange(of: speech.isListening) { listening in
-                if !listening && sessionActive && !micDidSend {
-                    let spoken = speech.transcript.trimmingCharacters(in: .whitespacesAndNewlines)
-                    speech.transcript = ""
-                    if !spoken.isEmpty {
-                        micDidSend = true
-                        store.send(spoken)
+
+            HStack(spacing: 10) {
+
+                // Text field: shows live transcript while listening, normal prompt otherwise
+                if pttState == .listening {
+                    TextField("Listening…", text: $speech.transcript)
+                        .textFieldStyle(.roundedBorder)
+                        .disabled(true)
+                } else {
+                    TextField("Type a message…", text: $prompt)
+                        .textFieldStyle(.roundedBorder)
+                }
+
+                // ── THE ONE BUTTON ──────────────────────────────────────────
+                Button {
+                    handlePTTTap()
+                } label: {
+                    ZStack {
+                        // Animated pulse ring — only visible while recording
+                        Circle()
+                            .stroke(Color.red, lineWidth: 2.5)
+                            .frame(width: 48, height: 48)
+                            .scaleEffect(pulseScale)
+                            .opacity(pttState == .listening ? pulseOpacity : 0)
+
+                        // Core icon
+                        Image(systemName: pttIcon)
+                            .font(.system(size: 22, weight: .medium))
+                            .foregroundColor(pttColor)
+                            .frame(width: 36, height: 36)
                     }
+                    .frame(width: 52, height: 52)
                 }
-            }
+                .disabled(store.isLoading || !store.isLoaded)
+                // ────────────────────────────────────────────────────────────
 
-            // Send button
-            Button {
-                if store.isGenerating && prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    // Nothing typed — just stop
-                    store.stopGeneration()
-                } else {
-                    // Text ready — stop current and send new
-                    let current = prompt
-                    prompt = ""
-                    store.send(current)
+                // Send / stop button — only shown in idle text mode
+                if pttState == .idle {
+                    Button {
+                        if store.isGenerating &&
+                            prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            store.stopGeneration()
+                        } else {
+                            let text = prompt
+                            prompt = ""
+                            store.send(text)
+                        }
+                    } label: {
+                        Image(
+                            systemName: store.isGenerating
+                                ? "stop.circle.fill"
+                                : "arrow.up.circle.fill"
+                        )
+                        .font(.system(size: 28))
+                        .foregroundColor(store.isGenerating ? .orange : .blue)
+                    }
+                    .disabled(
+                        store.isLoading || !store.isLoaded ||
+                        (!store.isGenerating &&
+                         prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    )
                 }
-            } label: {
-                Image(systemName: store.isGenerating ? "stop.circle.fill" : "arrow.up.circle.fill")
-                    .font(.system(size: 28))
-                    .foregroundColor(store.isGenerating ? .orange : .blue)
             }
-            .disabled(
-                store.isLoading ||
-                !store.isLoaded ||
-                // Always tappable while generating (acts as stop button)
-                // Only disabled when idle with empty prompt
-                (!store.isGenerating && prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            )
+            .padding(.horizontal)
+            .padding(.vertical, 10)
         }
-        .padding(.horizontal)
-        .padding(.vertical, 10)
+        .animation(.easeInOut(duration: 0.2), value: pttState == .idle)
     }
 }
 
