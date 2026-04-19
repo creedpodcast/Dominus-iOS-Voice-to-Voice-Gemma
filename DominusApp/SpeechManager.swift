@@ -1,4 +1,5 @@
 import AVFoundation
+import Combine
 
 @MainActor
 final class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
@@ -9,6 +10,9 @@ final class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
     private var queue: [String] = []
     private var isSpeakingChunk = false
     private var preferredVoice: AVSpeechSynthesisVoice?
+
+    /// True while the synthesizer is actively speaking — used by VAD logic
+    @Published var isSpeaking: Bool = false
 
     var onAllSpeechFinished: (() -> Void)?
 
@@ -28,14 +32,14 @@ final class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
     func stopAndClear() {
         queue.removeAll()
         isSpeakingChunk = false
+        isSpeaking      = false
         if synth.isSpeaking {
             synth.stopSpeaking(at: .immediate)
         }
     }
 
     private func startIfNeeded() {
-        guard !isSpeakingChunk else { return }
-        guard !queue.isEmpty else { return }
+        guard !isSpeakingChunk, !queue.isEmpty else { return }
         isSpeakingChunk = true
         speakNext()
     }
@@ -43,33 +47,31 @@ final class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
     private func speakNext() {
         guard !queue.isEmpty else {
             isSpeakingChunk = false
+            isSpeaking      = false
             onAllSpeechFinished?()
             return
         }
 
-        do {
-            let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
-            try session.setActive(true)
-        } catch {
-            print("TTS audio session error:", error)
-        }
+        // ── No audio session setup here ──────────────────────────────────
+        // The unified voiceChat session set up by SpeechRecognitionManager
+        // is already active and handles both playback and record together.
+        // Switching sessions here is what caused the echo and choppy audio.
 
         let chunk = queue.removeFirst()
-        let utt = AVSpeechUtterance(string: chunk)
-        utt.rate = AVSpeechUtteranceDefaultSpeechRate
+        let utt   = AVSpeechUtterance(string: chunk)
+        utt.rate  = AVSpeechUtteranceDefaultSpeechRate
         utt.voice = preferredVoice ?? AVSpeechSynthesisVoice(language: "en-US")
+        isSpeaking = true
         synth.speak(utt)
     }
 
     private func clean(_ text: String) -> String {
         var s = text.replacingOccurrences(of: "```", with: "")
         s = s.unicodeScalars.filter { scalar in
-            if scalar.properties.isEmojiPresentation { return false }
-            if scalar.properties.isEmoji { return false }
-            if scalar.value == 0xFE0F { return false }
-            if scalar.value == 0x200D { return false }
-            return true
+            !scalar.properties.isEmojiPresentation &&
+            !scalar.properties.isEmoji &&
+            scalar.value != 0xFE0F &&
+            scalar.value != 0x200D
         }
         .map(String.init)
         .joined()
@@ -93,6 +95,7 @@ final class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
     }
 
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
+        isSpeaking = false
         if !queue.isEmpty {
             speakNext()
         } else {
