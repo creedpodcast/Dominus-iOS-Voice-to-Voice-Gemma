@@ -1,32 +1,55 @@
-# Dominus — On-Device iOS AI Assistant
+# Dominus — On-Device iOS Voice-to-Voice AI
 
 Dominus is a fully local, privacy-first AI assistant for iPhone. No internet connection required. No data leaves your device. Everything — model inference, speech recognition, text-to-speech, and memory — runs entirely on-device.
 
 ---
 
-## Current State (Foundation Build)
+## What It Does
 
-This branch represents the stable foundation of the project. Text chat with long-term memory and user profile is fully working. Voice mode is next to be rebuilt using industry-standard architecture.
+Talk to an AI that talks back. Tap once to speak, tap again when done — the AI responds with text and voice simultaneously. Tap at any point while the AI is speaking to instantly cut it off and speak again. Fully manual, fully on-device, fully private.
+
+---
+
+## Current State
 
 ### Working
+- **Push-to-talk (PTT) voice-to-voice conversation**
+  - Tap mic → speak → tap again → AI responds with text + voice
+  - Tap during AI response → instantly interrupts voice and generation, starts listening immediately
+  - Animated pulse ring while recording, live transcript shown as you speak
+  - TTS auto-enables during voice turns, restores your previous setting after
 - Text chat with Gemma 2B (streaming, token-by-token)
 - RAG long-term memory (semantic search + keyword fallback)
 - User profile with auto-extraction ("my name is X" → stored as fact)
 - Multiple conversation threads (create, rename, delete, switch)
 - Generation interrupt (send new message cancels current response)
 - Stop button (cancel generation without sending)
+- Echo cancellation via unified `voiceChat` audio session
+- On-device STT with `requiresOnDeviceRecognition = true`
 - Llama artifact filtering (strips template tokens from output)
 
-### Planned (to be built on feature branches)
-- [ ] Hands-free voice-to-voice conversation mode
-- [ ] VAD (Voice Activity Detection) for barge-in / interrupting AI mid-sentence
-- [ ] Echo cancellation via unified audio session
-- [ ] Pre-roll audio buffer for syllable-safe STT handoff
-- [ ] Persistent LlamaService (fix Metal memory churn)
+### Planned
+- [ ] WhisperKit for more accurate on-device STT
+- [ ] Persistent LlamaService (fix Metal memory churn between turns)
 - [ ] Context window increase (2048 → 4096)
 - [ ] Memory retrieval clamping (prevent context overflow)
-- [ ] WhisperKit for more accurate on-device STT
-- [ ] Silero VAD for smarter silence detection
+- [ ] Silero VAD for optional auto-send on silence
+
+---
+
+## How Voice Works (PTT Flow)
+
+```
+[idle]
+  ↓ tap mic
+[listening]  — waveform icon (red) + animated pulse ring
+  ↓ tap again
+[AI talking] — mic.fill icon (green) — tap anytime to interrupt
+  ↓ AI finishes naturally
+[idle]
+```
+
+The same single button controls every step. No hold-to-talk. No automatic silence detection (manual = intentional).
 
 ---
 
@@ -37,26 +60,28 @@ This branch represents the stable foundation of the project. Text chat with long
 |---|---|
 | LLM | Gemma 2 2B IT Q4_K_M (GGUF) |
 | Inference engine | [SwiftLlama](https://github.com/pgorzelany/swift-llama-cpp) v1.2.0 (llama.cpp wrapper) |
-| Context window | 2048 tokens (to be increased to 4096) |
+| Context window | 2048 tokens |
 | Batch size | 512 |
 | GPU acceleration | Metal (on-device) |
 
-### Voice (basic — rebuild planned)
+### Voice
 | Component | Details |
 |---|---|
-| Speech-to-Text | `SFSpeechRecognizer` + `AVAudioEngine` (Apple, on-device) |
+| Speech-to-Text | `SFSpeechRecognizer` + `AVAudioEngine` (Apple, fully on-device) |
 | Text-to-Speech | `AVSpeechSynthesizer` (Apple, on-device, best available English voice) |
-| Silence detection | Auto-stop after 0.9s of no new transcript |
-| Streaming TTS | Response spoken in chunks as tokens arrive |
+| Input mode | Push-to-talk (manual start/stop) |
+| Interrupt | Button tap stops generation + TTS instantly, restarts STT |
+| Echo cancellation | `AVAudioSession` `.voiceChat` mode (built-in, no feedback loop) |
+| Streaming TTS | Spoken in sentence-boundary chunks as tokens arrive |
 
 ### Memory (RAG)
 | Component | Details |
 |---|---|
 | Vector embeddings | `NLEmbedding.sentenceEmbedding` — Apple built-in 512-dim model |
-| Similarity | vDSP cosine similarity (hardware-accelerated via Accelerate framework) |
+| Similarity | vDSP cosine similarity (hardware-accelerated) |
 | Storage | SwiftData (on-device persistence) |
 | Retrieval | Top-5 semantically relevant past exchanges injected into system prompt |
-| Raw history | Last 4 turns kept in context — older turns covered by RAG |
+| Raw history | Last 1 turn kept in context — older turns covered by RAG |
 
 ### User Profile
 | Component | Details |
@@ -72,11 +97,11 @@ This branch represents the stable foundation of the project. Text chat with long
 ```
 DominusApp/
 ├── DominusAppApp.swift              Entry point
-├── ContentView.swift                UI — sidebar, chat view, input bar
+├── ContentView.swift                UI — sidebar, chat view, PTT input bar
 ├── ChatStore.swift                  State — conversations, send(), RAG + profile wiring
 ├── GemmaEngine.swift                LLM — model loading, streaming generation
-├── SpeechManager.swift              TTS — AVSpeechSynthesizer queue
-├── SpeechRecognitionManager.swift   STT — AVAudioEngine + SFSpeechRecognizer
+├── SpeechManager.swift              TTS — AVSpeechSynthesizer queue + callbacks
+├── SpeechRecognitionManager.swift   STT — AVAudioEngine + SFSpeechRecognizer + VAD
 ├── LoadingView.swift                Model loading progress overlay
 ├── Memory/
 │   ├── MemoryEmbedder.swift         NLEmbedding vectorisation + cosine similarity
@@ -100,9 +125,8 @@ DominusApp/
 
 ---
 
-## Known Issues (to be fixed)
+## Known Issues
 
-- **Fresh LlamaService per generation** — creates a new llama.cpp context every turn, churning Metal GPU memory. Causes crashes after ~10 turns. Fix: use persistent LlamaService.
-- **Context window too small** — 2048 tokens overflows when system prompt + profile + memories + history exceed ceiling. Fix: increase to 4096.
-- **Memory retrieval unclamped** — top-5 full exchanges with no character limit can push 1000+ tokens into system prompt. Fix: clamp to top-3 at 400 chars each.
-- **Voice mode primitive** — no hands-free loop, no VAD, no echo cancellation. Needs full rebuild.
+- **Fresh LlamaService per generation** — creates a new llama.cpp context every turn, churning Metal GPU memory. Can cause instability after many turns. Fix: persistent LlamaService.
+- **Context window** — 2048 tokens can overflow when system prompt + profile + memories + history are large. Fix: increase to 4096.
+- **STT 1-minute OS limit** — Apple's on-device `SFSpeechRecognizer` auto-cancels after ~60 seconds of continuous listening. PTT resets gracefully when this happens.
