@@ -76,11 +76,15 @@ struct ContentView: View {
 
     private func setupVoiceCallbacks() {
 
-        // STT ended unexpectedly (error / OS 1-min timeout) — reset
+        // STT ended mid-listen (OS silence timeout) — restart and preserve transcript
         speech.onSTTEnded = {
             Task { @MainActor in
                 guard self.pttState == .listening else { return }
-                self.returnToIdle()
+                let preserved = self.speech.transcript
+                try? self.speech.startListening()
+                if !preserved.isEmpty {
+                    self.speech.transcript = preserved
+                }
             }
         }
 
