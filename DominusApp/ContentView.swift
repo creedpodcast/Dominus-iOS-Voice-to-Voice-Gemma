@@ -353,6 +353,12 @@ struct ContentView: View {
                     withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
                 }
             }
+            .onChange(of: store.selectedConversation()?.messages.last?.content) { _ in
+                guard store.isGenerating else { return }
+                if let last = store.selectedConversation()?.messages.last {
+                    proxy.scrollTo(last.id, anchor: .bottom)
+                }
+            }
         }
     }
 
