@@ -342,27 +342,39 @@ struct ContentView: View {
 
     private var chatScrollView: some View {
         ScrollViewReader { proxy in
-            ScrollView {
-                VStack(spacing: 12) {
-                    let msgs = store.selectedConversation()?.messages ?? []
-                    ForEach(msgs) { msg in
-                        ChatBubble(role: msg.role, text: msg.content)
-                            .id(msg.id)
+            ZStack {
+                ScrollView {
+                    VStack(spacing: 12) {
+                        let msgs = store.selectedConversation()?.messages ?? []
+                        ForEach(msgs) { msg in
+                            ChatBubble(role: msg.role, text: msg.content)
+                                .id(msg.id)
+                        }
+                    }
+                    .padding()
+                }
+                .onChange(of: store.selectedConversation()?.messages.count ?? 0) { _ in
+                    if let last = store.selectedConversation()?.messages.last {
+                        withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
                     }
                 }
-                .padding()
-            }
-            .onChange(of: store.selectedConversation()?.messages.count ?? 0) { _ in
-                if let last = store.selectedConversation()?.messages.last {
-                    withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
+                .onChange(of: store.selectedConversation()?.messages.last?.content) { _ in
+                    guard store.isGenerating else { return }
+                    if let last = store.selectedConversation()?.messages.last {
+                        proxy.scrollTo(last.id, anchor: .bottom)
+                    }
+                }
+
+                if pttState != .idle {
+                    VoiceOrbOverlay(
+                        orbColor:   pttColor,
+                        audioLevel: speech.audioLevel,
+                        onTap:      handlePTTTap
+                    )
+                    .zIndex(10)
                 }
             }
-            .onChange(of: store.selectedConversation()?.messages.last?.content) { _ in
-                guard store.isGenerating else { return }
-                if let last = store.selectedConversation()?.messages.last {
-                    proxy.scrollTo(last.id, anchor: .bottom)
-                }
-            }
+            .animation(.easeInOut(duration: 0.35), value: pttState == .idle)
         }
     }
 

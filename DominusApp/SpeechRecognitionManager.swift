@@ -15,9 +15,10 @@ final class SpeechRecognitionManager: NSObject, ObservableObject {
     private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask:    SFSpeechRecognitionTask?
 
-    @Published var transcript:       String = ""
-    @Published var isListening:      Bool   = false
-    @Published var autoStopOnSilence: Bool  = true
+    @Published var transcript:        String = ""
+    @Published var isListening:       Bool   = false
+    @Published var autoStopOnSilence: Bool   = true
+    @Published var audioLevel:        Float  = 0.0
 
     // VAD — fires when user starts speaking while AI is talking
     var onVoiceActivityDetected: (() -> Void)?
@@ -167,6 +168,9 @@ final class SpeechRecognitionManager: NSObject, ObservableObject {
         var rms: Float = 0
         vDSP_measqv(data, 1, &rms, length)
         rms = sqrt(rms)
+
+        let level = min(rms / 0.05, 1.0)
+        Task { @MainActor [weak self] in self?.audioLevel = level }
 
         if rms > vadThreshold {
             vadTriggerCount += 1
