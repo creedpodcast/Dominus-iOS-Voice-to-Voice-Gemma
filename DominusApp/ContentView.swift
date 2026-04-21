@@ -88,12 +88,12 @@ struct ContentView: View {
             }
         }
 
-        // AI finished speaking — if generation is also done, return to idle
+        // AI finished speaking — loop back to listening so orb stays open
         SpeechManager.shared.onAllSpeechFinished = {
             Task { @MainActor in
                 guard self.pttState == .aiTalking else { return }
                 if !self.store.isGenerating {
-                    self.returnToIdle()
+                    self.beginListening()
                 }
             }
         }
@@ -105,18 +105,12 @@ struct ContentView: View {
         switch pttState {
 
         case .idle:
-            // Save voice state and force it ON so AI always speaks back
-            voiceWasEnabled      = store.voiceEnabled
-            store.voiceEnabled   = true
-            // Start recording — no auto-silence, user taps to stop
-            speech.autoStopOnSilence = false
+            voiceWasEnabled    = store.voiceEnabled
+            store.voiceEnabled = true
             SpeechManager.shared.stopAndClear()
-            try? speech.startListening()
-            startPulse()
-            pttState = .listening
+            beginListening()
 
         case .listening:
-            // User done — stop recording and send
             stopPulse()
             speech.stopListening()
             let spoken = speech.transcript.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -129,21 +123,27 @@ struct ContentView: View {
             pttState = .aiTalking
 
         case .aiTalking:
-            // Interrupt AI immediately — stop both generation and voice
             SpeechManager.shared.stopAndClear()
             store.stopGeneration()
-            speech.transcript = ""
-            speech.autoStopOnSilence = false
-            try? speech.startListening()
-            startPulse()
-            pttState = .listening
+            beginListening()
         }
+    }
+
+    // MARK: - Listening helpers
+
+    private func beginListening() {
+        speech.transcript        = ""
+        speech.autoStopOnSilence = false
+        SpeechManager.shared.stopAndClear()
+        try? speech.startListening()
+        startPulse()
+        pttState = .listening
     }
 
     private func returnToIdle() {
         stopPulse()
         speech.tearDownVoiceSession()
-        store.voiceEnabled = voiceWasEnabled   // restore previous voice preference
+        store.voiceEnabled = voiceWasEnabled
         pttState = .idle
     }
 
