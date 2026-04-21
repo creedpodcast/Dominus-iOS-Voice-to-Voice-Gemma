@@ -210,10 +210,6 @@ struct ContentView: View {
                 guard !hasShownContextHint, usage >= 0.85 else { return }
                 hasShownContextHint = true
                 withAnimation { showContextHint = true }
-                Task {
-                    try? await Task.sleep(nanoseconds: 5_000_000_000)
-                    withAnimation { showContextHint = false }
-                }
             }
             .onChange(of: store.selectedID) { _ in
                 showContextHint = false
