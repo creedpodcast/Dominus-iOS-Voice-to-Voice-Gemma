@@ -20,6 +20,10 @@ struct ContentView: View {
     @State private var renameConvoID: UUID?
     @State private var renameText: String = ""
 
+    // Context hint banner
+    @State private var showContextHint: Bool = false
+    @State private var hasShownContextHint: Bool = false
+
     // Push-to-talk state
     @State private var pttState: PTTState = .idle
 
@@ -196,8 +200,24 @@ struct ContentView: View {
                 detailHeader
                 Divider()
                 chatScrollView
+                if showContextHint {
+                    contextHintBanner
+                }
                 Divider()
                 inputBar
+            }
+            .onChange(of: contextUsage) { usage in
+                guard !hasShownContextHint, usage >= 0.85 else { return }
+                hasShownContextHint = true
+                withAnimation { showContextHint = true }
+                Task {
+                    try? await Task.sleep(nanoseconds: 5_000_000_000)
+                    withAnimation { showContextHint = false }
+                }
+            }
+            .onChange(of: store.selectedID) { _ in
+                showContextHint = false
+                hasShownContextHint = false
             }
         }
     }
@@ -266,7 +286,44 @@ struct ContentView: View {
         showingRenameAlert = true
     }
 
-    // MARK: - Detail header (title only — no extra toggle buttons)
+    // MARK: - Context hint banner
+
+    private var contextHintBanner: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "info.circle")
+                .foregroundStyle(.orange)
+            Text("Earlier messages are fading from AI context — long-term memory still applies.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Spacer()
+            Button {
+                withAnimation { showContextHint = false }
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(Color(.systemOrange).opacity(0.08))
+        .transition(.move(edge: .bottom).combined(with: .opacity))
+    }
+
+    // MARK: - Context usage (0.0–1.0)
+    // Estimates token usage from history chars + current draft. ~4 chars per token.
+    private var contextUsage: Double {
+        let maxTokens = 8192
+        let maxMessages = 20
+        let systemOverhead = 300
+
+        let messages = store.selectedConversation()?.messages ?? []
+        let windowChars = messages.suffix(maxMessages).reduce(0) { $0 + $1.content.count }
+        let estimated = systemOverhead + (windowChars + prompt.count) / 4
+        return min(1.0, Double(estimated) / Double(maxTokens))
+    }
+
+    // MARK: - Detail header
 
     private var detailHeader: some View {
         HStack {
@@ -274,6 +331,7 @@ struct ContentView: View {
                 .font(.headline)
                 .lineLimit(1)
             Spacer()
+            ContextRingView(usage: contextUsage)
         }
         .padding(.horizontal)
         .padding(.top, 10)
@@ -381,6 +439,36 @@ struct ContentView: View {
             .padding(.vertical, 10)
         }
         .animation(.easeInOut(duration: 0.2), value: pttState == .idle)
+    }
+}
+
+// MARK: - Context Ring
+
+struct ContextRingView: View {
+    let usage: Double
+
+    private var ringColor: Color {
+        switch usage {
+        case ..<0.6:  return .green
+        case ..<0.85: return .yellow
+        default:      return .red
+        }
+    }
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .stroke(Color(.systemGray5), lineWidth: 3)
+            Circle()
+                .trim(from: 0, to: usage)
+                .stroke(ringColor, style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                .rotationEffect(.degrees(-90))
+                .animation(.easeInOut(duration: 0.2), value: usage)
+            Text("\(Int(usage * 100))%")
+                .font(.system(size: 7, weight: .semibold))
+                .foregroundStyle(.secondary)
+        }
+        .frame(width: 28, height: 28)
     }
 }
 

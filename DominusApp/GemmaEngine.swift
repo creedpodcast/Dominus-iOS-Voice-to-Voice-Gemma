@@ -16,7 +16,7 @@ final class GemmaEngine: ObservableObject {
     private let modelExtension: String = "gguf"
 
     private let batchSize: UInt32 = 512
-    private let maxTokenCount: UInt32 = 2048
+    private let maxTokenCount: UInt32 = 8192
     private let useGPU: Bool = true
 
     func loadModelIfNeeded() {
@@ -81,9 +81,7 @@ final class GemmaEngine: ObservableObject {
     ) async throws -> AsyncThrowingStream<String, Error> {
         loadModelIfNeeded()
 
-        guard isLoaded, let modelUrl = Bundle.main.url(
-            forResource: modelResourceName, withExtension: modelExtension
-        ) else {
+        guard isLoaded, let llama else {
             throw NSError(
                 domain: "GemmaEngine",
                 code: 1,
@@ -91,17 +89,7 @@ final class GemmaEngine: ObservableObject {
             )
         }
 
-        // Fresh LlamaService per generation — prevents context bleed between turns
-        let freshLlama = LlamaService(
-            modelUrl: modelUrl,
-            config: .init(
-                batchSize: batchSize,
-                maxTokenCount: maxTokenCount,
-                useGPU: useGPU
-            )
-        )
-
-        return try await freshLlama.streamCompletion(
+        return try await llama.streamCompletion(
             of: messages,
             samplingConfig: .init(
                 temperature: temperature,

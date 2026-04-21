@@ -76,7 +76,7 @@ final class ChatStore: ObservableObject {
     
     /// Keep only the last 4 turns (8 messages) of raw conversation in the prompt.
     /// Older context is covered by RAG memory retrieval instead.
-    private let maxTurnsToKeep = 4
+    private let maxTurnsToKeep = 10
 
     private var saveURL: URL {
         FileManager.default
