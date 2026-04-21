@@ -313,7 +313,7 @@ struct ContentView: View {
     // MARK: - Context usage (0.0–1.0)
     // Estimates token usage from history chars + current draft. ~4 chars per token.
     private var contextUsage: Double {
-        let maxTokens = 8192
+        let maxTokens = 4096
         let maxMessages = 20
         let systemOverhead = 300
 

@@ -16,7 +16,7 @@ final class GemmaEngine: ObservableObject {
     private let modelExtension: String = "gguf"
 
     private let batchSize: UInt32 = 512
-    private let maxTokenCount: UInt32 = 8192
+    private let maxTokenCount: UInt32 = 4096
     private let useGPU: Bool = true
 
     func loadModelIfNeeded() {
