@@ -1,4 +1,5 @@
 import SwiftUI
+import AVFoundation
 
 // MARK: - PTT State
 
@@ -124,6 +125,9 @@ struct ContentView: View {
 
     private func beginListening() {
         SpeechManager.shared.stopAndClear()
+        // Tear down SpeechRecognitionManager's engine first — two AVAudioEngines
+        // cannot both install a tap on the input node simultaneously.
+        speech.tearDownVoiceSession()
         whisper.startRecording()
         startPulse()
         pttState = .listening
@@ -132,7 +136,8 @@ struct ContentView: View {
     private func returnToIdle() {
         stopPulse()
         whisper.cancelRecording()
-        speech.tearDownVoiceSession()
+        // WhisperManager stopped its engine — safe to fully deactivate audio session
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         store.voiceEnabled = voiceWasEnabled
         pttState = .idle
     }

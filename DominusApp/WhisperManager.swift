@@ -82,11 +82,12 @@ final class WhisperManager: ObservableObject {
         }
 
         do {
+            // Ensure audio session is active with echo-cancelling voiceChat mode.
+            // Called here because SpeechRecognitionManager's session is torn down
+            // before beginListening() hands off to WhisperManager.
             setupAudioSession()
-            if !audioEngine.isRunning {
-                audioEngine.prepare()
-                try audioEngine.start()
-            }
+            audioEngine.prepare()
+            try audioEngine.start()
             isRecording = true
             print("✅ WhisperManager: recording started")
         } catch {
