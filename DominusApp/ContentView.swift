@@ -20,6 +20,10 @@ struct ContentView: View {
     @State private var renameConvoID: UUID?
     @State private var renameText: String = ""
 
+    // Context hint banner
+    @State private var showContextHint: Bool = false
+    @State private var hasShownContextHint: Bool = false
+
     // Push-to-talk state
     @State private var pttState: PTTState = .idle
 
@@ -72,20 +76,24 @@ struct ContentView: View {
 
     private func setupVoiceCallbacks() {
 
-        // STT ended unexpectedly (error / OS 1-min timeout) — reset
+        // STT ended mid-listen (OS silence timeout) — restart and preserve transcript
         speech.onSTTEnded = {
             Task { @MainActor in
                 guard self.pttState == .listening else { return }
-                self.returnToIdle()
+                let preserved = self.speech.transcript
+                try? self.speech.startListening()
+                if !preserved.isEmpty {
+                    self.speech.transcript = preserved
+                }
             }
         }
 
-        // AI finished speaking — if generation is also done, return to idle
+        // AI finished speaking — loop back to listening so orb stays open
         SpeechManager.shared.onAllSpeechFinished = {
             Task { @MainActor in
                 guard self.pttState == .aiTalking else { return }
                 if !self.store.isGenerating {
-                    self.returnToIdle()
+                    self.beginListening()
                 }
             }
         }
@@ -97,18 +105,12 @@ struct ContentView: View {
         switch pttState {
 
         case .idle:
-            // Save voice state and force it ON so AI always speaks back
-            voiceWasEnabled      = store.voiceEnabled
-            store.voiceEnabled   = true
-            // Start recording — no auto-silence, user taps to stop
-            speech.autoStopOnSilence = false
+            voiceWasEnabled    = store.voiceEnabled
+            store.voiceEnabled = true
             SpeechManager.shared.stopAndClear()
-            try? speech.startListening()
-            startPulse()
-            pttState = .listening
+            beginListening()
 
         case .listening:
-            // User done — stop recording and send
             stopPulse()
             speech.stopListening()
             let spoken = speech.transcript.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -121,21 +123,27 @@ struct ContentView: View {
             pttState = .aiTalking
 
         case .aiTalking:
-            // Interrupt AI immediately — stop both generation and voice
             SpeechManager.shared.stopAndClear()
             store.stopGeneration()
-            speech.transcript = ""
-            speech.autoStopOnSilence = false
-            try? speech.startListening()
-            startPulse()
-            pttState = .listening
+            beginListening()
         }
+    }
+
+    // MARK: - Listening helpers
+
+    private func beginListening() {
+        speech.transcript        = ""
+        speech.autoStopOnSilence = false
+        SpeechManager.shared.stopAndClear()
+        try? speech.startListening()
+        startPulse()
+        pttState = .listening
     }
 
     private func returnToIdle() {
         stopPulse()
         speech.tearDownVoiceSession()
-        store.voiceEnabled = voiceWasEnabled   // restore previous voice preference
+        store.voiceEnabled = voiceWasEnabled
         pttState = .idle
     }
 
@@ -196,8 +204,20 @@ struct ContentView: View {
                 detailHeader
                 Divider()
                 chatScrollView
+                if showContextHint {
+                    contextHintBanner
+                }
                 Divider()
                 inputBar
+            }
+            .onChange(of: contextUsage) { usage in
+                guard !hasShownContextHint, usage >= 0.85 else { return }
+                hasShownContextHint = true
+                withAnimation { showContextHint = true }
+            }
+            .onChange(of: store.selectedID) { _ in
+                showContextHint = false
+                hasShownContextHint = false
             }
         }
     }
@@ -266,7 +286,44 @@ struct ContentView: View {
         showingRenameAlert = true
     }
 
-    // MARK: - Detail header (title only — no extra toggle buttons)
+    // MARK: - Context hint banner
+
+    private var contextHintBanner: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "info.circle")
+                .foregroundStyle(.orange)
+            Text("Earlier messages are fading from AI context — long-term memory still applies.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Spacer()
+            Button {
+                withAnimation { showContextHint = false }
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(Color(.systemOrange).opacity(0.08))
+        .transition(.move(edge: .bottom).combined(with: .opacity))
+    }
+
+    // MARK: - Context usage (0.0–1.0)
+    // Estimates token usage from history chars + current draft. ~4 chars per token.
+    private var contextUsage: Double {
+        let maxTokens = 2048
+        let maxMessages = 20
+        let systemOverhead = 300
+
+        let messages = store.selectedConversation()?.messages ?? []
+        let windowChars = messages.suffix(maxMessages).reduce(0) { $0 + $1.content.count }
+        let estimated = systemOverhead + (windowChars + prompt.count) / 4
+        return min(1.0, Double(estimated) / Double(maxTokens))
+    }
+
+    // MARK: - Detail header
 
     private var detailHeader: some View {
         HStack {
@@ -274,6 +331,7 @@ struct ContentView: View {
                 .font(.headline)
                 .lineLimit(1)
             Spacer()
+            ContextRingView(usage: contextUsage)
         }
         .padding(.horizontal)
         .padding(.top, 10)
@@ -284,21 +342,39 @@ struct ContentView: View {
 
     private var chatScrollView: some View {
         ScrollViewReader { proxy in
-            ScrollView {
-                VStack(spacing: 12) {
-                    let msgs = store.selectedConversation()?.messages ?? []
-                    ForEach(msgs) { msg in
-                        ChatBubble(role: msg.role, text: msg.content)
-                            .id(msg.id)
+            ZStack {
+                ScrollView {
+                    VStack(spacing: 12) {
+                        let msgs = store.selectedConversation()?.messages ?? []
+                        ForEach(msgs) { msg in
+                            ChatBubble(role: msg.role, text: msg.content)
+                                .id(msg.id)
+                        }
+                    }
+                    .padding()
+                }
+                .onChange(of: store.selectedConversation()?.messages.count ?? 0) { _ in
+                    if let last = store.selectedConversation()?.messages.last {
+                        withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
                     }
                 }
-                .padding()
-            }
-            .onChange(of: store.selectedConversation()?.messages.count ?? 0) { _ in
-                if let last = store.selectedConversation()?.messages.last {
-                    withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
+                .onChange(of: store.selectedConversation()?.messages.last?.content) { _ in
+                    guard store.isGenerating else { return }
+                    if let last = store.selectedConversation()?.messages.last {
+                        proxy.scrollTo(last.id, anchor: .bottom)
+                    }
+                }
+
+                if pttState != .idle {
+                    VoiceOrbOverlay(
+                        orbColor:   pttColor,
+                        audioLevel: speech.audioLevel,
+                        onTap:      handlePTTTap
+                    )
+                    .zIndex(10)
                 }
             }
+            .animation(.easeInOut(duration: 0.35), value: pttState == .idle)
         }
     }
 
@@ -381,6 +457,36 @@ struct ContentView: View {
             .padding(.vertical, 10)
         }
         .animation(.easeInOut(duration: 0.2), value: pttState == .idle)
+    }
+}
+
+// MARK: - Context Ring
+
+struct ContextRingView: View {
+    let usage: Double
+
+    private var ringColor: Color {
+        switch usage {
+        case ..<0.6:  return .green
+        case ..<0.85: return .yellow
+        default:      return .red
+        }
+    }
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .stroke(Color(.systemGray5), lineWidth: 3)
+            Circle()
+                .trim(from: 0, to: usage)
+                .stroke(ringColor, style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                .rotationEffect(.degrees(-90))
+                .animation(.easeInOut(duration: 0.2), value: usage)
+            Text("\(Int(usage * 100))%")
+                .font(.system(size: 7, weight: .semibold))
+                .foregroundStyle(.secondary)
+        }
+        .frame(width: 28, height: 28)
     }
 }
 
