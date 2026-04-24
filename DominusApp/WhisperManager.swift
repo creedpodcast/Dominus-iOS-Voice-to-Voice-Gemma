@@ -26,6 +26,7 @@ final class WhisperManager: ObservableObject {
     @Published var audioLevel:      Float  = 0.0
     @Published var modelReady:      Bool   = false
     @Published var modelStatus:     String = "Whisper not loaded"
+    @Published var liveTranscript:  String = ""
 
     // MARK: - Private
 
@@ -33,6 +34,9 @@ final class WhisperManager: ObservableObject {
     private let audioEngine    = AVAudioEngine()
     private var recordedSamples: [Float]  = []
     private var nativeSampleRate: Double  = 44_100
+
+    private var liveTimer:               Timer?
+    private var isRunningLivePass:       Bool  = false
 
     private init() {}
 
@@ -90,8 +94,45 @@ final class WhisperManager: ObservableObject {
             try audioEngine.start()
             isRecording = true
             print("✅ WhisperManager: recording started")
+            startLiveTranscriptionTimer()
         } catch {
             print("❌ WhisperManager: audio engine failed:", error)
+        }
+    }
+
+    // MARK: - Live transcription timer
+
+    private func startLiveTranscriptionTimer() {
+        liveTimer?.invalidate()
+        // Wait 2 seconds before the first pass so there's enough audio to transcribe
+        liveTimer = Timer.scheduledTimer(withTimeInterval: 2.5, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            Task { @MainActor in
+                await self.runLiveTranscriptionPass()
+            }
+        }
+    }
+
+    private func runLiveTranscriptionPass() async {
+        guard !isRunningLivePass, isRecording, let whisper = whisperKit else { return }
+        let snapshot = recordedSamples
+        guard snapshot.count > Int(nativeSampleRate * 0.5) else { return }  // need ≥ 0.5s audio
+
+        isRunningLivePass = true
+        defer { isRunningLivePass = false }
+
+        let samples16k = resampleTo16k(snapshot, from: nativeSampleRate)
+        do {
+            let results = try await whisper.transcribe(audioArray: samples16k)
+            let text = results
+                .compactMap { $0.text }
+                .joined(separator: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !text.isEmpty {
+                liveTranscript = text
+            }
+        } catch {
+            // Silent — live passes are best-effort
         }
     }
 
@@ -99,13 +140,19 @@ final class WhisperManager: ObservableObject {
     func stopAndTranscribe() async -> String {
         guard isRecording else { return "" }
 
+        liveTimer?.invalidate()
+        liveTimer = nil
+
         audioEngine.inputNode.removeTap(onBus: 0)
         if audioEngine.isRunning { audioEngine.stop() }
-        isRecording   = false
+        isRecording    = false
         isTranscribing = true
         audioLevel     = 0
 
-        defer { isTranscribing = false }
+        defer {
+            isTranscribing = false
+            liveTranscript = ""
+        }
 
         guard let whisper = whisperKit, !recordedSamples.isEmpty else {
             return ""
@@ -129,12 +176,15 @@ final class WhisperManager: ObservableObject {
     }
 
     func cancelRecording() {
+        liveTimer?.invalidate()
+        liveTimer = nil
         guard isRecording else { return }
         audioEngine.inputNode.removeTap(onBus: 0)
         if audioEngine.isRunning { audioEngine.stop() }
-        isRecording    = false
-        isTranscribing = false
-        audioLevel     = 0
+        isRecording     = false
+        isTranscribing  = false
+        audioLevel      = 0
+        liveTranscript  = ""
         recordedSamples = []
     }
 

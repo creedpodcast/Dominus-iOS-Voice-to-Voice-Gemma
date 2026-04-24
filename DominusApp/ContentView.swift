@@ -389,9 +389,9 @@ struct ContentView: View {
 
             HStack(spacing: 10) {
 
-                // Text field: shows live transcript while listening, normal prompt otherwise
+                // Text field: shows live Whisper transcript while listening, normal prompt otherwise
                 if pttState == .listening {
-                    TextField("Listening…", text: $speech.transcript)
+                    TextField("Listening…", text: .constant(whisper.liveTranscript))
                         .textFieldStyle(.roundedBorder)
                         .disabled(true)
                 } else {
