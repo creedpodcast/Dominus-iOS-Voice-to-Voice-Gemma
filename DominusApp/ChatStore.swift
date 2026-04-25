@@ -236,12 +236,13 @@ final class ChatStore: ObservableObject {
 
                 if voiceEnabled {
                     ttsBuffer += token
-                    let hitSentenceEnd  = ttsBuffer.contains(".") || ttsBuffer.contains("?") || ttsBuffer.contains("!")
-                    let hitNewline      = ttsBuffer.contains("\n")
-                    let bufferLongEnough = ttsBuffer.count >= 80
-                    let hasNewContent   = assistantText.count - lastEnqueuedAtCount >= 25
+                    let hitSentenceEnd   = ttsBuffer.last == "." || ttsBuffer.last == "?" || ttsBuffer.last == "!"
+                    let hitNewline       = ttsBuffer.contains("\n")
+                    let bufferLongEnough = ttsBuffer.count >= 120
 
-                    if hasNewContent && (hitSentenceEnd || hitNewline || bufferLongEnough) {
+                    // Apple TTS synthesizes instantly — small chunks sound better
+                    // because each sentence gets its own natural prosody.
+                    if ttsBuffer.count >= 40 && (hitSentenceEnd || hitNewline || bufferLongEnough) {
                         SpeechManager.shared.enqueue(ttsBuffer)
                         lastEnqueuedAtCount = assistantText.count
                         ttsBuffer = ""

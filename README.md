@@ -18,6 +18,8 @@ Talk to an AI that talks back. Tap once to speak, tap again when done — the AI
   - Tap during AI response → instantly interrupts voice and generation, starts listening immediately
   - Animated pulse ring while recording, live transcript shown as you speak
   - TTS auto-enables during voice turns, restores your previous setting after
+- **WhisperKit on-device STT** — more accurate transcription via Whisper model
+- **Male TTS voice** — prefers Evan (Enhanced), falls back to Reed, Nathan, Tom, etc.
 - Text chat with Gemma 2B (streaming, token-by-token)
 - RAG long-term memory (semantic search + keyword fallback)
 - User profile with auto-extraction ("my name is X" → stored as fact)
@@ -25,15 +27,14 @@ Talk to an AI that talks back. Tap once to speak, tap again when done — the AI
 - Generation interrupt (send new message cancels current response)
 - Stop button (cancel generation without sending)
 - Echo cancellation via unified `voiceChat` audio session
-- On-device STT with `requiresOnDeviceRecognition = true`
 - Llama artifact filtering (strips template tokens from output)
 
 ### Planned
-- [ ] WhisperKit for more accurate on-device STT
 - [ ] Persistent LlamaService (fix Metal memory churn between turns)
 - [ ] Context window increase (2048 → 4096)
 - [ ] Memory retrieval clamping (prevent context overflow)
 - [ ] Silero VAD for optional auto-send on silence
+- [ ] Core ML TTS (custom voice via Neural Engine — no synthesis gaps)
 
 ---
 
@@ -67,8 +68,9 @@ The same single button controls every step. No hold-to-talk. No automatic silenc
 ### Voice
 | Component | Details |
 |---|---|
-| Speech-to-Text | `SFSpeechRecognizer` + `AVAudioEngine` (Apple, fully on-device) |
-| Text-to-Speech | `AVSpeechSynthesizer` (Apple, on-device, best available English voice) |
+| Speech-to-Text | WhisperKit (on-device Whisper model, high accuracy) |
+| Text-to-Speech | `AVSpeechSynthesizer` (Apple Neural Engine, fully local) |
+| TTS voice | Evan Enhanced (male, en-US) — falls back to best available |
 | Input mode | Push-to-talk (manual start/stop) |
 | Interrupt | Button tap stops generation + TTS instantly, restarts STT |
 | Echo cancellation | `AVAudioSession` `.voiceChat` mode (built-in, no feedback loop) |
@@ -81,7 +83,7 @@ The same single button controls every step. No hold-to-talk. No automatic silenc
 | Similarity | vDSP cosine similarity (hardware-accelerated) |
 | Storage | SwiftData (on-device persistence) |
 | Retrieval | Top-5 semantically relevant past exchanges injected into system prompt |
-| Raw history | Last 1 turn kept in context — older turns covered by RAG |
+| Raw history | Last 10 turns kept in context — older turns covered by RAG |
 
 ### User Profile
 | Component | Details |
@@ -100,8 +102,9 @@ DominusApp/
 ├── ContentView.swift                UI — sidebar, chat view, PTT input bar
 ├── ChatStore.swift                  State — conversations, send(), RAG + profile wiring
 ├── GemmaEngine.swift                LLM — model loading, streaming generation
-├── SpeechManager.swift              TTS — AVSpeechSynthesizer queue + callbacks
+├── SpeechManager.swift              TTS — AVSpeechSynthesizer, male voice selection
 ├── SpeechRecognitionManager.swift   STT — AVAudioEngine + SFSpeechRecognizer + VAD
+├── WhisperManager.swift             STT — WhisperKit on-device Whisper transcription
 ├── LoadingView.swift                Model loading progress overlay
 ├── Memory/
 │   ├── MemoryEmbedder.swift         NLEmbedding vectorisation + cosine similarity
@@ -121,7 +124,7 @@ DominusApp/
 | Device | iPhone 13 Pro Max or newer recommended |
 | RAM | 6 GB unified memory (model uses ~1.5 GB + KV cache) |
 | iOS | 17.0+ |
-| Storage | ~1.5 GB for model file |
+| Storage | ~1.5 GB for Gemma model + ~150 MB for Whisper model |
 
 ---
 
@@ -129,4 +132,4 @@ DominusApp/
 
 - **Fresh LlamaService per generation** — creates a new llama.cpp context every turn, churning Metal GPU memory. Can cause instability after many turns. Fix: persistent LlamaService.
 - **Context window** — 2048 tokens can overflow when system prompt + profile + memories + history are large. Fix: increase to 4096.
-- **STT 1-minute OS limit** — Apple's on-device `SFSpeechRecognizer` auto-cancels after ~60 seconds of continuous listening. PTT resets gracefully when this happens.
+- **STT 1-minute OS limit** — Apple's `SFSpeechRecognizer` auto-cancels after ~60 seconds of continuous listening. PTT resets gracefully when this happens.

@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		1CBD7B9D2F89DA7E00F4D2C9 /* gemma-2-2b-it-Q4_K_M.gguf in Resources */ = {isa = PBXBuildFile; fileRef = 1CBD7B9C2F89DA7E00F4D2C9 /* gemma-2-2b-it-Q4_K_M.gguf */; };
 		1CD94A6B2F9888F30065043F /* WhisperKit in Frameworks */ = {isa = PBXBuildFile; productRef = 1CD94A6A2F9888F30065043F /* WhisperKit */; };
+		1CD964452F9B2BF50065043F /* SwiftLlama in Frameworks */ = {isa = PBXBuildFile; productRef = 1CE31F7A2F8A127400F9EBE5 /* SwiftLlama */; };
 		2AKK0001000000000000001B /* kokoro in Resources */ = {isa = PBXBuildFile; fileRef = 2AKK0001000000000000001A /* kokoro */; };
 /* End PBXBuildFile section */
 
@@ -28,7 +29,7 @@
 /* Begin PBXFileReference section */
 		1C162F3D2F46AE46005487FF /* DominusApp.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = DominusApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		1CBD7B9C2F89DA7E00F4D2C9 /* gemma-2-2b-it-Q4_K_M.gguf */ = {isa = PBXFileReference; lastKnownFileType = file; name = "gemma-2-2b-it-Q4_K_M.gguf"; path = "DominusApp/gemma-2-2b-it-Q4_K_M.gguf"; sourceTree = "<group>"; };
-		2AKK0001000000000000001A /* kokoro */ = {isa = PBXFileReference; lastKnownFileType = folder; name = kokoro; path = kokoro; sourceTree = SOURCE_ROOT; };
+		2AKK0001000000000000001A /* kokoro */ = {isa = PBXFileReference; lastKnownFileType = folder; path = kokoro; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -73,8 +74,8 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				1CD964452F9B2BF50065043F /* SwiftLlama in Frameworks */,
 				1CD94A6B2F9888F30065043F /* WhisperKit in Frameworks */,
-				1CE31F7B2F8A127400F9EBE5 /* SwiftLlama in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -188,85 +189,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				1CBD7B9D2F89DA7E00F4D2C9 /* gemma-2-2b-it-Q4_K_M.gguf in Resources */,
-					2AKK0001000000000000001B /* kokoro in Resources */,
-				1CD95F002F9B1F6E0065043F /* sr in Resources */,
-				1CD95F012F9B1F6E0065043F /* he in Resources */,
-				1CD95F052F9B1F6E0065043F /* ne in Resources */,
-				1CD95F062F9B1F6E0065043F /* ky in Resources */,
-				1CD95F0C2F9B1F6E0065043F /* io in Resources */,
-				1CD95F0D2F9B1F6E0065043F /* tn in Resources */,
-				1CD95F182F9B1F6E0065043F /* vi-VN-x-south in Resources */,
-				1CD95F1D2F9B1F6E0065043F /* uk in Resources */,
-				1CD95F222F9B1F6E0065043F /* it in Resources */,
-				1CD95F232F9B1F6E0065043F /* af in Resources */,
-				1CD95F242F9B1F6E0065043F /* am in Resources */,
-				1CD95F282F9B1F6E0065043F /* kl in Resources */,
-				1CD95F302F9B1F6E0065043F /* ja in Resources */,
-				1CD95F342F9B1F6E0065043F /* id in Resources */,
-				1CD95F382F9B1F6E0065043F /* bs in Resources */,
-				1CD95F3B2F9B1F6E0065043F /* en in Resources */,
-				1CD95F422F9B1F6E0065043F /* tk in Resources */,
-				1CD95F452F9B1F6E0065043F /* de in Resources */,
-				1CD95F4B2F9B1F6E0065043F /* kk in Resources */,
-				1CD95F542F9B1F6E0065043F /* ms in Resources */,
-				1CD95F572F9B1F6E0065043F /* vi in Resources */,
-				1CD95F582F9B1F6E0065043F /* or in Resources */,
-				1CD95F592F9B1F6E0065043F /* en-GB-x-gbclan in Resources */,
-				1CD95F5C2F9B1F6E0065043F /* et in Resources */,
-				1CD95F642F9B1F6E0065043F /* gd in Resources */,
-				1CD95F652F9B1F6E0065043F /* hr in Resources */,
-				1CD95F662F9B1F6E0065043F /* as in Resources */,
-				1CD95F6B2F9B1F6E0065043F /* ru-LV in Resources */,
-				1CD95F772F9B1F6E0065043F /* ug in Resources */,
-				1CD95F822F9B1F6E0065043F /* en-US in Resources */,
-				1CD95F832F9B1F6E0065043F /* eu in Resources */,
-				1CD95F842F9B1F6E0065043F /* vi-VN-x-central in Resources */,
-				1CD95F882F9B1F6E0065043F /* mt in Resources */,
-				1CD95F892F9B1F6E0065043F /* el in Resources */,
-				1CD95F8A2F9B1F6E0065043F /* sk in Resources */,
-				1CD95F8E2F9B1F6E0065043F /* qu in Resources */,
-				1CD95F912F9B1F6E0065043F /* si in Resources */,
-				1CD95F932F9B1F6E0065043F /* sw in Resources */,
-				1CD95F972F9B1F6E0065043F /* mi in Resources */,
-				1CD95F982F9B1F6E0065043F /* pl in Resources */,
-				1CD95F9A2F9B1F6E0065043F /* en-GB-x-gbcwmd in Resources */,
-				1CD95F9D2F9B1F6E0065043F /* ia in Resources */,
-				1CD95F9F2F9B1F6E0065043F /* fi in Resources */,
-				1CD95FA02F9B1F6E0065043F /* lb in Resources */,
-				1CD95FA12F9B1F6E0065043F /* sd in Resources */,
-				1CD95FA42F9B1F6E0065043F /* cv in Resources */,
-				1CD95FA52F9B1F6E0065043F /* hi in Resources */,
-				1CD95FA82F9B1F6E0065043F /* kn in Resources */,
-				1CD95FA92F9B1F6E0065043F /* ku in Resources */,
-				1CD95FAD2F9B1F6E0065043F /* ht in Resources */,
-				1CD95FB72F9B1F6E0065043F /* be in Resources */,
-				1CD95FBE2F9B1F6E0065043F /* ur in Resources */,
-				1CD95FBF2F9B1F6E0065043F /* en-GB-x-rp in Resources */,
-				1CD95FC02F9B1F6E0065043F /* pt-BR in Resources */,
-				1CD95FC22F9B1F6E0065043F /* sl in Resources */,
-				1CD95FC32F9B1F6E0065043F /* ta in Resources */,
-				1CD95FC52F9B1F6E0065043F /* cs in Resources */,
-				1CD95FC82F9B1F6E0065043F /* cy in Resources */,
-				1CD95FC92F9B1F6E0065043F /* ar in Resources */,
-				1CD95FCE2F9B1F6E0065043F /* es in Resources */,
-				1CD95FD02F9B1F6E0065043F /* ed in Resources */,
-				1CD95FD52F9B1F6E0065043F /* hy in Resources */,
-				1CD95FD72F9B1F6E0065043F /* gu in Resources */,
-				1CD95FDA2F9B1F6E0065043F /* sq in Resources */,
-				1CD95FDF2F9B1F6E0065043F /* py in Resources */,
-				1CD95FE02F9B1F6E0065043F /* ga in Resources */,
-				1CD95FE52F9B1F6E0065043F /* my in Resources */,
-				1CD95FEC2F9B1F6E0065043F /* fr-CH in Resources */,
-				1CD95FED2F9B1F6E0065043F /* mr in Resources */,
-				1CD95FEE2F9B1F6E0065043F /* ka in Resources */,
-				1CD95FFE2F9B1F6E0065043F /* hu in Resources */,
-				1CD960022F9B1F6E0065043F /* bn in Resources */,
-				1CD960052F9B1F6E0065043F /* pa in Resources */,
-				1CD960072F9B1F6E0065043F /* is in Resources */,
-				1CD960082F9B1F6E0065043F /* eo in Resources */,
-				1CD9600B2F9B1F6E0065043F /* tr in Resources */,
-				1CD9600C2F9B1F6E0065043F /* gn in Resources */,
-				1CD9600E2F9B1F6E0065043F /* pt in Resources */,
+				2AKK0001000000000000001B /* kokoro in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

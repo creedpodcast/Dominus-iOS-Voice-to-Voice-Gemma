@@ -1,10 +1,30 @@
-# Kokoro model data — too large for git, re-download via Scripts/download_kokoro_models.sh
+# Model weights — too large for GitHub
+*.gguf
+*.safetensors
+*.bin
+
+# macOS
+.DS_Store
+
+# Xcode
+*.xcuserstate
+xcuserdata/
+DerivedData/
+build/
+
+# Python
+__pycache__/
+*.pyc
+.env
+swift-llama-cpp/
+
+# Kokoro TTS model data — re-download via Scripts/download_kokoro_models.sh if needed
 kokoro/
-# sherpa-onnx binaries — re-download from GitHub releases
+
+# sherpa-onnx / onnxruntime binaries — re-download from GitHub releases if needed
 DominusApp/sherpa-onnx.xcframework/
 DominusApp/onnxruntime.xcframework/
 DominusApp/sherpa-onnx-xcframework/
+
 # Claude worktrees
 .claude/
-# Build artifacts
-Build Stack Notes/

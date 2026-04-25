@@ -1,153 +1,69 @@
-// SpeechManager.swift — Kokoro-82M on-device TTS (fully local, no internet)
-// Pipelined: next chunk is synthesized while current chunk is playing.
-
 import AVFoundation
 import Combine
 
 @MainActor
-final class SpeechManager: NSObject, AVAudioPlayerDelegate {
+final class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
 
     static let shared = SpeechManager()
 
-    // am_michael = 6, am_adam = 5, bm_george = 9 (British Male)
-    private let voiceSID: Int = 6
-    private let voiceSpeed: Float = 1.0
+    private let synth = AVSpeechSynthesizer()
+    private var queue: [String] = []
+    private var isSpeakingChunk = false
+    private var preferredVoice: AVSpeechSynthesisVoice?
 
+    /// True while the synthesizer is actively speaking — used by VAD logic
     @Published var isSpeaking: Bool = false
+
     var onAllSpeechFinished: (() -> Void)?
 
-    private var tts: SherpaOnnxOfflineTtsWrapper?
-    private var queue: [String] = []
-    private var prefetchedURL: URL? = nil   // next chunk synthesized ahead
-    private var isSynthesizing = false
-    private var isPlaying = false
-    private var player: AVAudioPlayer?
-
-    private let synthQueue = DispatchQueue(label: "dominus.kokoro", qos: .userInitiated)
-
-    private override init() {
+    override init() {
         super.init()
-        tts = makeTTS()
-        if tts == nil {
-            print("⚠️ Kokoro: model not found in bundle. Add DominusApp/kokoro folder to Xcode target.")
-        } else {
-            print("🗣 Kokoro-82M ready (fully local, am_michael)")
-        }
+        synth.delegate = self
+        preferredVoice = pickMaleEnglishVoice()
     }
-
-    // MARK: - Public API
 
     func enqueue(_ text: String) {
         let cleaned = clean(text)
         guard !cleaned.isEmpty else { return }
         queue.append(cleaned)
-        pumpPipeline()
+        startIfNeeded()
     }
 
     func stopAndClear() {
         queue.removeAll()
-        prefetchedURL = nil
-        isSynthesizing = false
-        isPlaying = false
-        isSpeaking = false
-        player?.stop()
-        player = nil
-    }
-
-    // MARK: - Pipeline
-
-    /// Drive the two-stage pipeline: synthesize ahead, play when ready.
-    private func pumpPipeline() {
-        // Stage 1: if nothing is being synthesized and queue has work, start synthesizing
-        if !isSynthesizing && !queue.isEmpty && prefetchedURL == nil {
-            synthesizeNext()
-        }
-        // Stage 2: if not playing and a prefetched chunk is ready, play it
-        if !isPlaying, let url = prefetchedURL {
-            prefetchedURL = nil
-            playURL(url)
+        isSpeakingChunk = false
+        isSpeaking      = false
+        if synth.isSpeaking {
+            synth.stopSpeaking(at: .immediate)
         }
     }
 
-    private func synthesizeNext() {
-        guard let tts, !queue.isEmpty else { return }
-        isSynthesizing = true
-        let chunk = queue.removeFirst()
-        let sid = voiceSID
-        let speed = voiceSpeed
-
-        synthQueue.async { [weak self] in
-            guard let self else { return }
-            let audio = tts.generate(text: chunk, sid: sid, speed: speed)
-            let tmpURL = FileManager.default.temporaryDirectory
-                .appendingPathComponent(UUID().uuidString + ".wav")
-            let saved = audio.save(filename: tmpURL.path)
-
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                self.isSynthesizing = false
-                if saved == 1 {
-                    self.prefetchedURL = tmpURL
-                }
-                self.pumpPipeline()
-            }
-        }
+    private func startIfNeeded() {
+        guard !isSpeakingChunk, !queue.isEmpty else { return }
+        isSpeakingChunk = true
+        speakNext()
     }
 
-    private func playURL(_ url: URL) {
-        do {
-            player = try AVAudioPlayer(contentsOf: url)
-            player?.delegate = self
-            player?.play()
-            isPlaying = true
-            isSpeaking = true
-            // Start synthesizing the next chunk immediately while this one plays
-            pumpPipeline()
-        } catch {
-            print("⚠️ Kokoro playback error:", error)
-            chunkFinished()
-        }
-    }
-
-    private func chunkFinished() {
-        isPlaying = false
-        if queue.isEmpty && prefetchedURL == nil && !isSynthesizing {
-            isSpeaking = false
+    private func speakNext() {
+        guard !queue.isEmpty else {
+            isSpeakingChunk = false
+            isSpeaking      = false
             onAllSpeechFinished?()
-        } else {
-            pumpPipeline()
+            return
         }
+
+        // ── No audio session setup here ──────────────────────────────────
+        // The unified voiceChat session set up by SpeechRecognitionManager
+        // is already active and handles both playback and record together.
+        // Switching sessions here is what caused the echo and choppy audio.
+
+        let chunk = queue.removeFirst()
+        let utt   = AVSpeechUtterance(string: chunk)
+        utt.rate  = AVSpeechUtteranceDefaultSpeechRate
+        utt.voice = preferredVoice ?? AVSpeechSynthesisVoice(language: "en-US")
+        isSpeaking = true
+        synth.speak(utt)
     }
-
-    // MARK: - AVAudioPlayerDelegate
-
-    nonisolated func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
-        Task { @MainActor [weak self] in self?.chunkFinished() }
-    }
-
-    nonisolated func audioPlayerDecodeErrorDidOccur(_ player: AVAudioPlayer, error: Error?) {
-        print("⚠️ Kokoro decode error:", error ?? "unknown")
-        Task { @MainActor [weak self] in self?.chunkFinished() }
-    }
-
-    // MARK: - Engine setup
-
-    private func makeTTS() -> SherpaOnnxOfflineTtsWrapper? {
-        guard let modelDir = Bundle.main.path(forResource: "kokoro", ofType: nil) else {
-            return nil
-        }
-        let kokoro = sherpaOnnxOfflineTtsKokoroModelConfig(
-            model:   modelDir + "/model.onnx",
-            voices:  modelDir + "/voices.bin",
-            tokens:  modelDir + "/tokens.txt",
-            dataDir: modelDir + "/espeak-ng-data"
-        )
-        let modelConfig = sherpaOnnxOfflineTtsModelConfig(kokoro: kokoro, numThreads: 4, debug: 0)
-        var config = sherpaOnnxOfflineTtsConfig(model: modelConfig)
-        return SherpaOnnxOfflineTtsWrapper(config: &config)
-    }
-
-    // MARK: - Text cleaning
 
     private func clean(_ text: String) -> String {
         var s = text.replacingOccurrences(of: "```", with: "")
@@ -160,5 +76,50 @@ final class SpeechManager: NSObject, AVAudioPlayerDelegate {
         .map(String.init)
         .joined()
         return s.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func pickMaleEnglishVoice() -> AVSpeechSynthesisVoice? {
+        let allVoices = AVSpeechSynthesisVoice.speechVoices()
+
+        // Debug: print every English voice available on this device
+        let english = allVoices.filter { $0.language.hasPrefix("en") }
+        print("🎙 Available English voices:")
+        english.forEach { print("   \($0.name) | \($0.language) | quality: \($0.quality.rawValue)") }
+
+        // Preferred male en-US voices — Evan (Enhanced) first.
+        // Use hasPrefix so "Evan" matches "Evan (Enhanced)", "Evan (Premium)" etc.
+        let preferredNames = ["Evan", "Nathan", "Tom", "Reed", "Aaron", "Gordon", "Fred"]
+        for name in preferredNames {
+            if let v = allVoices.first(where: {
+                $0.language == "en-US" && $0.name.hasPrefix(name)
+            }) {
+                print("🎙 Voice selected:", v.name, "|", v.language, "| quality:", v.quality.rawValue)
+                return v
+            }
+        }
+
+        // Fallback: highest quality English voice available
+        guard let best = english.max(by: { $0.quality.rawValue < $1.quality.rawValue }) else {
+            print("🎙 No English voices found, using default.")
+            return nil
+        }
+        print("🎙 Voice selected:", best.name, "|", best.language, "| quality:", best.quality.rawValue)
+        return best
+    }
+
+    // MARK: - Delegate
+
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
+        speakNext()
+    }
+
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
+        isSpeaking = false
+        if !queue.isEmpty {
+            speakNext()
+        } else {
+            isSpeakingChunk = false
+            onAllSpeechFinished?()
+        }
     }
 }
