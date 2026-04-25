@@ -8,12 +8,28 @@
 
 /* Begin PBXBuildFile section */
 		1CBD7B9D2F89DA7E00F4D2C9 /* gemma-2-2b-it-Q4_K_M.gguf in Resources */ = {isa = PBXBuildFile; fileRef = 1CBD7B9C2F89DA7E00F4D2C9 /* gemma-2-2b-it-Q4_K_M.gguf */; };
-		1CE31F7B2F8A127400F9EBE5 /* SwiftLlama in Frameworks */ = {isa = PBXBuildFile; productRef = 1CE31F7A2F8A127400F9EBE5 /* SwiftLlama */; };
+		1CD94A6B2F9888F30065043F /* WhisperKit in Frameworks */ = {isa = PBXBuildFile; productRef = 1CD94A6A2F9888F30065043F /* WhisperKit */; };
+		1CD964452F9B2BF50065043F /* SwiftLlama in Frameworks */ = {isa = PBXBuildFile; productRef = 1CE31F7A2F8A127400F9EBE5 /* SwiftLlama */; };
+		2AKK0001000000000000001B /* kokoro in Resources */ = {isa = PBXBuildFile; fileRef = 2AKK0001000000000000001A /* kokoro */; };
 /* End PBXBuildFile section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		1CD953AE2F9B19210065043F /* Embed Frameworks */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 10;
+			files = (
+			);
+			name = "Embed Frameworks";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		1C162F3D2F46AE46005487FF /* DominusApp.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = DominusApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		1CBD7B9C2F89DA7E00F4D2C9 /* gemma-2-2b-it-Q4_K_M.gguf */ = {isa = PBXFileReference; lastKnownFileType = file; name = "gemma-2-2b-it-Q4_K_M.gguf"; path = "DominusApp/gemma-2-2b-it-Q4_K_M.gguf"; sourceTree = "<group>"; };
+		2AKK0001000000000000001A /* kokoro */ = {isa = PBXFileReference; lastKnownFileType = folder; path = kokoro; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -26,11 +42,27 @@
 		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
+/* Begin PBXFileSystemSynchronizedGroupBuildPhaseMembershipExceptionSet section */
+		1CD953AF2F9B19210065043F /* Exceptions for "DominusApp" folder in "Embed Frameworks" phase from "DominusApp" target */ = {
+			isa = PBXFileSystemSynchronizedGroupBuildPhaseMembershipExceptionSet;
+			attributesByRelativePath = {
+				onnxruntime.xcframework = (CodeSignOnCopy, RemoveHeadersOnCopy, );
+				"sherpa-onnx.xcframework" = (CodeSignOnCopy, RemoveHeadersOnCopy, );
+			};
+			buildPhase = 1CD953AE2F9B19210065043F /* Embed Frameworks */;
+			membershipExceptions = (
+				onnxruntime.xcframework,
+				"sherpa-onnx.xcframework",
+			);
+		};
+/* End PBXFileSystemSynchronizedGroupBuildPhaseMembershipExceptionSet section */
+
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		1C162F3F2F46AE46005487FF /* DominusApp */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
 				1C162F542F46AED5005487FF /* Exceptions for "DominusApp" folder in "DominusApp" target */,
+				1CD953AF2F9B19210065043F /* Exceptions for "DominusApp" folder in "Embed Frameworks" phase from "DominusApp" target */,
 			);
 			path = DominusApp;
 			sourceTree = "<group>";
@@ -42,7 +74,8 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				1CE31F7B2F8A127400F9EBE5 /* SwiftLlama in Frameworks */,
+				1CD964452F9B2BF50065043F /* SwiftLlama in Frameworks */,
+				1CD94A6B2F9888F30065043F /* WhisperKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -53,8 +86,10 @@
 			isa = PBXGroup;
 			children = (
 				1C162F3F2F46AE46005487FF /* DominusApp */,
+				2AKK0001000000000000001A /* kokoro */,
 				1C162F3E2F46AE46005487FF /* Products */,
 				1CE31F142F89F3CF00F9EBE5 /* Recovered References */,
+				1CD94A692F9888F30065043F /* Frameworks */,
 			);
 			sourceTree = "<group>";
 		};
@@ -64,6 +99,13 @@
 				1C162F3D2F46AE46005487FF /* DominusApp.app */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		1CD94A692F9888F30065043F /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			name = Frameworks;
 			sourceTree = "<group>";
 		};
 		1CE31F142F89F3CF00F9EBE5 /* Recovered References */ = {
@@ -84,6 +126,7 @@
 				1C162F392F46AE46005487FF /* Sources */,
 				1C162F3A2F46AE46005487FF /* Frameworks */,
 				1C162F3B2F46AE46005487FF /* Resources */,
+				1CD953AE2F9B19210065043F /* Embed Frameworks */,
 			);
 			buildRules = (
 			);
@@ -91,10 +134,12 @@
 			);
 			fileSystemSynchronizedGroups = (
 				1C162F3F2F46AE46005487FF /* DominusApp */,
+				2AKK0001000000000000001A /* kokoro */,
 			);
 			name = DominusApp;
 			packageProductDependencies = (
 				1CE31F7A2F8A127400F9EBE5 /* SwiftLlama */,
+				1CD94A6A2F9888F30065043F /* WhisperKit */,
 			);
 			productName = DominusApp;
 			productReference = 1C162F3D2F46AE46005487FF /* DominusApp.app */;
@@ -126,6 +171,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				1CE31F792F8A127400F9EBE5 /* XCRemoteSwiftPackageReference "swift-llama-cpp" */,
+				1CD94A462F9887D80065043F /* XCRemoteSwiftPackageReference "WhisperKit" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 1C162F3E2F46AE46005487FF /* Products */;
@@ -143,6 +189,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				1CBD7B9D2F89DA7E00F4D2C9 /* gemma-2-2b-it-Q4_K_M.gguf in Resources */,
+				2AKK0001000000000000001B /* kokoro in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -310,6 +357,7 @@
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "DominusApp/SherpaOnnx-Bridging-Header.h";
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -346,6 +394,7 @@
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "DominusApp/SherpaOnnx-Bridging-Header.h";
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -376,6 +425,14 @@
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */
+		1CD94A462F9887D80065043F /* XCRemoteSwiftPackageReference "WhisperKit" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/argmaxinc/WhisperKit";
+			requirement = {
+				branch = main;
+				kind = branch;
+			};
+		};
 		1CE31F792F8A127400F9EBE5 /* XCRemoteSwiftPackageReference "swift-llama-cpp" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/pgorzelany/swift-llama-cpp";
@@ -387,6 +444,11 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
+		1CD94A6A2F9888F30065043F /* WhisperKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 1CD94A462F9887D80065043F /* XCRemoteSwiftPackageReference "WhisperKit" */;
+			productName = WhisperKit;
+		};
 		1CE31F7A2F8A127400F9EBE5 /* SwiftLlama */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = 1CE31F792F8A127400F9EBE5 /* XCRemoteSwiftPackageReference "swift-llama-cpp" */;

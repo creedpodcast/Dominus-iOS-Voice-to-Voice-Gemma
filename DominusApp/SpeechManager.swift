@@ -19,7 +19,7 @@ final class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
     override init() {
         super.init()
         synth.delegate = self
-        preferredVoice = pickBestEnglishVoice()
+        preferredVoice = pickMaleEnglishVoice()
     }
 
     func enqueue(_ text: String) {
@@ -78,10 +78,29 @@ final class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
         return s.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private func pickBestEnglishVoice() -> AVSpeechSynthesisVoice? {
-        let english = AVSpeechSynthesisVoice.speechVoices().filter { $0.language.hasPrefix("en") }
+    private func pickMaleEnglishVoice() -> AVSpeechSynthesisVoice? {
+        let allVoices = AVSpeechSynthesisVoice.speechVoices()
+
+        // Debug: print every English voice available on this device
+        let english = allVoices.filter { $0.language.hasPrefix("en") }
+        print("🎙 Available English voices:")
+        english.forEach { print("   \($0.name) | \($0.language) | quality: \($0.quality.rawValue)") }
+
+        // Preferred male en-US voices — Evan (Enhanced) first.
+        // Use hasPrefix so "Evan" matches "Evan (Enhanced)", "Evan (Premium)" etc.
+        let preferredNames = ["Evan", "Nathan", "Tom", "Reed", "Aaron", "Gordon", "Fred"]
+        for name in preferredNames {
+            if let v = allVoices.first(where: {
+                $0.language == "en-US" && $0.name.hasPrefix(name)
+            }) {
+                print("🎙 Voice selected:", v.name, "|", v.language, "| quality:", v.quality.rawValue)
+                return v
+            }
+        }
+
+        // Fallback: highest quality English voice available
         guard let best = english.max(by: { $0.quality.rawValue < $1.quality.rawValue }) else {
-            print("🎙 No English voices found.")
+            print("🎙 No English voices found, using default.")
             return nil
         }
         print("🎙 Voice selected:", best.name, "|", best.language, "| quality:", best.quality.rawValue)

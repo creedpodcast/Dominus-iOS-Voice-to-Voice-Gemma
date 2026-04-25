@@ -1,4 +1,5 @@
 import SwiftUI
+import AVFoundation
 
 // MARK: - PTT State
 
@@ -10,8 +11,9 @@ private enum PTTState {
 
 struct ContentView: View {
 
-    @StateObject private var store  = ChatStore()
-    @StateObject private var speech = SpeechRecognitionManager.shared
+    @StateObject private var store   = ChatStore()
+    @StateObject private var speech  = SpeechRecognitionManager.shared
+    @StateObject private var whisper = WhisperManager.shared
 
     @State private var prompt: String = ""
 
@@ -51,6 +53,7 @@ struct ContentView: View {
             store.boot()
             store.loadModelIfNeeded()
             setupVoiceCallbacks()
+            await whisper.loadModel()
         }
         // When generation ends, check if we can return to idle
         .onChange(of: store.isGenerating) { generating in
@@ -75,19 +78,6 @@ struct ContentView: View {
     // MARK: - Voice callbacks
 
     private func setupVoiceCallbacks() {
-
-        // STT ended mid-listen (OS silence timeout) — restart and preserve transcript
-        speech.onSTTEnded = {
-            Task { @MainActor in
-                guard self.pttState == .listening else { return }
-                let preserved = self.speech.transcript
-                try? self.speech.startListening()
-                if !preserved.isEmpty {
-                    self.speech.transcript = preserved
-                }
-            }
-        }
-
         // AI finished speaking — loop back to listening so orb stays open
         SpeechManager.shared.onAllSpeechFinished = {
             Task { @MainActor in
@@ -111,20 +101,22 @@ struct ContentView: View {
             beginListening()
 
         case .listening:
+            // Stop recording and transcribe — no more STT session juggling
             stopPulse()
-            speech.stopListening()
-            let spoken = speech.transcript.trimmingCharacters(in: .whitespacesAndNewlines)
-            speech.transcript = ""
-            guard !spoken.isEmpty else {
-                returnToIdle()
-                return
+            Task {
+                let spoken = await whisper.stopAndTranscribe()
+                guard !spoken.isEmpty else {
+                    returnToIdle()
+                    return
+                }
+                store.send(spoken)
+                pttState = .aiTalking
             }
-            store.send(spoken)
-            pttState = .aiTalking
 
         case .aiTalking:
             SpeechManager.shared.stopAndClear()
             store.stopGeneration()
+            whisper.cancelRecording()
             beginListening()
         }
     }
@@ -132,17 +124,20 @@ struct ContentView: View {
     // MARK: - Listening helpers
 
     private func beginListening() {
-        speech.transcript        = ""
-        speech.autoStopOnSilence = false
         SpeechManager.shared.stopAndClear()
-        try? speech.startListening()
+        // Tear down SpeechRecognitionManager's engine first — two AVAudioEngines
+        // cannot both install a tap on the input node simultaneously.
+        speech.tearDownVoiceSession()
+        whisper.startRecording()
         startPulse()
         pttState = .listening
     }
 
     private func returnToIdle() {
         stopPulse()
-        speech.tearDownVoiceSession()
+        whisper.cancelRecording()
+        // WhisperManager stopped its engine — safe to fully deactivate audio session
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         store.voiceEnabled = voiceWasEnabled
         pttState = .idle
     }
@@ -187,9 +182,10 @@ struct ContentView: View {
     }
 
     private var pttLabel: String {
+        if pttState == .listening && whisper.isTranscribing { return "Transcribing…" }
         switch pttState {
         case .idle:      return ""
-        case .listening: return "Listening… tap when done"
+        case .listening: return "Recording… tap to send"
         case .aiTalking: return "Tap to interrupt"
         }
     }
@@ -368,7 +364,7 @@ struct ContentView: View {
                 if pttState != .idle {
                     VoiceOrbOverlay(
                         orbColor:   pttColor,
-                        audioLevel: speech.audioLevel,
+                        audioLevel: whisper.audioLevel,
                         onTap:      handlePTTTap
                     )
                     .zIndex(10)
@@ -393,9 +389,9 @@ struct ContentView: View {
 
             HStack(spacing: 10) {
 
-                // Text field: shows live transcript while listening, normal prompt otherwise
+                // Text field: shows live Whisper transcript while listening, normal prompt otherwise
                 if pttState == .listening {
-                    TextField("Listening…", text: $speech.transcript)
+                    TextField("Listening…", text: .constant(whisper.liveTranscript))
                         .textFieldStyle(.roundedBorder)
                         .disabled(true)
                 } else {

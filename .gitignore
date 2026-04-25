@@ -1,9 +1,9 @@
-# Model weights - too large for GitHub
+# Model weights — too large for GitHub
 *.gguf
 *.safetensors
 *.bin
 
-# macOS junk
+# macOS
 .DS_Store
 
 # Xcode
@@ -17,3 +17,14 @@ __pycache__/
 *.pyc
 .env
 swift-llama-cpp/
+
+# Kokoro TTS model data — re-download via Scripts/download_kokoro_models.sh if needed
+kokoro/
+
+# sherpa-onnx / onnxruntime binaries — re-download from GitHub releases if needed
+DominusApp/sherpa-onnx.xcframework/
+DominusApp/onnxruntime.xcframework/
+DominusApp/sherpa-onnx-xcframework/
+
+# Claude worktrees
+.claude/
