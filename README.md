@@ -18,7 +18,9 @@ Talk to an AI that talks back. Tap once to speak, tap again when done — the AI
   - Tap during AI response → instantly interrupts voice and generation, starts listening immediately
   - Animated pulse ring while recording, live transcript shown as you speak
   - TTS auto-enables during voice turns, restores your previous setting after
-- **WhisperKit on-device STT** — more accurate transcription via Whisper model
+- **Full-screen loading splash on launch** — blocks interaction until both Gemma and Whisper are fully ready; shows live progress bars per component
+- **In-use status indicators** — floating pill appears whenever the app is processing in the background (transcribing, thinking, generating)
+- **WhisperKit on-device STT** — accurate Whisper-based transcription with live preview while recording
 - **Male TTS voice** — prefers Evan (Enhanced), falls back to Reed, Nathan, Tom, etc.
 - Text chat with Gemma 2B (streaming, token-by-token)
 - RAG long-term memory (semantic search + keyword fallback)
@@ -30,11 +32,40 @@ Talk to an AI that talks back. Tap once to speak, tap again when done — the AI
 - Llama artifact filtering (strips template tokens from output)
 
 ### Planned
-- [ ] Persistent LlamaService (fix Metal memory churn between turns)
 - [ ] Context window increase (2048 → 4096)
 - [ ] Memory retrieval clamping (prevent context overflow)
 - [ ] Silero VAD for optional auto-send on silence
 - [ ] Core ML TTS (custom voice via Neural Engine — no synthesis gaps)
+
+---
+
+## Loading System
+
+Every component that requires time to initialize shows a dedicated progress indicator so the user always knows what the app is doing.
+
+### App Launch
+A full-screen splash covers the app until both models are ready:
+
+| Bar | What it tracks |
+|---|---|
+| `cpu.fill` · Language Model | Gemma 2B Q4_K_M loading into memory via llama.cpp |
+| `waveform` · Voice Recognition | WhisperKit base-English model loading (~145 MB) |
+
+Both bars animate a left-to-right fill with a live percentage. The app becomes interactive only when both hit 100%.
+
+### During Use
+A small floating pill appears at the top of the screen whenever the app is processing:
+
+| State | Pill |
+|---|---|
+| User tapped send in voice mode | `waveform` · Transcribing your speech… |
+| AI generating, TTS not started yet | `brain` · Thinking… |
+| AI generating in text mode | `cpu` · Generating… |
+
+The pill slides in from the top and disappears automatically when the operation completes.
+
+### Background Return
+If the app is foregrounded after a long background session and either model needs to reload, the splash screen reappears with live progress until ready.
 
 ---
 
@@ -43,9 +74,11 @@ Talk to an AI that talks back. Tap once to speak, tap again when done — the AI
 ```
 [idle]
   ↓ tap mic
-[listening]  — waveform icon (red) + animated pulse ring
+[listening]  — waveform icon (red) + animated pulse ring + live transcript
   ↓ tap again
-[AI talking] — mic.fill icon (green) — tap anytime to interrupt
+[transcribing] — "Transcribing your speech…" pill appears
+  ↓ Whisper done
+[AI talking] — "Thinking…" pill → then mic.fill icon (green) as TTS begins
   ↓ AI finishes naturally
 [idle]
 ```
@@ -68,7 +101,7 @@ The same single button controls every step. No hold-to-talk. No automatic silenc
 ### Voice
 | Component | Details |
 |---|---|
-| Speech-to-Text | WhisperKit (on-device Whisper model, high accuracy) |
+| Speech-to-Text | WhisperKit (on-device Whisper base-English, ~145 MB) |
 | Text-to-Speech | `AVSpeechSynthesizer` (Apple Neural Engine, fully local) |
 | TTS voice | Evan Enhanced (male, en-US) — falls back to best available |
 | Input mode | Push-to-talk (manual start/stop) |
@@ -99,13 +132,14 @@ The same single button controls every step. No hold-to-talk. No automatic silenc
 ```
 DominusApp/
 ├── DominusAppApp.swift              Entry point
-├── ContentView.swift                UI — sidebar, chat view, PTT input bar
+├── ContentView.swift                UI — sidebar, chat view, PTT input bar, status pills
 ├── ChatStore.swift                  State — conversations, send(), RAG + profile wiring
-├── GemmaEngine.swift                LLM — model loading, streaming generation
+├── GemmaEngine.swift                LLM — model loading with progress, streaming generation
 ├── SpeechManager.swift              TTS — AVSpeechSynthesizer, male voice selection
-├── SpeechRecognitionManager.swift   STT — AVAudioEngine + SFSpeechRecognizer + VAD
-├── WhisperManager.swift             STT — WhisperKit on-device Whisper transcription
-├── LoadingView.swift                Model loading progress overlay
+├── SpeechRecognitionManager.swift   VAD — amplitude monitoring during AI speech
+├── WhisperManager.swift             STT — WhisperKit on-device transcription with progress
+├── LoadingView.swift                SplashLoadingView + LoadingBarView + StatusPillView
+├── VoiceOrb.swift                   Animated voice orb overlay (PTT visual feedback)
 ├── Memory/
 │   ├── MemoryEmbedder.swift         NLEmbedding vectorisation + cosine similarity
 │   ├── MemoryStore.swift            SwiftData persistence layer
@@ -130,6 +164,6 @@ DominusApp/
 
 ## Known Issues
 
-- **Fresh LlamaService per generation** — creates a new llama.cpp context every turn, churning Metal GPU memory. Can cause instability after many turns. Fix: persistent LlamaService.
 - **Context window** — 2048 tokens can overflow when system prompt + profile + memories + history are large. Fix: increase to 4096.
-- **STT 1-minute OS limit** — Apple's `SFSpeechRecognizer` auto-cancels after ~60 seconds of continuous listening. PTT resets gracefully when this happens.
+- **STT 1-minute OS limit** — Apple's `SFSpeechRecognizer` (used for VAD only) auto-cancels after ~60 seconds. Does not affect WhisperKit transcription.
+- **Live transcript delay** — WhisperKit live preview runs every 2.5 seconds; first preview requires at least 0.5s of audio. Final transcript on send is always complete.
