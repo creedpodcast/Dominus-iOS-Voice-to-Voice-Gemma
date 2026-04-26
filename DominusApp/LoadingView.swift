@@ -47,6 +47,35 @@ struct SplashLoadingView: View {
     }
 }
 
+// MARK: - In-use activity pill (transcribing, thinking, etc.)
+
+struct StatusPillView: View {
+    let icon: String
+    let message: String
+
+    var body: some View {
+        HStack(spacing: 8) {
+            ProgressView()
+                .scaleEffect(0.72)
+                .tint(.white)
+            Image(systemName: icon)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.7))
+            Text(message)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.white)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(
+            Capsule()
+                .fill(Color.black.opacity(0.72))
+                .overlay(Capsule().stroke(Color.white.opacity(0.1), lineWidth: 0.5))
+        )
+        .shadow(color: .black.opacity(0.3), radius: 6, x: 0, y: 2)
+    }
+}
+
 // MARK: - Per-component loading pill
 
 struct LoadingBarView: View {

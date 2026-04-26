@@ -14,6 +14,7 @@ struct ContentView: View {
     @StateObject private var store   = ChatStore()
     @StateObject private var speech  = SpeechRecognitionManager.shared
     @StateObject private var whisper = WhisperManager.shared
+    @ObservedObject private var speechMgr = SpeechManager.shared
 
     @Environment(\.scenePhase) private var scenePhase
 
@@ -103,6 +104,25 @@ struct ContentView: View {
                 }
             }
         }
+    }
+
+    // MARK: - In-use status pill
+
+    /// Returns the pill to show while the app is doing something in the background.
+    /// nil = nothing to show.
+    private var activeStatus: (icon: String, message: String)? {
+        if whisper.isTranscribing {
+            return ("waveform", "Transcribing your speech…")
+        }
+        // AI is generating but TTS hasn't started yet — the "thinking" gap
+        if store.isGenerating && !speechMgr.isSpeaking && pttState == .aiTalking {
+            return ("brain", "Thinking…")
+        }
+        // Text mode: model is generating a reply
+        if store.isGenerating && pttState == .idle {
+            return ("cpu", "Generating…")
+        }
+        return nil
     }
 
     // MARK: - PTT button handler
@@ -385,6 +405,19 @@ struct ContentView: View {
                     )
                     .zIndex(10)
                 }
+
+                // Status pill — floats at top of chat area whenever something is loading
+                VStack {
+                    if let status = activeStatus {
+                        StatusPillView(icon: status.icon, message: status.message)
+                            .padding(.top, 12)
+                            .transition(.move(edge: .top).combined(with: .opacity))
+                    }
+                    Spacer()
+                }
+                .animation(.easeInOut(duration: 0.25), value: activeStatus?.message)
+                .zIndex(20)
+                .allowsHitTesting(false)
             }
             .animation(.easeInOut(duration: 0.35), value: pttState == .idle)
         }
