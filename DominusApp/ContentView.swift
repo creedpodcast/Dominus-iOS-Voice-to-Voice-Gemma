@@ -15,6 +15,8 @@ struct ContentView: View {
     @StateObject private var speech  = SpeechRecognitionManager.shared
     @StateObject private var whisper = WhisperManager.shared
 
+    @Environment(\.scenePhase) private var scenePhase
+
     @State private var prompt: String = ""
 
     // Rename sheet state
@@ -37,42 +39,37 @@ struct ContentView: View {
     @State private var voiceWasEnabled: Bool = false
 
     var body: some View {
-        ZStack {
-            chatUI
-
-            if store.isLoading || !store.isLoaded {
-                LoadingView(
-                    progress: store.loadProgress,
-                    status: store.loadStatus
-                )
-                .transition(.opacity)
-                .zIndex(999)
+        chatUI
+            .task {
+                store.boot()
+                store.loadModelIfNeeded()
+                setupVoiceCallbacks()
+                await whisper.loadModel()
             }
-        }
-        .task {
-            store.boot()
-            store.loadModelIfNeeded()
-            setupVoiceCallbacks()
-            await whisper.loadModel()
-        }
-        // When generation ends, check if we can return to idle
-        .onChange(of: store.isGenerating) { generating in
-            guard pttState == .aiTalking else { return }
-            if !generating && !SpeechManager.shared.isSpeaking {
-                returnToIdle()
+            // Re-check both models whenever the app returns to foreground.
+            .onChange(of: scenePhase) { phase in
+                guard phase == .active else { return }
+                store.loadModelIfNeeded()
+                Task { await whisper.loadModel() }
             }
-        }
-        // Rename alert
-        .alert("Rename Chat", isPresented: $showingRenameAlert) {
-            TextField("Chat title", text: $renameText)
-                .autocorrectionDisabled()
-            Button("Save") {
-                if let id = renameConvoID, !renameText.isEmpty {
-                    store.renameConversation(id, to: renameText)
+            // When generation ends, check if we can return to idle.
+            .onChange(of: store.isGenerating) { generating in
+                guard pttState == .aiTalking else { return }
+                if !generating && !SpeechManager.shared.isSpeaking {
+                    returnToIdle()
                 }
             }
-            Button("Cancel", role: .cancel) {}
-        }
+            // Rename alert
+            .alert("Rename Chat", isPresented: $showingRenameAlert) {
+                TextField("Chat title", text: $renameText)
+                    .autocorrectionDisabled()
+                Button("Save") {
+                    if let id = renameConvoID, !renameText.isEmpty {
+                        store.renameConversation(id, to: renameText)
+                    }
+                }
+                Button("Cancel", role: .cancel) {}
+            }
     }
 
     // MARK: - Voice callbacks
@@ -86,6 +83,40 @@ struct ContentView: View {
                     self.beginListening()
                 }
             }
+        }
+    }
+
+    // MARK: - Loading bars
+
+    private var isGemmaLoading: Bool { store.isLoading || !store.isLoaded }
+    private var isWhisperLoading: Bool { !whisper.modelReady }
+
+    @ViewBuilder
+    private var loadingBarsSection: some View {
+        if isGemmaLoading || isWhisperLoading {
+            VStack(spacing: 6) {
+                if isGemmaLoading {
+                    LoadingBarView(
+                        icon: "cpu.fill",
+                        label: "Language Model",
+                        status: store.loadStatus,
+                        progress: store.loadProgress
+                    )
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                }
+                if isWhisperLoading {
+                    LoadingBarView(
+                        icon: "waveform",
+                        label: "Voice Recognition",
+                        status: whisper.modelStatus,
+                        progress: whisper.loadProgress
+                    )
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .transition(.move(edge: .top).combined(with: .opacity))
         }
     }
 
@@ -199,6 +230,9 @@ struct ContentView: View {
             VStack(spacing: 0) {
                 detailHeader
                 Divider()
+                loadingBarsSection
+                    .animation(.easeInOut(duration: 0.3), value: isGemmaLoading)
+                    .animation(.easeInOut(duration: 0.3), value: isWhisperLoading)
                 chatScrollView
                 if showContextHint {
                     contextHintBanner
@@ -419,7 +453,7 @@ struct ContentView: View {
                     }
                     .frame(width: 52, height: 52)
                 }
-                .disabled(store.isLoading || !store.isLoaded)
+                .disabled(store.isLoading || !store.isLoaded || !whisper.modelReady)
                 // ────────────────────────────────────────────────────────────
 
                 // Send / stop button — only shown in idle text mode
