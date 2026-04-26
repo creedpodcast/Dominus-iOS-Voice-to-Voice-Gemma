@@ -25,6 +25,8 @@ final class WhisperManager: ObservableObject {
     @Published var isTranscribing:  Bool   = false
     @Published var audioLevel:      Float  = 0.0
     @Published var modelReady:      Bool   = false
+    @Published var isLoadingModel:  Bool   = false
+    @Published var loadProgress:    Double = 0.0
     @Published var modelStatus:     String = "Whisper not loaded"
     @Published var liveTranscript:  String = ""
 
@@ -45,15 +47,40 @@ final class WhisperManager: ObservableObject {
     /// Downloads and caches the Whisper base-English model (~145 MB, once only).
     /// Call from ContentView.task — safe to call multiple times.
     func loadModel() async {
-        guard !modelReady else { return }
-        modelStatus = "Downloading Whisper model…"
+        guard !modelReady, !isLoadingModel else { return }
+        isLoadingModel = true
+        loadProgress   = 0.0
+        modelStatus    = "Checking Whisper model…"
+
+        // Staged progress animation that runs while the real async load is in flight.
+        let progressTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 120_000_000)
+                guard !Task.isCancelled, let self else { break }
+                if self.loadProgress < 0.30 {
+                    self.loadProgress = min(self.loadProgress + 0.025, 0.30)
+                } else if self.loadProgress < 0.80 {
+                    self.loadProgress = min(self.loadProgress + 0.012, 0.80)
+                } else if self.loadProgress < 0.95 {
+                    self.loadProgress = min(self.loadProgress + 0.004, 0.95)
+                }
+            }
+        }
+
         do {
+            modelStatus = "Loading Whisper model…"
             whisperKit  = try await WhisperKit(model: "openai_whisper-base.en")
-            modelReady  = true
-            modelStatus = "Whisper ready"
+            progressTask.cancel()
+            loadProgress   = 1.0
+            modelReady     = true
+            isLoadingModel = false
+            modelStatus    = "Whisper ready"
             print("✅ WhisperKit loaded")
         } catch {
-            modelStatus = "Whisper load failed: \(error.localizedDescription)"
+            progressTask.cancel()
+            loadProgress   = 0.0
+            isLoadingModel = false
+            modelStatus    = "Whisper load failed: \(error.localizedDescription)"
             print("❌ WhisperKit load error:", error)
         }
     }

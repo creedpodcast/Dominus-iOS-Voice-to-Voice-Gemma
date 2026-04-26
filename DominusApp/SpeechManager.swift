@@ -2,7 +2,7 @@ import AVFoundation
 import Combine
 
 @MainActor
-final class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
+final class SpeechManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
 
     static let shared = SpeechManager()
 

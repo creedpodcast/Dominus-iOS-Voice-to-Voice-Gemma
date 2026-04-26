@@ -14,6 +14,9 @@ struct ContentView: View {
     @StateObject private var store   = ChatStore()
     @StateObject private var speech  = SpeechRecognitionManager.shared
     @StateObject private var whisper = WhisperManager.shared
+    @ObservedObject private var speechMgr = SpeechManager.shared
+
+    @Environment(\.scenePhase) private var scenePhase
 
     @State private var prompt: String = ""
 
@@ -36,26 +39,40 @@ struct ContentView: View {
     // Remember whether voice was on before PTT so we can restore it
     @State private var voiceWasEnabled: Bool = false
 
+    private var isFullyLoaded: Bool {
+        store.isLoaded && whisper.modelReady
+    }
+
     var body: some View {
         ZStack {
             chatUI
 
-            if store.isLoading || !store.isLoaded {
-                LoadingView(
-                    progress: store.loadProgress,
-                    status: store.loadStatus
+            if !isFullyLoaded {
+                SplashLoadingView(
+                    gemmaProgress:  store.loadProgress,
+                    gemmaStatus:    store.loadStatus,
+                    whisperProgress: whisper.loadProgress,
+                    whisperStatus:  whisper.modelStatus
                 )
                 .transition(.opacity)
                 .zIndex(999)
+                .allowsHitTesting(true)
             }
         }
+        .animation(.easeInOut(duration: 0.5), value: isFullyLoaded)
         .task {
             store.boot()
             store.loadModelIfNeeded()
             setupVoiceCallbacks()
             await whisper.loadModel()
         }
-        // When generation ends, check if we can return to idle
+        // Re-check both models whenever the app returns to foreground.
+        .onChange(of: scenePhase) { phase in
+            guard phase == .active else { return }
+            store.loadModelIfNeeded()
+            Task { await whisper.loadModel() }
+        }
+        // When generation ends, check if we can return to idle.
         .onChange(of: store.isGenerating) { generating in
             guard pttState == .aiTalking else { return }
             if !generating && !SpeechManager.shared.isSpeaking {
@@ -87,6 +104,25 @@ struct ContentView: View {
                 }
             }
         }
+    }
+
+    // MARK: - In-use status pill
+
+    /// Returns the pill to show while the app is doing something in the background.
+    /// nil = nothing to show.
+    private var activeStatus: (icon: String, message: String)? {
+        if whisper.isTranscribing {
+            return ("waveform", "Transcribing your speech…")
+        }
+        // AI is generating but TTS hasn't started yet — the "thinking" gap
+        if store.isGenerating && !speechMgr.isSpeaking && pttState == .aiTalking {
+            return ("brain", "Thinking…")
+        }
+        // Text mode: model is generating a reply
+        if store.isGenerating && pttState == .idle {
+            return ("cpu", "Generating…")
+        }
+        return nil
     }
 
     // MARK: - PTT button handler
@@ -369,6 +405,19 @@ struct ContentView: View {
                     )
                     .zIndex(10)
                 }
+
+                // Status pill — floats at top of chat area whenever something is loading
+                VStack {
+                    if let status = activeStatus {
+                        StatusPillView(icon: status.icon, message: status.message)
+                            .padding(.top, 12)
+                            .transition(.move(edge: .top).combined(with: .opacity))
+                    }
+                    Spacer()
+                }
+                .animation(.easeInOut(duration: 0.25), value: activeStatus?.message)
+                .zIndex(20)
+                .allowsHitTesting(false)
             }
             .animation(.easeInOut(duration: 0.35), value: pttState == .idle)
         }
@@ -419,7 +468,7 @@ struct ContentView: View {
                     }
                     .frame(width: 52, height: 52)
                 }
-                .disabled(store.isLoading || !store.isLoaded)
+                .disabled(store.isLoading || !store.isLoaded || !whisper.modelReady)
                 // ────────────────────────────────────────────────────────────
 
                 // Send / stop button — only shown in idle text mode
