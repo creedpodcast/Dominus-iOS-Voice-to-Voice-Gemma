@@ -38,38 +38,57 @@ struct ContentView: View {
     // Remember whether voice was on before PTT so we can restore it
     @State private var voiceWasEnabled: Bool = false
 
+    private var isFullyLoaded: Bool {
+        store.isLoaded && whisper.modelReady
+    }
+
     var body: some View {
-        chatUI
-            .task {
-                store.boot()
-                store.loadModelIfNeeded()
-                setupVoiceCallbacks()
-                await whisper.loadModel()
+        ZStack {
+            chatUI
+
+            if !isFullyLoaded {
+                SplashLoadingView(
+                    gemmaProgress:  store.loadProgress,
+                    gemmaStatus:    store.loadStatus,
+                    whisperProgress: whisper.loadProgress,
+                    whisperStatus:  whisper.modelStatus
+                )
+                .transition(.opacity)
+                .zIndex(999)
+                .allowsHitTesting(true)
             }
-            // Re-check both models whenever the app returns to foreground.
-            .onChange(of: scenePhase) { phase in
-                guard phase == .active else { return }
-                store.loadModelIfNeeded()
-                Task { await whisper.loadModel() }
+        }
+        .animation(.easeInOut(duration: 0.5), value: isFullyLoaded)
+        .task {
+            store.boot()
+            store.loadModelIfNeeded()
+            setupVoiceCallbacks()
+            await whisper.loadModel()
+        }
+        // Re-check both models whenever the app returns to foreground.
+        .onChange(of: scenePhase) { phase in
+            guard phase == .active else { return }
+            store.loadModelIfNeeded()
+            Task { await whisper.loadModel() }
+        }
+        // When generation ends, check if we can return to idle.
+        .onChange(of: store.isGenerating) { generating in
+            guard pttState == .aiTalking else { return }
+            if !generating && !SpeechManager.shared.isSpeaking {
+                returnToIdle()
             }
-            // When generation ends, check if we can return to idle.
-            .onChange(of: store.isGenerating) { generating in
-                guard pttState == .aiTalking else { return }
-                if !generating && !SpeechManager.shared.isSpeaking {
-                    returnToIdle()
+        }
+        // Rename alert
+        .alert("Rename Chat", isPresented: $showingRenameAlert) {
+            TextField("Chat title", text: $renameText)
+                .autocorrectionDisabled()
+            Button("Save") {
+                if let id = renameConvoID, !renameText.isEmpty {
+                    store.renameConversation(id, to: renameText)
                 }
             }
-            // Rename alert
-            .alert("Rename Chat", isPresented: $showingRenameAlert) {
-                TextField("Chat title", text: $renameText)
-                    .autocorrectionDisabled()
-                Button("Save") {
-                    if let id = renameConvoID, !renameText.isEmpty {
-                        store.renameConversation(id, to: renameText)
-                    }
-                }
-                Button("Cancel", role: .cancel) {}
-            }
+            Button("Cancel", role: .cancel) {}
+        }
     }
 
     // MARK: - Voice callbacks
@@ -83,40 +102,6 @@ struct ContentView: View {
                     self.beginListening()
                 }
             }
-        }
-    }
-
-    // MARK: - Loading bars
-
-    private var isGemmaLoading: Bool { store.isLoading || !store.isLoaded }
-    private var isWhisperLoading: Bool { !whisper.modelReady }
-
-    @ViewBuilder
-    private var loadingBarsSection: some View {
-        if isGemmaLoading || isWhisperLoading {
-            VStack(spacing: 6) {
-                if isGemmaLoading {
-                    LoadingBarView(
-                        icon: "cpu.fill",
-                        label: "Language Model",
-                        status: store.loadStatus,
-                        progress: store.loadProgress
-                    )
-                    .transition(.move(edge: .top).combined(with: .opacity))
-                }
-                if isWhisperLoading {
-                    LoadingBarView(
-                        icon: "waveform",
-                        label: "Voice Recognition",
-                        status: whisper.modelStatus,
-                        progress: whisper.loadProgress
-                    )
-                    .transition(.move(edge: .top).combined(with: .opacity))
-                }
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .transition(.move(edge: .top).combined(with: .opacity))
         }
     }
 
@@ -230,9 +215,6 @@ struct ContentView: View {
             VStack(spacing: 0) {
                 detailHeader
                 Divider()
-                loadingBarsSection
-                    .animation(.easeInOut(duration: 0.3), value: isGemmaLoading)
-                    .animation(.easeInOut(duration: 0.3), value: isWhisperLoading)
                 chatScrollView
                 if showContextHint {
                     contextHintBanner

@@ -1,8 +1,54 @@
 import SwiftUI
 
-/// A compact, per-component loading pill: icon + label + thin progress bar + percentage.
-/// Appears while the component is loading and should be removed from the view hierarchy
-/// once progress reaches 1.0 so it animates out.
+// MARK: - Splash loading screen (blocks all interaction until fully ready)
+
+struct SplashLoadingView: View {
+    let gemmaProgress: Double
+    let gemmaStatus: String
+    let whisperProgress: Double
+    let whisperStatus: String
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+
+            VStack(spacing: 0) {
+                Spacer()
+
+                VStack(spacing: 10) {
+                    Text("Dominus")
+                        .font(.system(size: 52, weight: .bold, design: .rounded))
+                        .foregroundStyle(.white)
+                    Text("On-device AI assistant")
+                        .font(.subheadline)
+                        .foregroundStyle(.white.opacity(0.4))
+                }
+
+                Spacer()
+
+                VStack(spacing: 14) {
+                    LoadingBarView(
+                        icon: "cpu.fill",
+                        label: "Language Model",
+                        status: gemmaStatus,
+                        progress: gemmaProgress
+                    )
+                    LoadingBarView(
+                        icon: "waveform",
+                        label: "Voice Recognition",
+                        status: whisperStatus,
+                        progress: whisperProgress
+                    )
+                }
+                .padding(.horizontal, 28)
+                .padding(.bottom, 64)
+            }
+        }
+    }
+}
+
+// MARK: - Per-component loading pill
+
 struct LoadingBarView: View {
     let icon: String
     let label: String
@@ -55,17 +101,15 @@ struct LoadingBarView: View {
                 }
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
         .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(.regularMaterial)
-                .environment(\.colorScheme, .dark)
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color.white.opacity(0.06))
                 .overlay(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
                         .stroke(Color.white.opacity(0.08), lineWidth: 0.5)
                 )
         )
-        .shadow(color: .black.opacity(0.35), radius: 8, x: 0, y: 3)
     }
 }
