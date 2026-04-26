@@ -3,20 +3,41 @@ import SwiftUI
 /// Full-screen voice orb overlay shown during PTT voice sessions.
 /// Three ripple rings expand outward like sonar pings.
 /// The solid core scales with live microphone amplitude.
+/// Tap the orb to advance the PTT state. Tap X to exit voice mode entirely.
 struct VoiceOrbOverlay: View {
 
-    let orbColor: Color
+    let orbColor:   Color
     let audioLevel: Float
-    let onTap: () -> Void
+    let onTap:      () -> Void
+    let onDismiss:  () -> Void
 
     var body: some View {
         ZStack {
+            // Dim background — tapping it acts the same as tapping the orb
             Color.black.opacity(0.55)
                 .ignoresSafeArea()
                 .onTapGesture { onTap() }
 
-            VoiceOrb(color: orbColor, audioLevel: audioLevel)
-                .onTapGesture { onTap() }
+            VStack(spacing: 36) {
+                VoiceOrb(color: orbColor, audioLevel: audioLevel)
+                    .onTapGesture { onTap() }
+
+                // X button — exits voice mode, stops all generation and TTS
+                Button(action: onDismiss) {
+                    ZStack {
+                        Circle()
+                            .fill(Color.white.opacity(0.12))
+                            .frame(width: 52, height: 52)
+                        Circle()
+                            .stroke(Color.white.opacity(0.25), lineWidth: 1)
+                            .frame(width: 52, height: 52)
+                        Image(systemName: "xmark")
+                            .font(.system(size: 18, weight: .semibold))
+                            .foregroundStyle(.white)
+                    }
+                }
+                .buttonStyle(.plain)
+            }
         }
         .transition(
             .asymmetric(

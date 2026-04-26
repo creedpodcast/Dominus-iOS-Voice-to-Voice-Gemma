@@ -178,6 +178,13 @@ struct ContentView: View {
         pttState = .idle
     }
 
+    /// Called by the X button — immediately stops everything and exits voice mode.
+    private func exitVoiceMode() {
+        SpeechManager.shared.stopAndClear()
+        store.stopGeneration()
+        returnToIdle()
+    }
+
     // MARK: - Pulse animation
 
     private func startPulse() {
@@ -401,7 +408,8 @@ struct ContentView: View {
                     VoiceOrbOverlay(
                         orbColor:   pttColor,
                         audioLevel: whisper.audioLevel,
-                        onTap:      handlePTTTap
+                        onTap:      handlePTTTap,
+                        onDismiss:  exitVoiceMode
                     )
                     .zIndex(10)
                 }
