@@ -57,10 +57,16 @@ final class SpeechManager: NSObject, ObservableObject, AVSpeechSynthesizerDelega
         // is already active and handles both playback and record together.
         // Switching sessions here is what caused the echo and choppy audio.
 
+        // Switch to spokenAudio mode for full speaker volume.
+        // voiceChat mode applies phone-call AEC that significantly attenuates output.
+        // The mic tap is already removed during AI talking so there is no echo risk.
+        try? AVAudioSession.sharedInstance().setMode(.spokenAudio)
+
         let chunk = queue.removeFirst()
         let utt   = AVSpeechUtterance(string: chunk)
-        utt.rate  = AVSpeechUtteranceDefaultSpeechRate
-        utt.voice = preferredVoice ?? AVSpeechSynthesisVoice(language: "en-US")
+        utt.volume = 1.0
+        utt.rate   = AVSpeechUtteranceDefaultSpeechRate
+        utt.voice  = preferredVoice ?? AVSpeechSynthesisVoice(language: "en-US")
         isSpeaking = true
         synth.speak(utt)
     }
