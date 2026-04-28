@@ -124,7 +124,7 @@ final class ChatStore: ObservableObject {
     private let engine = GemmaEngine()
 
     /// Core identity — kept intentionally short to conserve token budget.
-    private let systemPrompt = "You are Dominus — a friendly but curious AI Assistant."
+    private let systemPrompt = "You are Dominus — a friendly but curious AI Assistant. Answer the user directly. Do not add unsolicited greetings, introductions, or preambles, even on the first turn of a new chat."
     
     /// Keep only the last 4 turns (8 messages) of raw conversation in the prompt.
     /// Older context is covered by RAG memory retrieval instead.
@@ -332,8 +332,13 @@ final class ChatStore: ObservableObject {
                 )
             }
 
-            // ── Schedule LLM title generation (idempotent, no-op if already titled) ──
-            scheduleTitleGeneration(for: conversations[convoIndex].id)
+            // ── Schedule LLM title generation after the 5th user turn ──
+            // Earlier turns rely on the exit triggers (chat-switch, app-background)
+            // to produce a title for short-lived chats.
+            let userTurns = conversations[convoIndex].messages.filter { $0.role == .user }.count
+            if userTurns >= 5 {
+                scheduleTitleGeneration(for: conversations[convoIndex].id)
+            }
 
         } catch {
             // SwiftLlama throws LlamaError instead of CancellationError when the task
