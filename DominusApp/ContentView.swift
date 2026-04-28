@@ -29,6 +29,9 @@ struct ContentView: View {
     @State private var showContextHint: Bool = false
     @State private var hasShownContextHint: Bool = false
 
+    // Profile sheet
+    @State private var showProfileSheet = false
+
     // Push-to-talk state
     @State private var pttState: PTTState = .idle
 
@@ -279,6 +282,13 @@ struct ContentView: View {
         }
         .navigationTitle("Chats")
         .toolbar {
+            ToolbarItem(placement: .navigationBarLeading) {
+                Button {
+                    showProfileSheet = true
+                } label: {
+                    Image(systemName: "person.circle")
+                }
+            }
             ToolbarItem(placement: .navigationBarTrailing) {
                 Button {
                     store.newConversation()
@@ -286,6 +296,9 @@ struct ContentView: View {
                     Image(systemName: "square.and.pencil")
                 }
             }
+        }
+        .sheet(isPresented: $showProfileSheet) {
+            ProfileView()
         }
     }
 

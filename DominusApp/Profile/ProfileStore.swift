@@ -15,6 +15,13 @@ final class ProfileStore {
     /// Observable so the UI can display/edit the profile
     var facts: [ProfileFact] = []
 
+    /// Free-text instructions for how Dominus should speak/behave.
+    /// Persisted in UserDefaults so no SwiftData migration is needed.
+    var persona: String {
+        get { UserDefaults.standard.string(forKey: "dominus_persona") ?? "" }
+        set { UserDefaults.standard.set(newValue, forKey: "dominus_persona") }
+    }
+
     init() {
         do {
             container = try ModelContainer(for: ProfileFact.self)
@@ -70,11 +77,21 @@ final class ProfileStore {
     // MARK: - System prompt injection
 
     /// Returns a compact string to prepend to the system prompt.
-    /// Empty string when no facts exist.
+    /// Empty string when neither facts nor persona exist.
     func systemPromptBlock() -> String {
-        guard !facts.isEmpty else { return "" }
-        let lines = facts.map { "- \($0.key): \($0.value)" }.joined(separator: "\n")
-        return "What you know about the user:\n\(lines)"
+        var parts: [String] = []
+
+        if !facts.isEmpty {
+            let lines = facts.map { "- \($0.key): \($0.value)" }.joined(separator: "\n")
+            parts.append("What you know about the user:\n\(lines)")
+        }
+
+        let p = persona.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !p.isEmpty {
+            parts.append("How to talk to this user:\n\(p)")
+        }
+
+        return parts.joined(separator: "\n\n")
     }
 
     // MARK: - Auto-extract facts from conversation
