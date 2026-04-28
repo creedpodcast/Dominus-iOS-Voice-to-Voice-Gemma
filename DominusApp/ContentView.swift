@@ -66,11 +66,19 @@ struct ContentView: View {
             setupVoiceCallbacks()
             await whisper.loadModel()
         }
-        // Re-check both models whenever the app returns to foreground.
+        // Re-check both models whenever the app returns to foreground;
+        // also fire a title-generation pass when the user backgrounds the app
+        // so short-lived chats still get a real title.
         .onChange(of: scenePhase) { phase in
-            guard phase == .active else { return }
-            store.loadModelIfNeeded()
-            Task { await whisper.loadModel() }
+            switch phase {
+            case .active:
+                store.loadModelIfNeeded()
+                Task { await whisper.loadModel() }
+            case .background:
+                store.generateTitleForCurrentIfNeeded()
+            default:
+                break
+            }
         }
         // When generation ends, check if we can return to idle.
         .onChange(of: store.isGenerating) { generating in
@@ -287,7 +295,7 @@ struct ContentView: View {
             Text(convo.title)
                 .lineLimit(1)
                 .font(.body)
-            Text(convo.updatedAt, style: .relative)
+            Text(convo.startedAtDisplay)
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
