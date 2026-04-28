@@ -40,10 +40,13 @@ final class MemoryRetriever {
 
     // MARK: - Retrieve relevant memories
 
-    func retrieve(query: String, topK: Int = 5) -> String {
-        let all = store.fetchAll()
+    /// Returns the top-K most relevant memories for `query` *within a single conversation*.
+    /// Cross-conversation retrieval was removed because semantic matches between
+    /// unrelated chats caused old-chat content to bleed into new chats.
+    func retrieve(query: String, conversationID: UUID, topK: Int = 5) -> String {
+        let all = store.fetch(conversationID: conversationID)
         guard !all.isEmpty else {
-            print("🔍 RAG: no memories stored yet")
+            print("🔍 RAG: no memories for this conversation yet")
             return ""
         }
 

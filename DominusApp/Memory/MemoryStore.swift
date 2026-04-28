@@ -57,6 +57,17 @@ final class MemoryStore {
         return (try? context.fetch(descriptor)) ?? []
     }
 
+    /// Fetch only the memories that belong to a single conversation.
+    /// Used by RAG retrieval so a new chat never pulls context from an unrelated chat.
+    func fetch(conversationID: UUID) -> [MemoryRecord] {
+        let idStr = conversationID.uuidString
+        let descriptor = FetchDescriptor<MemoryRecord>(
+            predicate: #Predicate { $0.conversationID == idStr },
+            sortBy: [SortDescriptor(\.createdAt, order: .reverse)]
+        )
+        return (try? context.fetch(descriptor)) ?? []
+    }
+
     // MARK: - Prune old entries
 
     /// Keep only the most recent `limit` records per conversation.
