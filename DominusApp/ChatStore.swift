@@ -178,8 +178,13 @@ final class ChatStore: ObservableObject {
         // 1. User profile — always injected first
         let profileBlock = ProfileStore.shared.systemPromptBlock()
 
-        // 2. Retrieve semantically relevant memories for this query
-        let memoryContext = MemoryRetriever.shared.retrieve(query: trimmed, topK: 5)
+        // 2. Retrieve semantically relevant memories from THIS conversation only.
+        // Cross-conversation retrieval is intentionally disabled — see MemoryRetriever.
+        let memoryContext = MemoryRetriever.shared.retrieve(
+            query: trimmed,
+            conversationID: conversations[convoIndex].id,
+            topK: 5
+        )
 
         // 3. Compose full system prompt
         var fullSystemPrompt = systemPrompt
