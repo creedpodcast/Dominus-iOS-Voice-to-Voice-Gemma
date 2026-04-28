@@ -98,6 +98,25 @@ final class GemmaEngine: ObservableObject {
         )
     }
 
+    /// One-shot completion. Consumes the stream until EOS or `maxChars` is reached, whichever comes first.
+    /// Used for short side-channel generations (e.g. chat title generation) that must not appear
+    /// in the conversation transcript or persistent context.
+    func generateOnce(
+        _ messages: [LlamaChatMessage],
+        temperature: Float = 0.4,
+        seed: UInt32 = 7,
+        maxChars: Int = 200
+    ) async throws -> String {
+        let stream = try await streamChat(messages, temperature: temperature, seed: seed)
+        var result = ""
+        for try await token in stream {
+            try Task.checkCancellation()
+            result += token
+            if result.count >= maxChars { break }
+        }
+        return result
+    }
+
     private func startStagedProgress() {
         stopStagedProgress()
 
