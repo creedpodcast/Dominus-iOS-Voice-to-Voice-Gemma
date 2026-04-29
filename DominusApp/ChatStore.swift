@@ -308,11 +308,11 @@ final class ChatStore: ObservableObject {
                     ttsBuffer += token
                     let hitSentenceEnd   = ttsBuffer.last == "." || ttsBuffer.last == "?" || ttsBuffer.last == "!"
                     let hitNewline       = ttsBuffer.contains("\n")
-                    let bufferLongEnough = ttsBuffer.count >= 120
+                    let bufferTooLong    = ttsBuffer.count >= 300
 
-                    // Apple TTS synthesizes instantly — small chunks sound better
-                    // because each sentence gets its own natural prosody.
-                    if ttsBuffer.count >= 40 && (hitSentenceEnd || hitNewline || bufferLongEnough) {
+                    // Fire on complete sentences immediately — no minimum length guard.
+                    // 300-char ceiling only cuts truly runaway sentences.
+                    if hitSentenceEnd || hitNewline || bufferTooLong {
                         SpeechManager.shared.enqueue(ttsBuffer)
                         lastEnqueuedAtCount = assistantText.count
                         ttsBuffer = ""

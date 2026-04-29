@@ -106,10 +106,14 @@ struct ContentView: View {
     // MARK: - Voice callbacks
 
     private func setupVoiceCallbacks() {
-        // AI finished speaking — loop back to listening so orb stays open
+        // AI finished speaking — wait a beat for the audio hardware to fully drain,
+        // then flip to listening. Without the delay the orb goes red while the last
+        // syllable is still audible and the mic picks up the AI's own voice.
         SpeechManager.shared.onAllSpeechFinished = {
             Task { @MainActor in
                 guard self.pttState == .aiTalking else { return }
+                try? await Task.sleep(nanoseconds: 350_000_000) // 350 ms grace period
+                guard self.pttState == .aiTalking else { return } // re-check after sleep
                 if !self.store.isGenerating {
                     self.beginListening()
                 }
