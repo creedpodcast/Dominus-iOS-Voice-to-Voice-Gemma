@@ -3,13 +3,20 @@ import SwiftUI
 /// Full-screen voice orb overlay shown during PTT voice sessions.
 /// Three ripple rings expand outward like sonar pings.
 /// The solid core scales with live microphone amplitude.
-/// Tap the orb to advance the PTT state. Tap X to exit voice mode entirely.
+/// Tap the orb to advance the PTT state.
+/// Buttons below: mic mute (kill mic input so stray speech isn't transcribed),
+/// stop (kill current AI response, stay in voice mode),
+/// X (exit voice mode entirely).
 struct VoiceOrbOverlay: View {
 
-    let orbColor:   Color
-    let audioLevel: Float
-    let onTap:      () -> Void
-    let onDismiss:  () -> Void
+    let orbColor:      Color
+    let audioLevel:    Float
+    let isMicMuted:    Bool
+    let isGenerating:  Bool   // controls whether the stop button is visible
+    let onTap:         () -> Void
+    let onToggleMicMute: () -> Void
+    let onStop:        () -> Void
+    let onDismiss:     () -> Void
 
     var body: some View {
         ZStack {
@@ -22,21 +29,30 @@ struct VoiceOrbOverlay: View {
                 VoiceOrb(color: orbColor, audioLevel: audioLevel)
                     .onTapGesture { onTap() }
 
-                // X button — exits voice mode, stops all generation and TTS
-                Button(action: onDismiss) {
-                    ZStack {
-                        Circle()
-                            .fill(Color.white.opacity(0.12))
-                            .frame(width: 52, height: 52)
-                        Circle()
-                            .stroke(Color.white.opacity(0.25), lineWidth: 1)
-                            .frame(width: 52, height: 52)
-                        Image(systemName: "xmark")
-                            .font(.system(size: 18, weight: .semibold))
-                            .foregroundStyle(.white)
+                // Bottom button row: mic mute, stop (when generating), exit
+                HStack(spacing: 28) {
+                    circleButton(
+                        icon: isMicMuted ? "mic.slash.fill" : "mic.fill",
+                        tint: isMicMuted ? .red.opacity(0.85) : .white,
+                        action: onToggleMicMute
+                    )
+
+                    if isGenerating {
+                        circleButton(
+                            icon: "stop.fill",
+                            tint: .orange,
+                            action: onStop
+                        )
+                        .transition(.scale.combined(with: .opacity))
                     }
+
+                    circleButton(
+                        icon: "xmark",
+                        tint: .white,
+                        action: onDismiss
+                    )
                 }
-                .buttonStyle(.plain)
+                .animation(.easeInOut(duration: 0.2), value: isGenerating)
             }
         }
         .transition(
@@ -45,6 +61,24 @@ struct VoiceOrbOverlay: View {
                 removal:    .opacity.combined(with: .scale(scale: 1.1))
             )
         )
+    }
+
+    @ViewBuilder
+    private func circleButton(icon: String, tint: Color, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            ZStack {
+                Circle()
+                    .fill(Color.white.opacity(0.12))
+                    .frame(width: 52, height: 52)
+                Circle()
+                    .stroke(Color.white.opacity(0.25), lineWidth: 1)
+                    .frame(width: 52, height: 52)
+                Image(systemName: icon)
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(tint)
+            }
+        }
+        .buttonStyle(.plain)
     }
 }
 

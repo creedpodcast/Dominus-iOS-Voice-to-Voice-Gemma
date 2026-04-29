@@ -107,8 +107,12 @@ final class ChatStore: ObservableObject {
     @Published var loadStatus: String = "Idle"
     @Published var loadProgress: Double = 0.0
 
-    @Published var voiceEnabled: Bool = false {
+    /// Master TTS toggle. Used in BOTH text mode (header speaker icon) and
+    /// voice mode (orb mute button). When entering PTT we force this true and
+    /// restore the prior value on exit. Persisted across launches in UserDefaults.
+    @Published var voiceEnabled: Bool = UserDefaults.standard.bool(forKey: "voiceEnabled") {
         didSet {
+            UserDefaults.standard.set(voiceEnabled, forKey: "voiceEnabled")
             if !voiceEnabled {
                 SpeechManager.shared.stopAndClear()
             }
@@ -202,8 +206,11 @@ final class ChatStore: ObservableObject {
     }
 
     /// Stops the current generation without sending anything new.
+    /// Also clears any pending or playing TTS — when the user hits stop they expect
+    /// silence, not for the AI to keep speaking the already-buffered sentences.
     func stopGeneration() {
         generationTask?.cancel()
+        SpeechManager.shared.stopAndClear()
     }
 
     /// Non-async entry point — cancels any in-progress generation instantly, then starts fresh.
