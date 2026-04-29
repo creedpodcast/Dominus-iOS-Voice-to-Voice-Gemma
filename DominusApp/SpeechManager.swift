@@ -25,6 +25,10 @@ final class SpeechManager: NSObject, ObservableObject, AVSpeechSynthesizerDelega
     /// True while any utterance is queued or actively playing
     @Published var isSpeaking: Bool = false
 
+    /// ID of the chat message currently being read aloud via `speak(_:for:)`.
+    /// `nil` when nothing is playing or when streaming live generation TTS.
+    @Published var nowPlayingMessageID: UUID?
+
     /// Fires once when ALL queued utterances have finished playing.
     var onAllSpeechFinished: (() -> Void)?
 
@@ -52,9 +56,19 @@ final class SpeechManager: NSObject, ObservableObject, AVSpeechSynthesizerDelega
         synth.speak(utt)
     }
 
+    /// Speak `text` and tag the playback with `id` so per-message UI can show a
+    /// stop icon while this exact message is reading. Cancels anything currently
+    /// playing first.
+    func speak(_ text: String, for id: UUID) {
+        stopAndClear()
+        nowPlayingMessageID = id
+        enqueue(text)
+    }
+
     func stopAndClear() {
         outstandingUtterances = 0
         isSpeaking            = false
+        nowPlayingMessageID   = nil
         if synth.isSpeaking {
             synth.stopSpeaking(at: .immediate)
         }
@@ -75,7 +89,8 @@ final class SpeechManager: NSObject, ObservableObject, AVSpeechSynthesizerDelega
     private func handleUtteranceCompleted() {
         outstandingUtterances = max(0, outstandingUtterances - 1)
         if outstandingUtterances == 0 {
-            isSpeaking = false
+            isSpeaking          = false
+            nowPlayingMessageID = nil
             onAllSpeechFinished?()
         }
     }
