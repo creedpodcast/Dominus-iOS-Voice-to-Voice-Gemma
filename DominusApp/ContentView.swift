@@ -174,7 +174,7 @@ struct ContentView: View {
                     returnToIdle()
                     return
                 }
-                store.send(spoken)
+                store.send(spoken, includeAmbientCues: true)
                 pttState = .aiTalking
             }
 

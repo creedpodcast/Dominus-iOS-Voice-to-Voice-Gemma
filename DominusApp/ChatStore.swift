@@ -12,6 +12,9 @@ struct Conversation: Identifiable, Codable, Equatable {
     var titleIsAuto: Bool
     /// true once the LLM has produced a title for this conversation. Prevents re-running.
     var hasGeneratedTitle: Bool
+    /// Tracks the last user-turn index where each hidden ambient transcript cue
+    /// was acknowledged, so the AI doesn't repeatedly comment on the same sound.
+    var ambientCueLastAcknowledgedTurn: [String: Int]
 
     init(
         id: UUID = UUID(),
@@ -20,7 +23,8 @@ struct Conversation: Identifiable, Codable, Equatable {
         updatedAt: Date = Date(),
         messages: [ChatMessage] = [],
         titleIsAuto: Bool = true,
-        hasGeneratedTitle: Bool = false
+        hasGeneratedTitle: Bool = false,
+        ambientCueLastAcknowledgedTurn: [String: Int] = [:]
     ) {
         self.id = id
         self.title = title
@@ -29,11 +33,13 @@ struct Conversation: Identifiable, Codable, Equatable {
         self.messages = messages
         self.titleIsAuto = titleIsAuto
         self.hasGeneratedTitle = hasGeneratedTitle
+        self.ambientCueLastAcknowledgedTurn = ambientCueLastAcknowledgedTurn
     }
 
     enum CodingKeys: String, CodingKey {
         case id, title, createdAt, updatedAt, messages
         case titleIsAuto, hasGeneratedTitle
+        case ambientCueLastAcknowledgedTurn
     }
 
     // Custom decoder for backward compatibility with chats saved before these fields existed.
@@ -47,6 +53,10 @@ struct Conversation: Identifiable, Codable, Equatable {
         messages = try c.decode([ChatMessage].self, forKey: .messages)
         titleIsAuto = try c.decodeIfPresent(Bool.self, forKey: .titleIsAuto) ?? true
         hasGeneratedTitle = try c.decodeIfPresent(Bool.self, forKey: .hasGeneratedTitle) ?? true
+        ambientCueLastAcknowledgedTurn = try c.decodeIfPresent(
+            [String: Int].self,
+            forKey: .ambientCueLastAcknowledgedTurn
+        ) ?? [:]
     }
 }
 
@@ -214,7 +224,7 @@ final class ChatStore: ObservableObject {
     }
 
     /// Non-async entry point — cancels any in-progress generation instantly, then starts fresh.
-    func send(_ userText: String) {
+    func send(_ userText: String, includeAmbientCues: Bool = false) {
         // Title generation rides on the same LlamaService — cancel it first and await its
         // unwind so the new chat stream doesn't collide with an in-flight title stream.
         titleTask?.cancel()
@@ -224,27 +234,36 @@ final class ChatStore: ObservableObject {
         generationTask = Task { @MainActor [weak self] in
             await prevTitle?.value
             await prevGen?.value
-            await self?._send(userText)
+            await self?._send(userText, includeAmbientCues: includeAmbientCues)
         }
     }
 
-    private func _send(_ userText: String) async {
+    private func _send(_ userText: String, includeAmbientCues: Bool) async {
         loadModelIfNeeded()
         guard isLoaded else { return }
         guard let convoIndex = indexForSelectedConversation() else { return }
 
-        let trimmed = userText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
+        let ambientResult = includeAmbientCues
+            ? extractAmbientCues(from: userText)
+            : (visibleText: userText, cues: [])
+        let trimmed = ambientResult.visibleText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty || !ambientResult.cues.isEmpty else { return }
 
         isGenerating = true
 
-        conversations[convoIndex].messages.append(ChatMessage(role: .user, content: trimmed))
+        let visibleUserText = trimmed.isEmpty ? "..." : trimmed
+        let nextUserTurn = conversations[convoIndex].messages.filter { $0.role == .user }.count + 1
+        let eligibleAmbientCues = ambientResult.cues.filter {
+            shouldAcknowledgeAmbientCue($0, in: conversations[convoIndex], userTurn: nextUserTurn)
+        }
+
+        conversations[convoIndex].messages.append(ChatMessage(role: .user, content: visibleUserText))
         conversations[convoIndex].updatedAt = Date()
-        autoTitleIfNeeded(convoIndex: convoIndex, userText: trimmed)
+        autoTitleIfNeeded(convoIndex: convoIndex, userText: visibleUserText)
         saveToDisk()
 
         // ── Auto-extract personal facts from user message ──────────────────
-        ProfileStore.shared.extractAndSave(from: trimmed)
+        ProfileStore.shared.extractAndSave(from: visibleUserText)
 
         // ── Build LLM context ──────────────────────────────────────────────
         // 1. User profile — always injected first
@@ -253,7 +272,7 @@ final class ChatStore: ObservableObject {
         // 2. Retrieve semantically relevant memories from THIS conversation only.
         // Cross-conversation retrieval is intentionally disabled — see MemoryRetriever.
         let memoryContext = MemoryRetriever.shared.retrieve(
-            query: trimmed,
+            query: visibleUserText,
             conversationID: conversations[convoIndex].id,
             topK: 5
         )
@@ -265,6 +284,9 @@ final class ChatStore: ObservableObject {
         }
         if !memoryContext.isEmpty {
             fullSystemPrompt += "\n\n\(memoryContext)"
+        }
+        if !eligibleAmbientCues.isEmpty {
+            fullSystemPrompt += "\n\n\(ambientCuePromptBlock(for: eligibleAmbientCues))"
         }
 
         // 3. Build message list: system + last N turns of raw history
@@ -331,6 +353,9 @@ final class ChatStore: ObservableObject {
                 SpeechManager.shared.enqueue(ttsBuffer)
             }
 
+            for cue in eligibleAmbientCues {
+                conversations[convoIndex].ambientCueLastAcknowledgedTurn[cue.key] = nextUserTurn
+            }
             conversations[convoIndex].updatedAt = Date()
             saveToDisk()
 
@@ -339,7 +364,7 @@ final class ChatStore: ObservableObject {
             if !cleanedAssistant.isEmpty {
                 MemoryRetriever.shared.remember(
                     conversationID: conversations[convoIndex].id,
-                    userText: trimmed,
+                    userText: visibleUserText,
                     assistantText: cleanedAssistant
                 )
             }
@@ -375,6 +400,86 @@ final class ChatStore: ObservableObject {
     }
 
     // MARK: - Helpers
+
+    private struct AmbientCue: Equatable {
+        let key: String
+        let label: String
+    }
+
+    private let ambientCueCooldownTurns = 12
+
+    /// Whisper can return bracketed non-speech markers such as "[Laughter]" or
+    /// "[Typing]". Keep them out of the visible transcript, but let the model
+    /// react privately when the per-chat cooldown allows it.
+    private func extractAmbientCues(from text: String) -> (visibleText: String, cues: [AmbientCue]) {
+        let pattern = "\\[([^\\]\\n]{1,48})\\]"
+        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+            return (text, [])
+        }
+
+        let nsText = text as NSString
+        let fullRange = NSRange(location: 0, length: nsText.length)
+        let matches = regex.matches(in: text, range: fullRange)
+        guard !matches.isEmpty else { return (text, []) }
+
+        var visibleText = text
+        var cues: [AmbientCue] = []
+        var seenKeys = Set<String>()
+
+        for match in matches {
+            guard match.numberOfRanges > 1 else { continue }
+            let rawLabel = nsText.substring(with: match.range(at: 1))
+            guard let cue = normalizeAmbientCue(rawLabel), !seenKeys.contains(cue.key) else {
+                continue
+            }
+            seenKeys.insert(cue.key)
+            cues.append(cue)
+        }
+
+        for match in matches.reversed() {
+            if let range = Range(match.range, in: visibleText) {
+                visibleText.removeSubrange(range)
+            }
+        }
+
+        visibleText = visibleText
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        return (visibleText, cues)
+    }
+
+    private func normalizeAmbientCue(_ rawLabel: String) -> AmbientCue? {
+        let trimmed = rawLabel
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: ".:,;!?-_"))
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+
+        guard !trimmed.isEmpty else { return nil }
+
+        let key = trimmed.lowercased()
+        let label = trimmed.prefix(1).uppercased() + trimmed.dropFirst().lowercased()
+        return AmbientCue(key: key, label: String(label))
+    }
+
+    private func shouldAcknowledgeAmbientCue(
+        _ cue: AmbientCue,
+        in conversation: Conversation,
+        userTurn: Int
+    ) -> Bool {
+        guard let lastTurn = conversation.ambientCueLastAcknowledgedTurn[cue.key] else {
+            return true
+        }
+        return userTurn - lastTurn >= ambientCueCooldownTurns
+    }
+
+    private func ambientCuePromptBlock(for cues: [AmbientCue]) -> String {
+        let labels = cues.map(\.label).joined(separator: ", ")
+        return """
+        Hidden ambient context: the voice transcript contained these non-speech background cues, removed from the visible user message: \(labels).
+        Briefly acknowledge this ambient context once in your reply if it feels natural. Do not quote the bracket syntax. Do not mention the same cue again until it reappears much later in the chat.
+        """
+    }
 
     private func cleanLlamaArtifacts(_ text: String) -> String {
         let artifacts = [
