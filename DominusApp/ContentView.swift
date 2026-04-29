@@ -83,11 +83,13 @@ struct ContentView: View {
                 break
             }
         }
-        // When generation ends, check if we can return to idle.
+        // When generation ends with no TTS pending (e.g. mute is on, or empty response),
+        // loop back to listening — the user is still in voice mode and probably wants
+        // to keep talking. They can tap X to exit voice mode explicitly.
         .onChange(of: store.isGenerating) { generating in
             guard pttState == .aiTalking else { return }
             if !generating && !SpeechManager.shared.isSpeaking {
-                returnToIdle()
+                beginListening()
             }
         }
         // Rename alert
@@ -152,7 +154,10 @@ struct ContentView: View {
             beginListening()
 
         case .listening:
-            // Stop recording and transcribe — no more STT session juggling
+            // If mic is muted there's nothing to transcribe — ignore the tap so the user
+            // doesn't accidentally drop out of voice mode. They must unmute first.
+            if whisper.isMicMuted { return }
+
             stopPulse()
             Task {
                 let spoken = await whisper.stopAndTranscribe()
@@ -198,6 +203,14 @@ struct ContentView: View {
         SpeechManager.shared.stopAndClear()
         store.stopGeneration()
         returnToIdle()
+    }
+
+    /// Called by the orb's stop button — kills the current AI response (generation + TTS)
+    /// but keeps the user inside voice mode. Loops back to listening.
+    private func stopCurrentResponse() {
+        SpeechManager.shared.stopAndClear()
+        store.stopGeneration()
+        beginListening()
     }
 
     // MARK: - Pulse animation
@@ -390,11 +403,28 @@ struct ContentView: View {
     // MARK: - Detail header
 
     private var detailHeader: some View {
-        HStack {
+        HStack(spacing: 12) {
             Text(store.selectedConversation()?.title ?? "Dominus")
                 .font(.headline)
                 .lineLimit(1)
             Spacer()
+
+            // TTS toggle — read replies aloud in text mode. Hidden during voice mode
+            // because voice mode controls TTS internally (mute lives on the orb).
+            if pttState == .idle {
+                Button {
+                    store.voiceEnabled.toggle()
+                } label: {
+                    Image(systemName: store.voiceEnabled ? "speaker.wave.2.fill" : "speaker.slash")
+                        .font(.system(size: 16, weight: .medium))
+                        .foregroundStyle(store.voiceEnabled ? Color.accentColor : .secondary)
+                        .frame(width: 32, height: 32)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(store.voiceEnabled ? "Mute spoken replies" : "Speak replies aloud")
+            }
+
             ContextRingView(usage: contextUsage)
         }
         .padding(.horizontal)
@@ -431,10 +461,14 @@ struct ContentView: View {
 
                 if pttState != .idle {
                     VoiceOrbOverlay(
-                        orbColor:   pttColor,
-                        audioLevel: whisper.audioLevel,
-                        onTap:      handlePTTTap,
-                        onDismiss:  exitVoiceMode
+                        orbColor:        pttColor,
+                        audioLevel:      whisper.audioLevel,
+                        isMicMuted:      whisper.isMicMuted,
+                        isGenerating:    store.isGenerating || speechMgr.isSpeaking,
+                        onTap:           handlePTTTap,
+                        onToggleMicMute: { whisper.isMicMuted.toggle() },
+                        onStop:          stopCurrentResponse,
+                        onDismiss:       exitVoiceMode
                     )
                     .zIndex(10)
                 }

@@ -24,6 +24,10 @@ final class WhisperManager: ObservableObject {
     @Published var isRecording:     Bool   = false
     @Published var isTranscribing:  Bool   = false
     @Published var audioLevel:      Float  = 0.0
+    /// User-controlled mic kill-switch. When true, incoming audio is discarded
+    /// (engine keeps running for instant resume). The user toggles this from
+    /// the orb overlay so they don't accidentally transcribe stray words.
+    @Published var isMicMuted:      Bool   = false
     @Published var modelReady:      Bool   = false
     @Published var isLoadingModel:  Bool   = false
     @Published var loadProgress:    Double = 0.0
@@ -90,6 +94,7 @@ final class WhisperManager: ObservableObject {
     func startRecording() {
         guard !isRecording else { return }
         recordedSamples = []
+        isMicMuted = false   // every fresh recording cycle starts unmuted
 
         let inputNode = audioEngine.inputNode
         let format    = inputNode.outputFormat(forBus: 0)
@@ -107,8 +112,15 @@ final class WhisperManager: ObservableObject {
             let level = min(sqrt(rms) / 0.05, 1.0)
 
             Task { @MainActor [weak self] in
-                self?.audioLevel       = level
-                self?.recordedSamples += samples
+                guard let self else { return }
+                if self.isMicMuted {
+                    // Drop the audio on the floor and zero the level so the orb
+                    // visualization stays still — clear feedback that mic is off.
+                    self.audioLevel = 0
+                    return
+                }
+                self.audioLevel       = level
+                self.recordedSamples += samples
             }
         }
 
