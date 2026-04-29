@@ -21,8 +21,9 @@ final class WhisperManager: ObservableObject {
 
     // MARK: - Published state
 
-    @Published var isRecording:     Bool   = false
-    @Published var isTranscribing:  Bool   = false
+    @Published var isRecording:        Bool   = false
+    @Published var isStartingRecording: Bool   = false  // true from tap until engine is live
+    @Published var isTranscribing:      Bool   = false
     @Published var audioLevel:      Float  = 0.0
     /// User-controlled mic kill-switch. When true, incoming audio is discarded
     /// (engine keeps running for instant resume). The user toggles this from
@@ -93,6 +94,7 @@ final class WhisperManager: ObservableObject {
 
     func startRecording() {
         guard !isRecording else { return }
+        isStartingRecording = true
         recordedSamples = []
         isMicMuted = false   // every fresh recording cycle starts unmuted
 
@@ -131,10 +133,12 @@ final class WhisperManager: ObservableObject {
             setupAudioSession()
             audioEngine.prepare()
             try audioEngine.start()
-            isRecording = true
+            isRecording         = true
+            isStartingRecording = false
             print("✅ WhisperManager: recording started")
             startLiveTranscriptionTimer()
         } catch {
+            isStartingRecording = false
             print("❌ WhisperManager: audio engine failed:", error)
         }
     }

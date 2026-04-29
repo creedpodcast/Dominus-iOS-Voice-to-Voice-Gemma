@@ -15,6 +15,7 @@ struct SplashLoadingView: View {
             VStack(spacing: 0) {
                 Spacer()
 
+                // App title
                 VStack(spacing: 10) {
                     Text("Dominus")
                         .font(.system(size: 52, weight: .bold, design: .rounded))
@@ -26,6 +27,19 @@ struct SplashLoadingView: View {
 
                 Spacer()
 
+                // "Please Wait" spinner — always visible until both models are ready
+                VStack(spacing: 10) {
+                    ProgressView()
+                        .scaleEffect(1.4)
+                        .tint(.white.opacity(0.7))
+                    Text("Please Wait\u{2026}")
+                        .font(.footnote.weight(.medium))
+                        .foregroundStyle(.white.opacity(0.55))
+                        .kerning(0.5)
+                }
+                .padding(.bottom, 32)
+
+                // Per-component progress bars
                 VStack(spacing: 14) {
                     LoadingBarView(
                         icon: "cpu.fill",
@@ -38,6 +52,12 @@ struct SplashLoadingView: View {
                         label: "Voice Recognition",
                         status: whisperStatus,
                         progress: whisperProgress
+                    )
+                    LoadingBarView(
+                        icon: "memorychip",
+                        label: "Memory & Embeddings",
+                        status: gemmaProgress >= 1.0 ? "Ready" : "Waiting for model\u{2026}",
+                        progress: gemmaProgress >= 1.0 ? 1.0 : gemmaProgress * 0.6
                     )
                 }
                 .padding(.horizontal, 28)

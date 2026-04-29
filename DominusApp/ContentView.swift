@@ -126,18 +126,27 @@ struct ContentView: View {
     // MARK: - In-use status pill
 
     /// Returns the pill to show while the app is doing something in the background.
-    /// nil = nothing to show.
+    /// nil = nothing to show. Priority: most specific state first.
     private var activeStatus: (icon: String, message: String)? {
+        // Mic / audio engine spinning up after PTT tap
+        if whisper.isStartingRecording {
+            return ("mic", "Starting microphone\u{2026}")
+        }
+        // Whisper running final transcription pass
         if whisper.isTranscribing {
-            return ("waveform", "Transcribing your speech…")
+            return ("waveform", "Transcribing your speech\u{2026}")
+        }
+        // TTS audio pipeline initialising (first-call warm-up or per-message replay)
+        if speechMgr.isStartingPlayback {
+            return ("speaker.wave.2", "Starting audio\u{2026}")
         }
         // AI is generating but TTS hasn't started yet — the "thinking" gap
         if store.isGenerating && !speechMgr.isSpeaking && pttState == .aiTalking {
-            return ("brain", "Thinking…")
+            return ("brain", "Thinking\u{2026}")
         }
         // Text mode: model is generating a reply
         if store.isGenerating && pttState == .idle {
-            return ("cpu", "Generating…")
+            return ("cpu", "Generating\u{2026}")
         }
         return nil
     }
@@ -505,14 +514,26 @@ struct ContentView: View {
 
             HStack(spacing: 10) {
 
-                // Text field: shows live Whisper transcript while listening, normal prompt otherwise
+                // Text field: live Whisper transcript while recording, loading state
+                // while model is still warming up, normal prompt otherwise.
                 if pttState == .listening {
-                    TextField("Listening…", text: .constant(whisper.liveTranscript))
+                    TextField("Listening\u{2026}", text: .constant(whisper.liveTranscript))
                         .textFieldStyle(.roundedBorder)
                         .disabled(true)
                 } else {
-                    TextField("Type a message…", text: $prompt)
-                        .textFieldStyle(.roundedBorder)
+                    TextField(
+                        store.isLoaded ? "Type a message\u{2026}" : "Loading AI model\u{2026}",
+                        text: $prompt
+                    )
+                    .textFieldStyle(.roundedBorder)
+                    .disabled(!store.isLoaded)
+                    .overlay(alignment: .trailing) {
+                        if store.isLoading {
+                            ProgressView()
+                                .scaleEffect(0.65)
+                                .padding(.trailing, 8)
+                        }
+                    }
                 }
 
                 // ── THE ONE BUTTON ──────────────────────────────────────────
@@ -669,9 +690,17 @@ struct ChatBubble: View {
                     SpeechManager.shared.speak(text, for: messageID)
                 }
             } label: {
-                Image(systemName: isPlayingThis ? "stop.circle" : "speaker.wave.2")
-                    .font(.system(size: 18))
-                    .foregroundStyle(isPlayingThis ? Color.accentColor : .secondary)
+                // Show a spinner while audio pipeline is warming up for this message,
+                // stop icon while actively playing, speaker icon when idle.
+                if speech.isStartingPlayback && speech.nowPlayingMessageID == messageID {
+                    ProgressView()
+                        .scaleEffect(0.75)
+                        .frame(width: 18, height: 18)
+                } else {
+                    Image(systemName: isPlayingThis ? "stop.circle" : "speaker.wave.2")
+                        .font(.system(size: 18))
+                        .foregroundStyle(isPlayingThis ? Color.accentColor : .secondary)
+                }
             }
             .buttonStyle(.plain)
             .accessibilityLabel(isPlayingThis ? "Stop reading" : "Read message aloud")
