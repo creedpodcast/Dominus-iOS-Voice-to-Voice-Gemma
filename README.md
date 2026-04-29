@@ -25,6 +25,10 @@ Talk to an AI that talks back. Tap once to speak, tap again when done — the AI
 - **Loud, clear voice output** — `.videoChat` audio session mode removes the automatic-gain-control ceiling that `.voiceChat` imposes; device volume rocker now controls the full range
 - **Half-duplex voice with no echo** — orb stays green until *every* queued TTS sentence has fully drained from the speaker (350 ms hardware grace included), then flips to listening — the mic never picks up the AI's tail
 - **Sentence-complete TTS chunking** — sentences fire to TTS the instant their punctuation lands, never mid-sentence; only true runaways (>300 chars) ever get cut
+- **Per-message action bar on AI replies** — Copy (clipboard, ✓ flash confirms), Share (system share sheet), and Speaker button under every assistant bubble. Tap the speaker to hear any past response read aloud; tap it again to stop mid-playback. Speaker icon swaps to a stop icon while that specific message is playing so state is always visible.
+- **Selectable bubble text** — long-press any message (user or AI) to select and copy partial text.
+- **Input field auto-clears on send** — text field empties the moment the send button is tapped; no manual deletion required before typing the next message.
+- **Larger action icons and context ring** — per-message action icons at 18 pt and the context usage ring at 40 × 40 pt for readability at any text size.
 - Text chat with Gemma 2B (streaming, token-by-token)
 - RAG long-term memory (semantic search + keyword fallback) — scoped per conversation (no cross-chat bleed)
 - LLM-generated chat titles (after 5 user turns or on chat exit) and absolute-date timestamps in the sidebar

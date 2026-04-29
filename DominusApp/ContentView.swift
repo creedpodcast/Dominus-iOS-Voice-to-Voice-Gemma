@@ -441,7 +441,7 @@ struct ContentView: View {
                     VStack(spacing: 12) {
                         let msgs = store.selectedConversation()?.messages ?? []
                         ForEach(msgs) { msg in
-                            ChatBubble(role: msg.role, text: msg.content)
+                            ChatBubble(messageID: msg.id, role: msg.role, text: msg.content)
                                 .id(msg.id)
                         }
                     }
@@ -541,13 +541,12 @@ struct ContentView: View {
                 // Send / stop button — only shown in idle text mode
                 if pttState == .idle {
                     Button {
-                        if store.isGenerating &&
-                            prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if store.isGenerating && trimmed.isEmpty {
                             store.stopGeneration()
-                        } else {
-                            let text = prompt
+                        } else if !trimmed.isEmpty {
                             prompt = ""
-                            store.send(text)
+                            store.send(trimmed)
                         }
                     } label: {
                         Image(
@@ -588,30 +587,41 @@ struct ContextRingView: View {
     var body: some View {
         ZStack {
             Circle()
-                .stroke(Color(.systemGray5), lineWidth: 3)
+                .stroke(Color(.systemGray5), lineWidth: 4)
             Circle()
                 .trim(from: 0, to: usage)
-                .stroke(ringColor, style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                .stroke(ringColor, style: StrokeStyle(lineWidth: 4, lineCap: .round))
                 .rotationEffect(.degrees(-90))
                 .animation(.easeInOut(duration: 0.2), value: usage)
             Text("\(Int(usage * 100))%")
-                .font(.system(size: 7, weight: .semibold))
+                .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.secondary)
         }
-        .frame(width: 28, height: 28)
+        .frame(width: 40, height: 40)
     }
 }
 
 // MARK: - Chat Bubble
 
 struct ChatBubble: View {
+    let messageID: UUID
     let role: ChatMessage.Role
     let text: String
+
+    @ObservedObject private var speech = SpeechManager.shared
+    @State private var copied: Bool = false
+
+    private var isPlayingThis: Bool {
+        speech.nowPlayingMessageID == messageID
+    }
 
     var body: some View {
         HStack(alignment: .bottom) {
             if role == .assistant {
-                bubbleView(background: Color(.systemGray5), foreground: .primary, align: .leading)
+                VStack(alignment: .leading, spacing: 4) {
+                    bubbleView(background: Color(.systemGray5), foreground: .primary, align: .leading)
+                    assistantActions
+                }
                 Spacer(minLength: 48)
             } else {
                 Spacer(minLength: 48)
@@ -622,11 +632,51 @@ struct ChatBubble: View {
 
     private func bubbleView(background: Color, foreground: Color, align: Alignment) -> some View {
         Text(text)
+            .textSelection(.enabled)
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
             .background(background)
             .foregroundColor(foreground)
             .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
             .frame(maxWidth: UIScreen.main.bounds.width * 0.72, alignment: align)
+    }
+
+    private var assistantActions: some View {
+        HStack(spacing: 22) {
+            Button {
+                UIPasteboard.general.string = text
+                withAnimation { copied = true }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) {
+                    withAnimation { copied = false }
+                }
+            } label: {
+                Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                    .font(.system(size: 18))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Copy message")
+
+            ShareLink(item: text) {
+                Image(systemName: "square.and.arrow.up")
+                    .font(.system(size: 18))
+            }
+            .accessibilityLabel("Share message")
+
+            Button {
+                if isPlayingThis {
+                    SpeechManager.shared.stopAndClear()
+                } else {
+                    SpeechManager.shared.speak(text, for: messageID)
+                }
+            } label: {
+                Image(systemName: isPlayingThis ? "stop.circle" : "speaker.wave.2")
+                    .font(.system(size: 18))
+                    .foregroundStyle(isPlayingThis ? Color.accentColor : .secondary)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(isPlayingThis ? "Stop reading" : "Read message aloud")
+        }
+        .foregroundStyle(.secondary)
+        .padding(.leading, 6)
     }
 }
