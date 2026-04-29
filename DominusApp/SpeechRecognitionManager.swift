@@ -52,7 +52,7 @@ final class SpeechRecognitionManager: NSObject, ObservableObject {
         let session = AVAudioSession.sharedInstance()
         try session.setCategory(
             .playAndRecord,
-            mode: .voiceChat,           // ← Built-in echo cancellation — AI won't hear itself
+            mode: .videoChat,           // ← Echo cancellation ON, but no AGC volume cap (louder than voiceChat)
             options: [.defaultToSpeaker, .allowBluetooth]
         )
         try session.setActive(true, options: .notifyOthersOnDeactivation)

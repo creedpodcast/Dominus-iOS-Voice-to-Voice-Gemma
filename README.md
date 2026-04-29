@@ -22,13 +22,17 @@ Talk to an AI that talks back. Tap once to speak, tap again when done — the AI
 - **In-use status indicators** — floating pill appears whenever the app is processing in the background (transcribing, thinking, generating)
 - **WhisperKit on-device STT** — accurate Whisper-based transcription with live preview while recording
 - **Male TTS voice** — prefers Evan (Enhanced), falls back to Reed, Nathan, Tom, etc.
+- **Loud, clear voice output** — `.videoChat` audio session mode removes the automatic-gain-control ceiling that `.voiceChat` imposes; device volume rocker now controls the full range
+- **Half-duplex voice with no echo** — orb stays green until *every* queued TTS sentence has fully drained from the speaker (350 ms hardware grace included), then flips to listening — the mic never picks up the AI's tail
+- **Sentence-complete TTS chunking** — sentences fire to TTS the instant their punctuation lands, never mid-sentence; only true runaways (>300 chars) ever get cut
 - Text chat with Gemma 2B (streaming, token-by-token)
-- RAG long-term memory (semantic search + keyword fallback)
-- User profile with auto-extraction ("my name is X" → stored as fact)
+- RAG long-term memory (semantic search + keyword fallback) — scoped per conversation (no cross-chat bleed)
+- LLM-generated chat titles (after 5 user turns or on chat exit) and absolute-date timestamps in the sidebar
+- User profile with auto-extraction ("my name is X" → stored as fact) **plus an editable Profile sheet** (person.circle button) for manual facts and a free-text "How should Dominus talk to you?" persona prompt
 - Multiple conversation threads (create, rename, delete, switch)
 - Generation interrupt (send new message cancels current response)
 - Stop button (cancel generation without sending)
-- Echo cancellation via unified `voiceChat` audio session
+- Echo cancellation via `.videoChat` audio session (hardware AEC) + half-duplex software gating
 - Llama artifact filtering (strips template tokens from output)
 
 ### Planned
@@ -102,12 +106,13 @@ The same single button controls every step. No hold-to-talk. No automatic silenc
 | Component | Details |
 |---|---|
 | Speech-to-Text | WhisperKit (on-device Whisper base-English, ~145 MB) |
-| Text-to-Speech | `AVSpeechSynthesizer` (Apple Neural Engine, fully local) |
+| Text-to-Speech | `AVSpeechSynthesizer.speak()` + delegate (Apple Neural Engine, fully local) |
 | TTS voice | Evan Enhanced (male, en-US) — falls back to best available |
 | Input mode | Push-to-talk (manual start/stop) |
 | Interrupt | Button tap stops generation + TTS instantly, restarts STT |
-| Echo cancellation | `AVAudioSession` `.voiceChat` mode (built-in, no feedback loop) |
-| Streaming TTS | Spoken in sentence-boundary chunks as tokens arrive |
+| Audio session | `AVAudioSession` `.videoChat` mode — keeps hardware echo cancellation, drops the AGC volume cap that `.voiceChat` applies |
+| Half-duplex gating | `outstandingUtterances` counter tracks every queued sentence; mic engine stays off until counter hits zero + 350 ms hardware drain |
+| Streaming TTS | Spoken sentence-by-sentence as tokens arrive — `preUtteranceDelay`/`postUtteranceDelay` set to 0 so Apple cross-fades sentences with no gap |
 
 ### Memory (RAG)
 | Component | Details |
@@ -122,8 +127,10 @@ The same single button controls every step. No hold-to-talk. No automatic silenc
 | Component | Details |
 |---|---|
 | Auto-extraction | Pattern matching on user messages ("my name is X", "I live in Y", etc.) |
-| Storage | SwiftData (`ProfileFact` entity) |
-| Injection | All known facts prepended to every system prompt |
+| Storage | SwiftData (`ProfileFact` entity) for facts; `UserDefaults` for persona |
+| Manual editing | `ProfileView` sheet (person.circle button in sidebar) — add/delete facts, swipe to remove, "Clear all" |
+| Persona | Free-text "How should Dominus talk to you?" field (e.g. "Be concise. Use analogies.") |
+| Injection | Facts block + persona block both prepended to every system prompt |
 
 ---
 
@@ -145,7 +152,8 @@ DominusApp/
 │   ├── MemoryStore.swift            SwiftData persistence layer
 │   └── MemoryRetriever.swift        remember() + retrieve() public interface
 └── Profile/
-    ├── ProfileStore.swift           Fact extraction, storage, and system prompt injection
+    ├── ProfileStore.swift           Fact extraction, persona, storage, system prompt injection
+    ├── ProfileView.swift            Editable profile sheet — facts list + persona text field
     └── UserProfile.swift            SwiftData ProfileFact entity
 ```
 
