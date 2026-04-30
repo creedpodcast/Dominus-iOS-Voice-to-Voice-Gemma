@@ -46,7 +46,7 @@ final class SpeechManager: NSObject, ObservableObject, AVSpeechSynthesizerDelega
 
     func enqueue(_ text: String) {
         let cleaned = clean(text)
-        guard !cleaned.isEmpty else { return }
+        guard hasSpeakableContent(cleaned) else { return }
 
         let utt    = AVSpeechUtterance(string: cleaned)
         utt.rate   = AVSpeechUtteranceDefaultSpeechRate
@@ -118,7 +118,7 @@ final class SpeechManager: NSObject, ObservableObject, AVSpeechSynthesizerDelega
     //   1. Strip fenced + inline code blocks
     //   2. Unwrap markdown emphasis/headers/lists → plain words
     //   3. Expand common symbols to spoken equivalents (&→and, @→at, %→percent)
-    //   4. Remove the dictation word "Period" when used as verbal punctuation
+    //   4. Convert verbal punctuation artifacts like "period" into real pauses
     //   5. Normalise ellipsis so it becomes a natural pause, not "dot dot dot"
     //   6. Strip any remaining non-speech Unicode (emoji, ZWJ sequences, etc.)
     //   7. Collapse whitespace
@@ -158,9 +158,9 @@ final class SpeechManager: NSObject, ObservableObject, AVSpeechSynthesizerDelega
         s = s.replacingOccurrences(of: "#",    with: "")       // stray hash
         s = s.replacingOccurrences(of: "|",    with: " ")      // table pipes
 
-        // 4. Remove dictation word "Period" used as verbal sentence-end marker
-        //    Matches: "Period", "period", "Period." "period." — standalone word
-        s = s.replacingOccurrences(of: "(?i)\\bperiod\\.?(?=\\s|$)", with: "", options: .regularExpression)
+        // 4. Convert verbal punctuation artifacts that occasionally appear in
+        //    generated text or dictated transcripts and would be read aloud.
+        s = stripVerbalPunctuation(from: s)
 
         // 5. Ellipsis normalisation — "..." → natural pause (…), not "dot dot dot"
         s = s.replacingOccurrences(of: "\\.\\.\\.", with: "\u{2026}", options: .regularExpression)
@@ -181,6 +181,37 @@ final class SpeechManager: NSObject, ObservableObject, AVSpeechSynthesizerDelega
         s = s.replacingOccurrences(of: "\\n",     with: " ",  options: .regularExpression)
 
         return s.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func stripVerbalPunctuation(from text: String) -> String {
+        var s = text
+
+        let replacements: [(pattern: String, replacement: String)] = [
+            ("(?i)\\b(?:period|full stop)\\b[\\.,!?:;]*", ". "),
+            ("(?i)\\bcomma\\b[\\.,!?:;]*", ", "),
+            ("(?i)\\b(?:question mark)\\b[\\.,!?:;]*", "? "),
+            ("(?i)\\b(?:exclamation point|exclamation mark)\\b[\\.,!?:;]*", "! ")
+        ]
+
+        for item in replacements {
+            s = s.replacingOccurrences(
+                of: item.pattern,
+                with: item.replacement,
+                options: .regularExpression
+            )
+        }
+
+        // Skip fragments that are only punctuation instead of letting AVSpeech
+        // read them as punctuation names.
+        s = s.replacingOccurrences(of: "\\s+([\\.,!?:;])", with: "$1", options: .regularExpression)
+        s = s.replacingOccurrences(of: "([\\.,!?:;]){2,}", with: "$1", options: .regularExpression)
+        return s
+    }
+
+    private func hasSpeakableContent(_ text: String) -> Bool {
+        text.unicodeScalars.contains { scalar in
+            CharacterSet.alphanumerics.contains(scalar)
+        }
     }
 
     // MARK: - Voice selection

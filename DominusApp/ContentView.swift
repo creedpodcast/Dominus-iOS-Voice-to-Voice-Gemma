@@ -243,7 +243,7 @@ struct ContentView: View {
     private func scheduleVoiceAutoSend(for transcriptSnapshot: String) {
         voiceAutoSendTask?.cancel()
         voiceAutoSendTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
             guard !Task.isCancelled,
                   pttState == .listening,
                   !whisper.isMicMuted,
@@ -264,17 +264,41 @@ struct ContentView: View {
         stopPulse()
         Task {
             let spoken = await whisper.stopAndTranscribe()
-            guard !spoken.isEmpty else {
+            let visibleVoiceText = cleanVoiceSubmission(spoken)
+            guard !visibleVoiceText.isEmpty else {
                 returnToIdle()
                 return
             }
             store.send(
-                spoken,
+                visibleVoiceText,
                 includeAmbientCues: true,
                 ambientDuration: whisper.lastRecordingDuration
             )
             pttState = .aiTalking
         }
+    }
+
+    private func cleanVoiceSubmission(_ text: String) -> String {
+        var s = WhisperManager.visibleTranscript(from: text)
+        let replacements: [(pattern: String, replacement: String)] = [
+            ("(?i)\\b(?:period|full stop)\\b[\\.,!?:;]*", ". "),
+            ("(?i)\\bcomma\\b[\\.,!?:;]*", ", "),
+            ("(?i)\\b(?:question mark)\\b[\\.,!?:;]*", "? "),
+            ("(?i)\\b(?:exclamation point|exclamation mark)\\b[\\.,!?:;]*", "! ")
+        ]
+
+        for item in replacements {
+            s = s.replacingOccurrences(
+                of: item.pattern,
+                with: item.replacement,
+                options: .regularExpression
+            )
+        }
+
+        s = s.replacingOccurrences(of: "\\s+([\\.,!?:;])", with: "$1", options: .regularExpression)
+        s = s.replacingOccurrences(of: "([\\.,!?:;]){2,}", with: "$1", options: .regularExpression)
+        s = s.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+        return s.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     // MARK: - Pulse animation
