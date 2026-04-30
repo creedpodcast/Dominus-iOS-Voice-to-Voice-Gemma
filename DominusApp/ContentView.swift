@@ -92,6 +92,10 @@ struct ContentView: View {
                 beginListening()
             }
         }
+        .onChange(of: store.silentAmbientEventCount) { _ in
+            guard pttState == .aiTalking else { return }
+            beginListening()
+        }
         // Rename alert
         .alert("Rename Chat", isPresented: $showingRenameAlert) {
             TextField("Chat title", text: $renameText)
@@ -174,7 +178,11 @@ struct ContentView: View {
                     returnToIdle()
                     return
                 }
-                store.send(spoken, includeAmbientCues: true)
+                store.send(
+                    spoken,
+                    includeAmbientCues: true,
+                    ambientDuration: whisper.lastRecordingDuration
+                )
                 pttState = .aiTalking
             }
 

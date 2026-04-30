@@ -15,6 +15,10 @@ struct Conversation: Identifiable, Codable, Equatable {
     /// Tracks the last user-turn index where each hidden ambient transcript cue
     /// was acknowledged, so the AI doesn't repeatedly comment on the same sound.
     var ambientCueLastAcknowledgedTurn: [String: Int]
+    /// Hidden per-chat ambient history. These events are not shown as user
+    /// messages, but they let Dominus answer direct recall questions like
+    /// "what sound did I just make?"
+    var ambientEvents: [AmbientEvent]
 
     init(
         id: UUID = UUID(),
@@ -24,7 +28,8 @@ struct Conversation: Identifiable, Codable, Equatable {
         messages: [ChatMessage] = [],
         titleIsAuto: Bool = true,
         hasGeneratedTitle: Bool = false,
-        ambientCueLastAcknowledgedTurn: [String: Int] = [:]
+        ambientCueLastAcknowledgedTurn: [String: Int] = [:],
+        ambientEvents: [AmbientEvent] = []
     ) {
         self.id = id
         self.title = title
@@ -34,12 +39,14 @@ struct Conversation: Identifiable, Codable, Equatable {
         self.titleIsAuto = titleIsAuto
         self.hasGeneratedTitle = hasGeneratedTitle
         self.ambientCueLastAcknowledgedTurn = ambientCueLastAcknowledgedTurn
+        self.ambientEvents = ambientEvents
     }
 
     enum CodingKeys: String, CodingKey {
         case id, title, createdAt, updatedAt, messages
         case titleIsAuto, hasGeneratedTitle
         case ambientCueLastAcknowledgedTurn
+        case ambientEvents
     }
 
     // Custom decoder for backward compatibility with chats saved before these fields existed.
@@ -57,6 +64,7 @@ struct Conversation: Identifiable, Codable, Equatable {
             [String: Int].self,
             forKey: .ambientCueLastAcknowledgedTurn
         ) ?? [:]
+        ambientEvents = try c.decodeIfPresent([AmbientEvent].self, forKey: .ambientEvents) ?? []
     }
 }
 
@@ -100,6 +108,31 @@ struct ChatMessage: Identifiable, Codable, Equatable {
     }
 }
 
+struct AmbientEvent: Identifiable, Codable, Equatable {
+    let id: UUID
+    let key: String
+    let label: String
+    let timestamp: Date
+    let userTurn: Int
+    let duration: TimeInterval?
+
+    init(
+        id: UUID = UUID(),
+        key: String,
+        label: String,
+        timestamp: Date = Date(),
+        userTurn: Int,
+        duration: TimeInterval? = nil
+    ) {
+        self.id = id
+        self.key = key
+        self.label = label
+        self.timestamp = timestamp
+        self.userTurn = userTurn
+        self.duration = duration
+    }
+}
+
 @MainActor
 final class ChatStore: ObservableObject {
     @Published var conversations: [Conversation] = []
@@ -116,6 +149,9 @@ final class ChatStore: ObservableObject {
     @Published var isLoading: Bool = false
     @Published var loadStatus: String = "Idle"
     @Published var loadProgress: Double = 0.0
+    /// Bumps when voice mode captured only hidden ambient cues and chose not to
+    /// generate a reply, so the UI can keep the PTT loop moving.
+    @Published var silentAmbientEventCount: Int = 0
 
     /// Master TTS toggle. Used in BOTH text mode (header speaker icon) and
     /// voice mode (orb mute button). When entering PTT we force this true and
@@ -224,7 +260,11 @@ final class ChatStore: ObservableObject {
     }
 
     /// Non-async entry point — cancels any in-progress generation instantly, then starts fresh.
-    func send(_ userText: String, includeAmbientCues: Bool = false) {
+    func send(
+        _ userText: String,
+        includeAmbientCues: Bool = false,
+        ambientDuration: TimeInterval? = nil
+    ) {
         // Title generation rides on the same LlamaService — cancel it first and await its
         // unwind so the new chat stream doesn't collide with an in-flight title stream.
         titleTask?.cancel()
@@ -234,11 +274,19 @@ final class ChatStore: ObservableObject {
         generationTask = Task { @MainActor [weak self] in
             await prevTitle?.value
             await prevGen?.value
-            await self?._send(userText, includeAmbientCues: includeAmbientCues)
+            await self?._send(
+                userText,
+                includeAmbientCues: includeAmbientCues,
+                ambientDuration: ambientDuration
+            )
         }
     }
 
-    private func _send(_ userText: String, includeAmbientCues: Bool) async {
+    private func _send(
+        _ userText: String,
+        includeAmbientCues: Bool,
+        ambientDuration: TimeInterval?
+    ) async {
         loadModelIfNeeded()
         guard isLoaded else { return }
         guard let convoIndex = indexForSelectedConversation() else { return }
@@ -249,21 +297,47 @@ final class ChatStore: ObservableObject {
         let trimmed = ambientResult.visibleText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty || !ambientResult.cues.isEmpty else { return }
 
-        isGenerating = true
-
-        let visibleUserText = trimmed.isEmpty ? "..." : trimmed
-        let nextUserTurn = conversations[convoIndex].messages.filter { $0.role == .user }.count + 1
+        let hasVisibleUserText = !trimmed.isEmpty
+        let visibleUserText = trimmed
+        let currentUserTurn = conversations[convoIndex].messages.filter { $0.role == .user }.count
+        let nextUserTurn = currentUserTurn + 1
         let eligibleAmbientCues = ambientResult.cues.filter {
             shouldAcknowledgeAmbientCue($0, in: conversations[convoIndex], userTurn: nextUserTurn)
         }
+        let shouldRespondToAmbientOnly = !hasVisibleUserText && shouldAutoRespondToAmbientOnly(
+            cues: eligibleAmbientCues,
+            duration: ambientDuration
+        )
 
-        conversations[convoIndex].messages.append(ChatMessage(role: .user, content: visibleUserText))
+        recordAmbientEvents(
+            ambientResult.cues,
+            in: convoIndex,
+            userTurn: nextUserTurn,
+            duration: ambientDuration
+        )
+
+        guard hasVisibleUserText || shouldRespondToAmbientOnly else {
+            conversations[convoIndex].updatedAt = Date()
+            saveToDisk()
+            silentAmbientEventCount += 1
+            return
+        }
+
+        isGenerating = true
+
+        if hasVisibleUserText {
+            conversations[convoIndex].messages.append(ChatMessage(role: .user, content: visibleUserText))
+        }
         conversations[convoIndex].updatedAt = Date()
-        autoTitleIfNeeded(convoIndex: convoIndex, userText: visibleUserText)
+        if hasVisibleUserText {
+            autoTitleIfNeeded(convoIndex: convoIndex, userText: visibleUserText)
+        }
         saveToDisk()
 
         // ── Auto-extract personal facts from user message ──────────────────
-        ProfileStore.shared.extractAndSave(from: visibleUserText)
+        if hasVisibleUserText {
+            ProfileStore.shared.extractAndSave(from: visibleUserText)
+        }
 
         // ── Build LLM context ──────────────────────────────────────────────
         // 1. User profile — always injected first
@@ -271,11 +345,13 @@ final class ChatStore: ObservableObject {
 
         // 2. Retrieve semantically relevant memories from THIS conversation only.
         // Cross-conversation retrieval is intentionally disabled — see MemoryRetriever.
-        let memoryContext = MemoryRetriever.shared.retrieve(
-            query: visibleUserText,
-            conversationID: conversations[convoIndex].id,
-            topK: 5
-        )
+        let memoryContext = hasVisibleUserText
+            ? MemoryRetriever.shared.retrieve(
+                query: visibleUserText,
+                conversationID: conversations[convoIndex].id,
+                topK: 5
+            )
+            : ""
 
         // 3. Compose full system prompt
         var fullSystemPrompt = systemPrompt
@@ -285,8 +361,16 @@ final class ChatStore: ObservableObject {
         if !memoryContext.isEmpty {
             fullSystemPrompt += "\n\n\(memoryContext)"
         }
+        let recentAmbientContext = recentAmbientEventsPromptBlock(for: conversations[convoIndex])
+        if !recentAmbientContext.isEmpty {
+            fullSystemPrompt += "\n\n\(recentAmbientContext)"
+        }
         if !eligibleAmbientCues.isEmpty {
-            fullSystemPrompt += "\n\n\(ambientCuePromptBlock(for: eligibleAmbientCues))"
+            let activeAmbientBlock = ambientCuePromptBlock(
+                for: eligibleAmbientCues,
+                ambientOnly: !hasVisibleUserText
+            )
+            fullSystemPrompt += "\n\n\(activeAmbientBlock)"
         }
 
         // 3. Build message list: system + last N turns of raw history
@@ -298,6 +382,12 @@ final class ChatStore: ObservableObject {
             case .user:      return .init(role: .user,      content: m.content)
             case .assistant: return .init(role: .assistant, content: m.content)
             }
+        }
+        if !hasVisibleUserText {
+            llmMessages.append(.init(
+                role: .user,
+                content: ambientOnlyUserPrompt(for: eligibleAmbientCues, duration: ambientDuration)
+            ))
         }
         llmMessages = trimLLMHistory(llmMessages)
 
@@ -362,18 +452,20 @@ final class ChatStore: ObservableObject {
             // ── Store exchange in long-term memory (fire-and-forget) ──────
             let cleanedAssistant = conversations[convoIndex].messages[assistantIndex].content
             if !cleanedAssistant.isEmpty {
-                MemoryRetriever.shared.remember(
-                    conversationID: conversations[convoIndex].id,
-                    userText: visibleUserText,
-                    assistantText: cleanedAssistant
-                )
+                if hasVisibleUserText {
+                    MemoryRetriever.shared.remember(
+                        conversationID: conversations[convoIndex].id,
+                        userText: visibleUserText,
+                        assistantText: cleanedAssistant
+                    )
+                }
             }
 
             // ── Schedule LLM title generation after the 5th user turn ──
             // Earlier turns rely on the exit triggers (chat-switch, app-background)
             // to produce a title for short-lived chats.
             let userTurns = conversations[convoIndex].messages.filter { $0.role == .user }.count
-            if userTurns >= 5 {
+            if hasVisibleUserText && userTurns >= 5 {
                 scheduleTitleGeneration(for: conversations[convoIndex].id)
             }
 
@@ -407,6 +499,7 @@ final class ChatStore: ObservableObject {
     }
 
     private let ambientCueCooldownTurns = 12
+    private let maxStoredAmbientEvents = 24
 
     /// Whisper can return bracketed non-speech markers such as "[Laughter]" or
     /// "[Typing]". Keep them out of the visible transcript, but let the model
@@ -473,12 +566,93 @@ final class ChatStore: ObservableObject {
         return userTurn - lastTurn >= ambientCueCooldownTurns
     }
 
-    private func ambientCuePromptBlock(for cues: [AmbientCue]) -> String {
+    private func shouldAutoRespondToAmbientOnly(cues: [AmbientCue], duration: TimeInterval?) -> Bool {
+        guard !cues.isEmpty else { return false }
+
+        if cues.contains(where: { $0.key.contains("silence") }) {
+            return (duration ?? 0) >= 60
+        }
+
+        let highestChance = cues.map { ambientOnlyResponseChance(for: $0) }.max() ?? 0
+        guard highestChance > 0 else { return false }
+        return Double.random(in: 0...1) < highestChance
+    }
+
+    private func ambientOnlyResponseChance(for cue: AmbientCue) -> Double {
+        if cue.key.contains("laughter") || cue.key.contains("laughing") {
+            return 0.45
+        }
+        if cue.key.contains("cough") || cue.key.contains("sneez") {
+            return 0.25
+        }
+        if cue.key.contains("typing") || cue.key.contains("keyboard") {
+            return 0.08
+        }
+        return 0.12
+    }
+
+    private func recordAmbientEvents(
+        _ cues: [AmbientCue],
+        in convoIndex: Int,
+        userTurn: Int,
+        duration: TimeInterval?
+    ) {
+        guard !cues.isEmpty, conversations.indices.contains(convoIndex) else { return }
+
+        let newEvents = cues.map {
+            AmbientEvent(
+                key: $0.key,
+                label: $0.label,
+                userTurn: userTurn,
+                duration: duration
+            )
+        }
+
+        conversations[convoIndex].ambientEvents.append(contentsOf: newEvents)
+        if conversations[convoIndex].ambientEvents.count > maxStoredAmbientEvents {
+            conversations[convoIndex].ambientEvents = Array(
+                conversations[convoIndex].ambientEvents.suffix(maxStoredAmbientEvents)
+            )
+        }
+    }
+
+    private func recentAmbientEventsPromptBlock(for conversation: Conversation) -> String {
+        let recent = conversation.ambientEvents.suffix(8)
+        guard !recent.isEmpty else { return "" }
+
+        let lines = recent.map { event in
+            let durationText = event.duration.map { String(format: ", recording %.0fs", $0) } ?? ""
+            return "- \(event.label) near user turn \(event.userTurn)\(durationText)"
+        }.joined(separator: "\n")
+
+        return """
+        Hidden recent ambient events:
+        \(lines)
+        These are not visible chat messages. Use them only if the user asks what you heard, what sound they made, what they were just doing, or if a separate active ambient instruction says to mention one. Otherwise do not bring them up.
+        """
+    }
+
+    private func ambientCuePromptBlock(for cues: [AmbientCue], ambientOnly: Bool) -> String {
         let labels = cues.map(\.label).joined(separator: ", ")
+        if ambientOnly {
+            return """
+            Active hidden ambient context: the user did not speak words, but the transcript detected: \(labels).
+            If you respond, keep it brief and human. Do not quote the bracket syntax. Do not overreact. Do not repeatedly mention the same cue.
+            """
+        }
+
         return """
         Hidden ambient context: the voice transcript contained these non-speech background cues, removed from the visible user message: \(labels).
         Briefly acknowledge this ambient context once in your reply if it feels natural. Do not quote the bracket syntax. Do not mention the same cue again until it reappears much later in the chat.
         """
+    }
+
+    private func ambientOnlyUserPrompt(for cues: [AmbientCue], duration: TimeInterval?) -> String {
+        let labels = cues.map(\.label).joined(separator: ", ")
+        if cues.contains(where: { $0.key.contains("silence") }), (duration ?? 0) >= 60 {
+            return "The user has been silent for about one minute while voice mode appears to still be active. Check in briefly."
+        }
+        return "The user did not speak words. Hidden ambient sound detected: \(labels). Respond only if it feels natural."
     }
 
     private func cleanLlamaArtifacts(_ text: String) -> String {

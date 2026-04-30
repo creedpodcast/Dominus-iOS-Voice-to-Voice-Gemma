@@ -34,6 +34,7 @@ final class WhisperManager: ObservableObject {
     @Published var loadProgress:    Double = 0.0
     @Published var modelStatus:     String = "Whisper not loaded"
     @Published var liveTranscript:  String = ""
+    @Published var lastRecordingDuration: TimeInterval = 0
 
     // MARK: - Private
 
@@ -41,6 +42,7 @@ final class WhisperManager: ObservableObject {
     private let audioEngine    = AVAudioEngine()
     private var recordedSamples: [Float]  = []
     private var nativeSampleRate: Double  = 44_100
+    private var recordingStartedAt: Date?
 
     private var liveTimer:               Timer?
     private var isRunningLivePass:       Bool  = false
@@ -97,6 +99,7 @@ final class WhisperManager: ObservableObject {
         isStartingRecording = true
         recordedSamples = []
         isMicMuted = false   // every fresh recording cycle starts unmuted
+        lastRecordingDuration = 0
 
         let inputNode = audioEngine.inputNode
         let format    = inputNode.outputFormat(forBus: 0)
@@ -135,10 +138,12 @@ final class WhisperManager: ObservableObject {
             try audioEngine.start()
             isRecording         = true
             isStartingRecording = false
+            recordingStartedAt  = Date()
             print("✅ WhisperManager: recording started")
             startLiveTranscriptionTimer()
         } catch {
             isStartingRecording = false
+            recordingStartedAt  = nil
             print("❌ WhisperManager: audio engine failed:", error)
         }
     }
@@ -172,7 +177,7 @@ final class WhisperManager: ObservableObject {
                 .joined(separator: " ")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             if !text.isEmpty {
-                liveTranscript = text
+                liveTranscript = Self.visibleTranscript(from: text)
             }
         } catch {
             // Silent — live passes are best-effort
@@ -188,6 +193,8 @@ final class WhisperManager: ObservableObject {
 
         audioEngine.inputNode.removeTap(onBus: 0)
         if audioEngine.isRunning { audioEngine.stop() }
+        lastRecordingDuration = recordingStartedAt.map { Date().timeIntervalSince($0) } ?? 0
+        recordingStartedAt = nil
         isRecording    = false
         isTranscribing = true
         audioLevel     = 0
@@ -224,11 +231,20 @@ final class WhisperManager: ObservableObject {
         guard isRecording else { return }
         audioEngine.inputNode.removeTap(onBus: 0)
         if audioEngine.isRunning { audioEngine.stop() }
+        recordingStartedAt = nil
+        lastRecordingDuration = 0
         isRecording     = false
         isTranscribing  = false
         audioLevel      = 0
         liveTranscript  = ""
         recordedSamples = []
+    }
+
+    static func visibleTranscript(from rawText: String) -> String {
+        rawText
+            .replacingOccurrences(of: "\\[[^\\]\\n]{1,48}\\]", with: "", options: .regularExpression)
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     // MARK: - Audio session
