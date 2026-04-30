@@ -501,11 +501,11 @@ final class ChatStore: ObservableObject {
     private let ambientCueCooldownTurns = 12
     private let maxStoredAmbientEvents = 24
 
-    /// Whisper can return bracketed non-speech markers such as "[Laughter]" or
-    /// "[Typing]". Keep them out of the visible transcript, but let the model
-    /// react privately when the per-chat cooldown allows it.
+    /// Whisper can return non-speech markers such as "[Laughter]", "(coughing)",
+    /// or "(keyboard typing)". Keep them out of the visible transcript, but let
+    /// the model react privately when the per-chat cooldown allows it.
     private func extractAmbientCues(from text: String) -> (visibleText: String, cues: [AmbientCue]) {
-        let pattern = "\\[([^\\]\\n]{1,48})\\]"
+        let pattern = "(?:\\[([^\\]\\n]{1,48})\\]|\\(([^)\\n]{1,48})\\))"
         guard let regex = try? NSRegularExpression(pattern: pattern) else {
             return (text, [])
         }
@@ -521,7 +521,11 @@ final class ChatStore: ObservableObject {
 
         for match in matches {
             guard match.numberOfRanges > 1 else { continue }
-            let rawLabel = nsText.substring(with: match.range(at: 1))
+            let bracketRange = match.range(at: 1)
+            let parenRange = match.numberOfRanges > 2 ? match.range(at: 2) : NSRange(location: NSNotFound, length: 0)
+            let labelRange = bracketRange.location != NSNotFound ? bracketRange : parenRange
+            guard labelRange.location != NSNotFound else { continue }
+            let rawLabel = nsText.substring(with: labelRange)
             guard let cue = normalizeAmbientCue(rawLabel), !seenKeys.contains(cue.key) else {
                 continue
             }

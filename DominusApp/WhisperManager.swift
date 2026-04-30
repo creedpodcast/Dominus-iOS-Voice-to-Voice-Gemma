@@ -242,7 +242,11 @@ final class WhisperManager: ObservableObject {
 
     static func visibleTranscript(from rawText: String) -> String {
         rawText
-            .replacingOccurrences(of: "\\[[^\\]\\n]{1,48}\\]", with: "", options: .regularExpression)
+            .replacingOccurrences(
+                of: "(?:\\[[^\\]\\n]{1,48}\\]|\\([^)\\n]{1,48}\\))",
+                with: "",
+                options: .regularExpression
+            )
             .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
