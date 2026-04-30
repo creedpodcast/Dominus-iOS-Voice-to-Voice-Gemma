@@ -41,6 +41,7 @@ struct ContentView: View {
 
     // Remember whether voice was on before PTT so we can restore it
     @State private var voiceWasEnabled: Bool = false
+    @State private var voiceAutoSendTask: Task<Void, Never>?
 
     private var isFullyLoaded: Bool {
         store.isLoaded && whisper.modelReady
@@ -95,6 +96,9 @@ struct ContentView: View {
         .onChange(of: store.silentAmbientEventCount) { _ in
             guard pttState == .aiTalking else { return }
             beginListening()
+        }
+        .onChange(of: whisper.liveTranscript) { transcript in
+            handleLiveVoiceTranscript(transcript)
         }
         // Rename alert
         .alert("Rename Chat", isPresented: $showingRenameAlert) {
@@ -171,20 +175,7 @@ struct ContentView: View {
             // doesn't accidentally drop out of voice mode. They must unmute first.
             if whisper.isMicMuted { return }
 
-            stopPulse()
-            Task {
-                let spoken = await whisper.stopAndTranscribe()
-                guard !spoken.isEmpty else {
-                    returnToIdle()
-                    return
-                }
-                store.send(
-                    spoken,
-                    includeAmbientCues: true,
-                    ambientDuration: whisper.lastRecordingDuration
-                )
-                pttState = .aiTalking
-            }
+            submitVoiceRecording()
 
         case .aiTalking:
             SpeechManager.shared.stopAndClear()
@@ -197,6 +188,7 @@ struct ContentView: View {
     // MARK: - Listening helpers
 
     private func beginListening() {
+        cancelVoiceAutoSend()
         SpeechManager.shared.stopAndClear()
         // Tear down SpeechRecognitionManager's engine first — two AVAudioEngines
         // cannot both install a tap on the input node simultaneously.
@@ -207,6 +199,7 @@ struct ContentView: View {
     }
 
     private func returnToIdle() {
+        cancelVoiceAutoSend()
         stopPulse()
         whisper.cancelRecording()
         // WhisperManager stopped its engine — safe to fully deactivate audio session
@@ -217,6 +210,7 @@ struct ContentView: View {
 
     /// Called by the X button — immediately stops everything and exits voice mode.
     private func exitVoiceMode() {
+        cancelVoiceAutoSend()
         SpeechManager.shared.stopAndClear()
         store.stopGeneration()
         returnToIdle()
@@ -225,9 +219,62 @@ struct ContentView: View {
     /// Called by the orb's stop button — kills the current AI response (generation + TTS)
     /// but keeps the user inside voice mode. Loops back to listening.
     private func stopCurrentResponse() {
+        cancelVoiceAutoSend()
         SpeechManager.shared.stopAndClear()
         store.stopGeneration()
         beginListening()
+    }
+
+    private func handleLiveVoiceTranscript(_ transcript: String) {
+        guard pttState == .listening, !whisper.isMicMuted else {
+            cancelVoiceAutoSend()
+            return
+        }
+
+        let visibleTranscript = WhisperManager.visibleTranscript(from: transcript)
+        guard !visibleTranscript.isEmpty else {
+            cancelVoiceAutoSend()
+            return
+        }
+
+        scheduleVoiceAutoSend(for: visibleTranscript)
+    }
+
+    private func scheduleVoiceAutoSend(for transcriptSnapshot: String) {
+        voiceAutoSendTask?.cancel()
+        voiceAutoSendTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            guard !Task.isCancelled,
+                  pttState == .listening,
+                  !whisper.isMicMuted,
+                  WhisperManager.visibleTranscript(from: whisper.liveTranscript) == transcriptSnapshot
+            else { return }
+
+            submitVoiceRecording()
+        }
+    }
+
+    private func cancelVoiceAutoSend() {
+        voiceAutoSendTask?.cancel()
+        voiceAutoSendTask = nil
+    }
+
+    private func submitVoiceRecording() {
+        cancelVoiceAutoSend()
+        stopPulse()
+        Task {
+            let spoken = await whisper.stopAndTranscribe()
+            guard !spoken.isEmpty else {
+                returnToIdle()
+                return
+            }
+            store.send(
+                spoken,
+                includeAmbientCues: true,
+                ambientDuration: whisper.lastRecordingDuration
+            )
+            pttState = .aiTalking
+        }
     }
 
     // MARK: - Pulse animation
