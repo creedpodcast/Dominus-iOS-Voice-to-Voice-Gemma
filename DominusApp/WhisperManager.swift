@@ -43,6 +43,7 @@ final class WhisperManager: ObservableObject {
     private var recordedSamples: [Float]  = []
     private var nativeSampleRate: Double  = 44_100
     private var recordingStartedAt: Date?
+    private var bestLiveTranscript: String = ""
 
     private var liveTimer:               Timer?
     private var isRunningLivePass:       Bool  = false
@@ -100,6 +101,8 @@ final class WhisperManager: ObservableObject {
         recordedSamples = []
         isMicMuted = false   // every fresh recording cycle starts unmuted
         lastRecordingDuration = 0
+        liveTranscript = ""
+        bestLiveTranscript = ""
 
         let inputNode = audioEngine.inputNode
         let format    = inputNode.outputFormat(forBus: 0)
@@ -177,7 +180,7 @@ final class WhisperManager: ObservableObject {
                 .joined(separator: " ")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             if !text.isEmpty {
-                liveTranscript = Self.visibleTranscript(from: text)
+                updateLiveTranscript(with: text)
             }
         } catch {
             // Silent — live passes are best-effort
@@ -202,6 +205,7 @@ final class WhisperManager: ObservableObject {
         defer {
             isTranscribing = false
             liveTranscript = ""
+            bestLiveTranscript = ""
         }
 
         guard let whisper = whisperKit, !recordedSamples.isEmpty else {
@@ -237,7 +241,20 @@ final class WhisperManager: ObservableObject {
         isTranscribing  = false
         audioLevel      = 0
         liveTranscript  = ""
+        bestLiveTranscript = ""
         recordedSamples = []
+    }
+
+    private func updateLiveTranscript(with rawText: String) {
+        let candidate = Self.visibleTranscript(from: rawText)
+        guard !candidate.isEmpty else { return }
+
+        // Whisper live passes can regress after a pause. Keep the most complete
+        // preview so the user can pause to think without watching prior words vanish.
+        if candidate.count >= bestLiveTranscript.count {
+            bestLiveTranscript = candidate
+            liveTranscript = candidate
+        }
     }
 
     static func visibleTranscript(from rawText: String) -> String {
