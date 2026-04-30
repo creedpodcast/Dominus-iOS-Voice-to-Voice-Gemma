@@ -75,9 +75,7 @@ final class SpeechManager: NSObject, ObservableObject, AVSpeechSynthesizerDelega
         isSpeaking            = false
         isStartingPlayback    = false
         nowPlayingMessageID   = nil
-        if synth.isSpeaking {
-            synth.stopSpeaking(at: .immediate)
-        }
+        synth.stopSpeaking(at: .immediate)
     }
 
     // MARK: - AVSpeechSynthesizerDelegate

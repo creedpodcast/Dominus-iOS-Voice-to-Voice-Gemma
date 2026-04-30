@@ -42,6 +42,7 @@ struct ContentView: View {
     // Remember whether voice was on before PTT so we can restore it
     @State private var voiceWasEnabled: Bool = false
     @State private var voiceAutoSendTask: Task<Void, Never>?
+    @State private var isInterruptRestartPending = false
 
     private var isFullyLoaded: Bool {
         store.isLoaded && whisper.modelReady
@@ -89,12 +90,14 @@ struct ContentView: View {
         // to keep talking. They can tap X to exit voice mode explicitly.
         .onChange(of: store.isGenerating) { generating in
             guard pttState == .aiTalking else { return }
+            guard !isInterruptRestartPending else { return }
             if !generating && !SpeechManager.shared.isSpeaking {
                 beginListening()
             }
         }
         .onChange(of: store.silentAmbientEventCount) { _ in
             guard pttState == .aiTalking else { return }
+            guard !isInterruptRestartPending else { return }
             beginListening()
         }
         .onChange(of: whisper.liveTranscript) { transcript in
@@ -122,8 +125,10 @@ struct ContentView: View {
         SpeechManager.shared.onAllSpeechFinished = {
             Task { @MainActor in
                 guard self.pttState == .aiTalking else { return }
+                guard !self.isInterruptRestartPending else { return }
                 try? await Task.sleep(nanoseconds: 350_000_000) // 350 ms grace period
                 guard self.pttState == .aiTalking else { return } // re-check after sleep
+                guard !self.isInterruptRestartPending else { return }
                 if !self.store.isGenerating {
                     self.beginListening()
                 }
@@ -178,10 +183,7 @@ struct ContentView: View {
             submitVoiceRecording()
 
         case .aiTalking:
-            SpeechManager.shared.stopAndClear()
-            store.stopGeneration()
-            whisper.cancelRecording()
-            beginListening()
+            interruptAIAndResumeListening()
         }
     }
 
@@ -189,6 +191,7 @@ struct ContentView: View {
 
     private func beginListening() {
         cancelVoiceAutoSend()
+        isInterruptRestartPending = false
         SpeechManager.shared.stopAndClear()
         // Tear down SpeechRecognitionManager's engine first — two AVAudioEngines
         // cannot both install a tap on the input node simultaneously.
@@ -200,6 +203,7 @@ struct ContentView: View {
 
     private func returnToIdle() {
         cancelVoiceAutoSend()
+        isInterruptRestartPending = false
         stopPulse()
         whisper.cancelRecording()
         // WhisperManager stopped its engine — safe to fully deactivate audio session
@@ -211,6 +215,7 @@ struct ContentView: View {
     /// Called by the X button — immediately stops everything and exits voice mode.
     private func exitVoiceMode() {
         cancelVoiceAutoSend()
+        isInterruptRestartPending = false
         SpeechManager.shared.stopAndClear()
         store.stopGeneration()
         returnToIdle()
@@ -220,9 +225,21 @@ struct ContentView: View {
     /// but keeps the user inside voice mode. Loops back to listening.
     private func stopCurrentResponse() {
         cancelVoiceAutoSend()
+        interruptAIAndResumeListening()
+    }
+
+    private func interruptAIAndResumeListening() {
+        cancelVoiceAutoSend()
+        isInterruptRestartPending = true
         SpeechManager.shared.stopAndClear()
         store.stopGeneration()
-        beginListening()
+        whisper.cancelRecording()
+
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            guard isInterruptRestartPending, pttState == .aiTalking else { return }
+            beginListening()
+        }
     }
 
     private func handleLiveVoiceTranscript(_ transcript: String) {

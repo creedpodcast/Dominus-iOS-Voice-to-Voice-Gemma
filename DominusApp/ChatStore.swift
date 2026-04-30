@@ -480,9 +480,12 @@ final class ChatStore: ObservableObject {
                 }
                 SpeechManager.shared.stopAndClear()
             } else {
-                conversations[convoIndex].messages.append(
-                    ChatMessage(role: .assistant, content: "Error: \(error.localizedDescription)")
-                )
+                if let idx = conversations[convoIndex].messages.indices.last,
+                   conversations[convoIndex].messages[idx].content.isEmpty {
+                    conversations[convoIndex].messages.removeLast()
+                }
+                SpeechManager.shared.stopAndClear()
+                print("❌ Llama generation error:", error.localizedDescription)
             }
             conversations[convoIndex].updatedAt = Date()
             saveToDisk()
