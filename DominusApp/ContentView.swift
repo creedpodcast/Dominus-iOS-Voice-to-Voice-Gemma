@@ -260,7 +260,7 @@ struct ContentView: View {
     private func scheduleVoiceAutoSend(for transcriptSnapshot: String) {
         voiceAutoSendTask?.cancel()
         voiceAutoSendTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
             guard !Task.isCancelled,
                   pttState == .listening,
                   !whisper.isMicMuted,
