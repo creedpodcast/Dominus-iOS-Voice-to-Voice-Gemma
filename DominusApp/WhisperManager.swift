@@ -35,6 +35,7 @@ final class WhisperManager: ObservableObject {
     @Published var modelStatus:     String = "Whisper not loaded"
     @Published var liveTranscript:  String = ""
     @Published var lastRecordingDuration: TimeInterval = 0
+    @Published var lastAudioActivityAt: Date?
 
     // MARK: - Private
 
@@ -44,6 +45,7 @@ final class WhisperManager: ObservableObject {
     private var nativeSampleRate: Double  = 44_100
     private var recordingStartedAt: Date?
     private var bestLiveTranscript: String = ""
+    private let voiceActivityLevelThreshold: Float = 0.035
 
     private var liveTimer:               Timer?
     private var isRunningLivePass:       Bool  = false
@@ -101,6 +103,7 @@ final class WhisperManager: ObservableObject {
         recordedSamples = []
         isMicMuted = false   // every fresh recording cycle starts unmuted
         lastRecordingDuration = 0
+        lastAudioActivityAt = nil
         liveTranscript = ""
         bestLiveTranscript = ""
 
@@ -128,6 +131,9 @@ final class WhisperManager: ObservableObject {
                     return
                 }
                 self.audioLevel       = level
+                if level >= self.voiceActivityLevelThreshold {
+                    self.lastAudioActivityAt = Date()
+                }
                 self.recordedSamples += samples
             }
         }
@@ -201,6 +207,7 @@ final class WhisperManager: ObservableObject {
         isRecording    = false
         isTranscribing = true
         audioLevel     = 0
+        lastAudioActivityAt = nil
 
         defer {
             isTranscribing = false
@@ -240,6 +247,7 @@ final class WhisperManager: ObservableObject {
         isRecording     = false
         isTranscribing  = false
         audioLevel      = 0
+        lastAudioActivityAt = nil
         liveTranscript  = ""
         bestLiveTranscript = ""
         recordedSamples = []

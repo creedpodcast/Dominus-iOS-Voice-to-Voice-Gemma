@@ -6,7 +6,7 @@ Dominus is a fully local, privacy-first AI assistant for iPhone. No internet con
 
 ## What It Does
 
-Talk to an AI that talks back. Tap once to speak, then pause — after real words are transcribed and no new words arrive for 2.5 seconds, Dominus sends the message automatically and responds with text and voice simultaneously. Tap at any point while the AI is speaking to cut it off and speak again. Fully on-device, fully private.
+Talk to an AI that talks back. Tap once to speak, then pause — after real words are transcribed and the mic has been quiet for 2.5 seconds, Dominus sends the message automatically and responds with text and voice simultaneously. Tap at any point while the AI is speaking to cut it off and speak again. Fully on-device, fully private.
 
 ---
 
@@ -14,7 +14,7 @@ Talk to an AI that talks back. Tap once to speak, then pause — after real word
 
 ### Working
 - **Push-to-talk (PTT) voice-to-voice conversation**
-  - Tap mic → speak → pause for 2.5 seconds → AI responds with text + voice
+  - Tap mic → speak → pause until the mic is quiet for 2.5 seconds → AI responds with text + voice
   - Tap again while listening to manually send before the timer finishes
   - Tap during AI response → interrupts voice and generation, waits briefly for audio to drain, then starts listening again
   - Animated pulse ring while recording, live transcript shown as you speak
@@ -24,7 +24,7 @@ Talk to an AI that talks back. Tap once to speak, then pause — after real word
 - **WhisperKit on-device STT** — accurate Whisper-based transcription with live preview while recording
 - **Hidden ambient cue awareness** — Whisper non-speech markers such as `[coughing]`, `(keyboard typing)`, `[silence]`, and `[laughter]` are removed from the visible transcript/chat while still being tracked privately per conversation. Dominus can acknowledge them naturally with a 12-turn cooldown, answer later if asked what it heard, and check in after roughly one minute of silence.
 - **Stable live voice transcript** — live preview keeps the best partial transcript during a recording, so a brief pause to think no longer erases previously transcribed words.
-- **Transcript-based voice auto-send** — voice mode waits for actual visible words, resets the timer whenever more words appear, and sends automatically after 2.5 seconds of transcript silence.
+- **Audio-gated voice auto-send** — voice mode waits for actual visible words, tracks mic activity while the user speaks, and sends automatically only after the mic has been quiet for 2.5 seconds.
 - **Voice punctuation cleanup** — dictated words such as "period", "comma", and "question mark" are converted into punctuation pauses before voice text is sent or spoken aloud.
 - **Male TTS voice** — prefers Evan (Enhanced), falls back to Reed, Nathan, Tom, etc.
 - **Loud, clear voice output** — `.videoChat` audio session mode removes the automatic-gain-control ceiling that `.voiceChat` imposes; device volume rocker now controls the full range
@@ -89,7 +89,7 @@ If the app is foregrounded after a long background session and either model need
 [idle]
   ↓ tap mic
 [listening]  — waveform icon (red) + animated pulse ring + live transcript
-  ↓ 2.5 seconds with no new transcribed words, or tap again to send manually
+  ↓ 2.5 seconds of mic quiet after visible words, or tap again to send manually
 [transcribing] — "Transcribing your speech…" pill appears
   ↓ Whisper done
 [AI talking] — "Thinking…" pill → then mic.fill icon (green) as TTS begins
@@ -119,7 +119,7 @@ The same single button controls every step. No hold-to-talk. Auto-send only star
 | Hidden ambient cues | Bracketed or parenthesized non-speech markers are stripped from visible text, stored as per-chat ambient events, and injected only as hidden context when relevant |
 | Text-to-Speech | `AVSpeechSynthesizer.speak()` + delegate (Apple Neural Engine, fully local) |
 | TTS voice | Evan Enhanced (male, en-US) — falls back to best available |
-| Input mode | Push-to-talk start with transcript-based auto-send after 2.5 seconds of no new visible words |
+| Input mode | Push-to-talk start with audio-gated auto-send after 2.5 seconds of mic quiet and visible words |
 | Silence handling | Ambient-only silence is stored silently unless the recording lasts about 60 seconds, then Dominus may briefly check in |
 | Interrupt | Button tap stops generation + TTS immediately, then restarts STT after a short audio-drain grace period |
 | Audio session | `AVAudioSession` `.videoChat` mode — keeps hardware echo cancellation, drops the AGC volume cap that `.voiceChat` applies |

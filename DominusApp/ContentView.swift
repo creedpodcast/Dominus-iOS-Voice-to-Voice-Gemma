@@ -43,6 +43,10 @@ struct ContentView: View {
     @State private var voiceWasEnabled: Bool = false
     @State private var voiceAutoSendTask: Task<Void, Never>?
     @State private var isInterruptRestartPending = false
+    @State private var latestVisibleVoiceTranscript = ""
+    @State private var lastVoiceActivityAt: Date?
+
+    private let voiceAutoSendDelay: TimeInterval = 2.5
 
     private var isFullyLoaded: Bool {
         store.isLoaded && whisper.modelReady
@@ -102,6 +106,9 @@ struct ContentView: View {
         }
         .onChange(of: whisper.liveTranscript) { transcript in
             handleLiveVoiceTranscript(transcript)
+        }
+        .onChange(of: whisper.lastAudioActivityAt) { activityAt in
+            handleListeningAudioActivity(activityAt)
         }
         // Rename alert
         .alert("Rename Chat", isPresented: $showingRenameAlert) {
@@ -190,7 +197,7 @@ struct ContentView: View {
     // MARK: - Listening helpers
 
     private func beginListening() {
-        cancelVoiceAutoSend()
+        resetVoiceAutoSendState()
         isInterruptRestartPending = false
         SpeechManager.shared.stopAndClear()
         // Tear down SpeechRecognitionManager's engine first — two AVAudioEngines
@@ -202,7 +209,7 @@ struct ContentView: View {
     }
 
     private func returnToIdle() {
-        cancelVoiceAutoSend()
+        resetVoiceAutoSendState()
         isInterruptRestartPending = false
         stopPulse()
         whisper.cancelRecording()
@@ -214,7 +221,7 @@ struct ContentView: View {
 
     /// Called by the X button — immediately stops everything and exits voice mode.
     private func exitVoiceMode() {
-        cancelVoiceAutoSend()
+        resetVoiceAutoSendState()
         isInterruptRestartPending = false
         SpeechManager.shared.stopAndClear()
         store.stopGeneration()
@@ -224,12 +231,12 @@ struct ContentView: View {
     /// Called by the orb's stop button — kills the current AI response (generation + TTS)
     /// but keeps the user inside voice mode. Loops back to listening.
     private func stopCurrentResponse() {
-        cancelVoiceAutoSend()
+        resetVoiceAutoSendState()
         interruptAIAndResumeListening()
     }
 
     private func interruptAIAndResumeListening() {
-        cancelVoiceAutoSend()
+        resetVoiceAutoSendState()
         isInterruptRestartPending = true
         SpeechManager.shared.stopAndClear()
         store.stopGeneration()
@@ -244,28 +251,49 @@ struct ContentView: View {
 
     private func handleLiveVoiceTranscript(_ transcript: String) {
         guard pttState == .listening, !whisper.isMicMuted else {
-            cancelVoiceAutoSend()
+            resetVoiceAutoSendState()
             return
         }
 
         let visibleTranscript = WhisperManager.visibleTranscript(from: transcript)
         guard !visibleTranscript.isEmpty else {
-            cancelVoiceAutoSend()
+            resetVoiceAutoSendState()
             return
         }
 
-        scheduleVoiceAutoSend(for: visibleTranscript)
+        latestVisibleVoiceTranscript = visibleTranscript
+        if lastVoiceActivityAt == nil {
+            lastVoiceActivityAt = whisper.lastAudioActivityAt ?? Date()
+        }
+        scheduleVoiceAutoSend()
     }
 
-    private func scheduleVoiceAutoSend(for transcriptSnapshot: String) {
+    private func handleListeningAudioActivity(_ activityAt: Date?) {
+        guard pttState == .listening, !whisper.isMicMuted else { return }
+        guard let activityAt else { return }
+
+        lastVoiceActivityAt = activityAt
+        guard !latestVisibleVoiceTranscript.isEmpty else { return }
+        scheduleVoiceAutoSend()
+    }
+
+    private func scheduleVoiceAutoSend() {
+        let transcriptSnapshot = latestVisibleVoiceTranscript
         voiceAutoSendTask?.cancel()
         voiceAutoSendTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            try? await Task.sleep(nanoseconds: UInt64(voiceAutoSendDelay * 1_000_000_000))
             guard !Task.isCancelled,
                   pttState == .listening,
                   !whisper.isMicMuted,
+                  !transcriptSnapshot.isEmpty,
                   WhisperManager.visibleTranscript(from: whisper.liveTranscript) == transcriptSnapshot
             else { return }
+
+            if let lastVoiceActivityAt,
+               Date().timeIntervalSince(lastVoiceActivityAt) < voiceAutoSendDelay {
+                scheduleVoiceAutoSend()
+                return
+            }
 
             submitVoiceRecording()
         }
@@ -276,8 +304,14 @@ struct ContentView: View {
         voiceAutoSendTask = nil
     }
 
-    private func submitVoiceRecording() {
+    private func resetVoiceAutoSendState() {
         cancelVoiceAutoSend()
+        latestVisibleVoiceTranscript = ""
+        lastVoiceActivityAt = nil
+    }
+
+    private func submitVoiceRecording() {
+        resetVoiceAutoSendState()
         stopPulse()
         Task {
             let spoken = await whisper.stopAndTranscribe()
