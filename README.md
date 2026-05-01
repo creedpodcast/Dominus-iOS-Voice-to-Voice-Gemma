@@ -17,7 +17,8 @@ Talk to an AI that talks back. Tap once to speak, then pause — after real word
   - Tap mic → speak → pause until the mic is quiet for 2.5 seconds → AI responds with text + voice
   - Tap again while listening to manually send before the timer finishes
   - Tap during AI response → interrupts voice and generation, waits briefly for audio to drain, then starts listening again
-  - Animated pulse ring while recording, live transcript shown as you speak
+  - Full-screen black voice surface hides the chat title, chat log, transcript field, and input bar while the orb is active
+  - Animated pulse ring while recording; processing states still appear as status pills on the black voice screen
   - TTS auto-enables during voice turns, restores your previous setting after
 - **Full-screen loading splash on launch** — blocks interaction until both Gemma and Whisper are fully ready; shows live progress bars per component
 - **In-use status indicators** — floating pill appears whenever the app is processing in the background (transcribing, thinking, generating)
@@ -88,7 +89,7 @@ If the app is foregrounded after a long background session and either model need
 ```
 [idle]
   ↓ tap mic
-[listening]  — waveform icon (red) + animated pulse ring + live transcript
+[listening]  — full-screen black voice surface + waveform icon (red) + animated pulse ring
   ↓ 2.5 seconds of mic quiet after visible words, or tap again to send manually
 [transcribing] — "Transcribing your speech…" pill appears
   ↓ Whisper done
@@ -97,7 +98,7 @@ If the app is foregrounded after a long background session and either model need
 [listening]
 ```
 
-The same single button controls every step. No hold-to-talk. Auto-send only starts after visible words have been transcribed, so silence or hidden ambient cues alone do not send a user message.
+The same single button controls every step. No hold-to-talk. Auto-send only starts after visible words have been transcribed, so silence or hidden ambient cues alone do not send a user message. Empty recordings keep the user in voice mode and restart listening instead of returning to text mode.
 
 ---
 
@@ -120,6 +121,7 @@ The same single button controls every step. No hold-to-talk. Auto-send only star
 | Text-to-Speech | `AVSpeechSynthesizer.speak()` + delegate (Apple Neural Engine, fully local) |
 | TTS voice | Evan Enhanced (male, en-US) — falls back to best available |
 | Input mode | Push-to-talk start with audio-gated auto-send after 2.5 seconds of mic quiet and visible words |
+| Voice UI | Full-screen black orb surface while voice mode is active; chat title/log/input are hidden until voice mode exits |
 | Silence handling | Ambient-only silence is stored silently unless the recording lasts about 60 seconds, then Dominus may briefly check in |
 | Interrupt | Button tap stops generation + TTS immediately, then restarts STT after a short audio-drain grace period |
 | Audio session | `AVAudioSession` `.videoChat` mode — keeps hardware echo cancellation, drops the AGC volume cap that `.voiceChat` applies |

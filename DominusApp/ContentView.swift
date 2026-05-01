@@ -56,6 +56,21 @@ struct ContentView: View {
         ZStack {
             chatUI
 
+            if pttState != .idle {
+                VoiceOrbOverlay(
+                    orbColor:        pttColor,
+                    audioLevel:      whisper.audioLevel,
+                    status:          activeStatus,
+                    isMicMuted:      whisper.isMicMuted,
+                    isGenerating:    store.isGenerating || speechMgr.isSpeaking,
+                    onTap:           handlePTTTap,
+                    onToggleMicMute: { whisper.isMicMuted.toggle() },
+                    onStop:          stopCurrentResponse,
+                    onDismiss:       exitVoiceMode
+                )
+                .zIndex(100)
+            }
+
             if !isFullyLoaded {
                 SplashLoadingView(
                     gemmaProgress:  store.loadProgress,
@@ -317,7 +332,7 @@ struct ContentView: View {
             let spoken = await whisper.stopAndTranscribe()
             let visibleVoiceText = cleanVoiceSubmission(spoken)
             guard !visibleVoiceText.isEmpty else {
-                returnToIdle()
+                beginListening()
                 return
             }
             store.send(
@@ -596,20 +611,6 @@ struct ContentView: View {
                     if let last = store.selectedConversation()?.messages.last {
                         proxy.scrollTo(last.id, anchor: .bottom)
                     }
-                }
-
-                if pttState != .idle {
-                    VoiceOrbOverlay(
-                        orbColor:        pttColor,
-                        audioLevel:      whisper.audioLevel,
-                        isMicMuted:      whisper.isMicMuted,
-                        isGenerating:    store.isGenerating || speechMgr.isSpeaking,
-                        onTap:           handlePTTTap,
-                        onToggleMicMute: { whisper.isMicMuted.toggle() },
-                        onStop:          stopCurrentResponse,
-                        onDismiss:       exitVoiceMode
-                    )
-                    .zIndex(10)
                 }
 
                 // Status pill — floats at top of chat area whenever something is loading

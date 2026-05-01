@@ -11,6 +11,7 @@ struct VoiceOrbOverlay: View {
 
     let orbColor:      Color
     let audioLevel:    Float
+    let status:        (icon: String, message: String)?
     let isMicMuted:    Bool
     let isGenerating:  Bool   // controls whether the stop button is visible
     let onTap:         () -> Void
@@ -20,10 +21,21 @@ struct VoiceOrbOverlay: View {
 
     var body: some View {
         ZStack {
-            // Dim background — tapping it acts the same as tapping the orb
-            Color.black.opacity(0.55)
+            // Full focus background — tapping it acts the same as tapping the orb.
+            Color.black
                 .ignoresSafeArea()
                 .onTapGesture { onTap() }
+
+            VStack {
+                if let status {
+                    StatusPillView(icon: status.icon, message: status.message)
+                        .padding(.top, 22)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                }
+                Spacer()
+            }
+            .animation(.easeInOut(duration: 0.25), value: status?.message)
+            .allowsHitTesting(false)
 
             VStack(spacing: 36) {
                 VoiceOrb(color: orbColor, audioLevel: audioLevel)
