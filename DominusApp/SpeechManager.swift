@@ -9,8 +9,8 @@ import Combine
 ///  - decrement in `didFinish` delegate callback
 ///  - fire `onAllSpeechFinished` only when the count returns to zero
 ///
-/// Volume is controlled by the audio session mode (.videoChat removes AGC cap)
-/// and the device volume rocker. `AVSpeechUtterance.volume` is held at 1.0 (max).
+/// Volume is controlled by the audio session mode, the device volume rocker, and
+/// a route-aware app cap so headphones/Bluetooth do not play at full blast.
 @MainActor
 final class SpeechManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
 
@@ -48,9 +48,11 @@ final class SpeechManager: NSObject, ObservableObject, AVSpeechSynthesizerDelega
         let cleaned = clean(text)
         guard hasSpeakableContent(cleaned) else { return }
 
+        prepareAudioSessionForSpeech()
+
         let utt    = AVSpeechUtterance(string: cleaned)
         utt.rate   = AVSpeechUtteranceDefaultSpeechRate
-        utt.volume = 1.0
+        utt.volume = safeSpeechVolume()
         utt.voice  = preferredVoice ?? AVSpeechSynthesisVoice(language: "en-US")
         utt.preUtteranceDelay  = 0
         utt.postUtteranceDelay = 0
@@ -76,6 +78,37 @@ final class SpeechManager: NSObject, ObservableObject, AVSpeechSynthesizerDelega
         isStartingPlayback    = false
         nowPlayingMessageID   = nil
         synth.stopSpeaking(at: .immediate)
+    }
+
+    private func prepareAudioSessionForSpeech() {
+        let session = AVAudioSession.sharedInstance()
+        do {
+            try session.setCategory(
+                .playAndRecord,
+                mode: .videoChat,
+                options: [.defaultToSpeaker, .allowBluetooth, .allowBluetoothA2DP]
+            )
+            try session.setActive(true, options: .notifyOthersOnDeactivation)
+        } catch {
+            print("❌ TTS audio session setup failed:", error.localizedDescription)
+        }
+    }
+
+    private func safeSpeechVolume() -> Float {
+        let route = AVAudioSession.sharedInstance().currentRoute
+        let isPrivateListening = route.outputs.contains { output in
+            switch output.portType {
+            case .headphones,
+                 .bluetoothA2DP,
+                 .bluetoothHFP,
+                 .bluetoothLE:
+                return true
+            default:
+                return false
+            }
+        }
+
+        return isPrivateListening ? 0.34 : 0.85
     }
 
     // MARK: - AVSpeechSynthesizerDelegate

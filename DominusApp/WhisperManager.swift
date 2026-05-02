@@ -107,14 +107,23 @@ final class WhisperManager: ObservableObject {
         liveTranscript = ""
         bestLiveTranscript = ""
 
-        let inputNode = audioEngine.inputNode
-        let format    = inputNode.outputFormat(forBus: 0)
-        nativeSampleRate = format.sampleRate
+        // Bluetooth headsets can switch the hardware input to 16-24 kHz.
+        // Configure the session before reading the hardware format, then install
+        // the tap with that exact format so Core Audio doesn't keep a stale 48 kHz tap.
+        setupAudioSession()
 
+        let inputNode = audioEngine.inputNode
+        if audioEngine.isRunning { audioEngine.stop() }
+        audioEngine.reset()
         inputNode.removeTap(onBus: 0)
-        inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
+
+        let hardwareFormat = inputNode.inputFormat(forBus: 0)
+        nativeSampleRate = hardwareFormat.sampleRate
+
+        inputNode.installTap(onBus: 0, bufferSize: 1024, format: hardwareFormat) { [weak self] buffer, _ in
             guard let data = buffer.floatChannelData?[0] else { return }
             let count   = Int(buffer.frameLength)
+            guard count > 0 else { return }
             let samples = Array(UnsafeBufferPointer(start: data, count: count))
 
             // RMS amplitude for orb animation
@@ -134,15 +143,12 @@ final class WhisperManager: ObservableObject {
                 if level >= self.voiceActivityLevelThreshold {
                     self.lastAudioActivityAt = Date()
                 }
+                self.nativeSampleRate = buffer.format.sampleRate
                 self.recordedSamples += samples
             }
         }
 
         do {
-            // Ensure audio session is active with echo-cancelling voiceChat mode.
-            // Called here because SpeechRecognitionManager's session is torn down
-            // before beginListening() hands off to WhisperManager.
-            setupAudioSession()
             audioEngine.prepare()
             try audioEngine.start()
             isRecording         = true
@@ -283,7 +289,7 @@ final class WhisperManager: ObservableObject {
         try? session.setCategory(
             .playAndRecord,
             mode: .voiceChat,
-            options: [.defaultToSpeaker, .allowBluetooth]
+            options: [.defaultToSpeaker, .allowBluetooth, .allowBluetoothA2DP]
         )
         try? session.setActive(true, options: .notifyOthersOnDeactivation)
     }

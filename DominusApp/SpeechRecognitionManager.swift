@@ -46,14 +46,14 @@ final class SpeechRecognitionManager: NSObject, ObservableObject {
 
     // MARK: - Unified voice session (call once per conversation session)
 
-    /// Sets up a single shared audio session with echo cancellation.
-    /// Call when the user starts a voice session. Do NOT call setCategory anywhere else.
+    /// Sets up the shared voice session with echo cancellation.
+    /// Call when the user starts a voice session.
     func setupVoiceSession() throws {
         let session = AVAudioSession.sharedInstance()
         try session.setCategory(
             .playAndRecord,
             mode: .videoChat,           // ← Echo cancellation ON, but no AGC volume cap (louder than voiceChat)
-            options: [.defaultToSpeaker, .allowBluetooth]
+            options: [.defaultToSpeaker, .allowBluetooth, .allowBluetoothA2DP]
         )
         try session.setActive(true, options: .notifyOthersOnDeactivation)
 
@@ -139,11 +139,12 @@ final class SpeechRecognitionManager: NSObject, ObservableObject {
         guard !audioEngine.isRunning else { return }
 
         let inputNode = audioEngine.inputNode
+        audioEngine.reset()
         inputNode.removeTap(onBus: 0)
-        let format = inputNode.outputFormat(forBus: 0)
+        let hardwareFormat = inputNode.inputFormat(forBus: 0)
 
         // Single permanent tap: feeds STT when active, always monitors amplitude
-        inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
+        inputNode.installTap(onBus: 0, bufferSize: 1024, format: hardwareFormat) { [weak self] buffer, _ in
             self?.recognitionRequest?.append(buffer)   // nil-safe: no-op when STT inactive
             self?.checkVAD(buffer)
         }

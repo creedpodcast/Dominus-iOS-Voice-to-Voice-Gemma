@@ -9,6 +9,25 @@ private enum PTTState {
     case aiTalking  // AI generating / speaking — tap to interrupt
 }
 
+private enum HeadphoneVolumeWarning: Equatable {
+    case high
+    case low
+
+    var icon: String {
+        switch self {
+        case .high: return "speaker.wave.3.fill"
+        case .low:  return "speaker.slash.fill"
+        }
+    }
+
+    var message: String {
+        switch self {
+        case .high: return "Headphone volume is high"
+        case .low:  return "Headphone volume is very low"
+        }
+    }
+}
+
 struct ContentView: View {
 
     @StateObject private var store   = ChatStore()
@@ -45,6 +64,9 @@ struct ContentView: View {
     @State private var isInterruptRestartPending = false
     @State private var latestVisibleVoiceTranscript = ""
     @State private var lastVoiceActivityAt: Date?
+    @State private var headphoneVolumeWarning: HeadphoneVolumeWarning?
+    @State private var dismissedHeadphoneVolumeWarning: HeadphoneVolumeWarning?
+    @State private var volumeMonitorTask: Task<Void, Never>?
 
     private let voiceAutoSendDelay: TimeInterval = 2.5
 
@@ -69,6 +91,20 @@ struct ContentView: View {
                     onDismiss:       exitVoiceMode
                 )
                 .zIndex(100)
+            }
+
+            if pttState != .idle, let warning = headphoneVolumeWarning {
+                VStack {
+                    HeadphoneVolumeWarningBanner(warning: warning) {
+                        dismissedHeadphoneVolumeWarning = warning
+                        withAnimation { headphoneVolumeWarning = nil }
+                    }
+                    .padding(.horizontal, 18)
+                    .padding(.top, 18)
+                    Spacer()
+                }
+                .transition(.move(edge: .top).combined(with: .opacity))
+                .zIndex(150)
             }
 
             if !isFullyLoaded {
@@ -195,6 +231,7 @@ struct ContentView: View {
             voiceWasEnabled    = store.voiceEnabled
             store.voiceEnabled = true
             SpeechManager.shared.stopAndClear()
+            startVolumeMonitoring()
             beginListening()
 
         case .listening:
@@ -225,6 +262,7 @@ struct ContentView: View {
 
     private func returnToIdle() {
         resetVoiceAutoSendState()
+        stopVolumeMonitoring()
         isInterruptRestartPending = false
         stopPulse()
         whisper.cancelRecording()
@@ -323,6 +361,70 @@ struct ContentView: View {
         cancelVoiceAutoSend()
         latestVisibleVoiceTranscript = ""
         lastVoiceActivityAt = nil
+    }
+
+    // MARK: - Headphone volume warnings
+
+    private func startVolumeMonitoring() {
+        volumeMonitorTask?.cancel()
+        dismissedHeadphoneVolumeWarning = nil
+        updateHeadphoneVolumeWarning()
+
+        volumeMonitorTask = Task { @MainActor in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                guard !Task.isCancelled else { return }
+                updateHeadphoneVolumeWarning()
+            }
+        }
+    }
+
+    private func stopVolumeMonitoring() {
+        volumeMonitorTask?.cancel()
+        volumeMonitorTask = nil
+        headphoneVolumeWarning = nil
+        dismissedHeadphoneVolumeWarning = nil
+    }
+
+    private func updateHeadphoneVolumeWarning() {
+        guard pttState != .idle, isPrivateListeningRoute else {
+            headphoneVolumeWarning = nil
+            dismissedHeadphoneVolumeWarning = nil
+            return
+        }
+
+        let volume = AVAudioSession.sharedInstance().outputVolume
+        let nextWarning: HeadphoneVolumeWarning?
+        if volume > 0.50 {
+            nextWarning = .high
+        } else if volume <= 0.12 {
+            nextWarning = .low
+        } else {
+            nextWarning = nil
+        }
+
+        guard let nextWarning else {
+            headphoneVolumeWarning = nil
+            dismissedHeadphoneVolumeWarning = nil
+            return
+        }
+
+        guard dismissedHeadphoneVolumeWarning != nextWarning else { return }
+        withAnimation { headphoneVolumeWarning = nextWarning }
+    }
+
+    private var isPrivateListeningRoute: Bool {
+        AVAudioSession.sharedInstance().currentRoute.outputs.contains { output in
+            switch output.portType {
+            case .headphones,
+                 .bluetoothA2DP,
+                 .bluetoothHFP,
+                 .bluetoothLE:
+                return true
+            default:
+                return false
+            }
+        }
     }
 
     private func submitVoiceRecording() {
@@ -720,6 +822,55 @@ struct ContentView: View {
             .padding(.vertical, 10)
         }
         .animation(.easeInOut(duration: 0.2), value: pttState == .idle)
+    }
+}
+
+// MARK: - Headphone Volume Warning
+
+private struct HeadphoneVolumeWarningBanner: View {
+    let warning: HeadphoneVolumeWarning
+    let onDismiss: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: warning.icon)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 28, height: 28)
+                .background(Color.white.opacity(0.16), in: Circle())
+
+            Text(warning.message)
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(.white)
+
+            Spacer(minLength: 12)
+
+            Button(action: onDismiss) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(.white.opacity(0.85))
+                    .frame(width: 28, height: 28)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Dismiss volume warning")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Color.white.opacity(0.22), lineWidth: 1)
+        }
+        .shadow(color: .black.opacity(0.28), radius: 18, y: 8)
+        .gesture(
+            DragGesture(minimumDistance: 18)
+                .onEnded { value in
+                    if abs(value.translation.width) > 44 || value.translation.height < -24 {
+                        onDismiss()
+                    }
+                }
+        )
     }
 }
 

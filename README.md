@@ -29,6 +29,8 @@ Talk to an AI that talks back. Tap once to speak, then pause — after real word
 - **Voice punctuation cleanup** — dictated words such as "period", "comma", and "question mark" are converted into punctuation pauses before voice text is sent or spoken aloud.
 - **Male TTS voice** — prefers Evan (Enhanced), falls back to Reed, Nathan, Tom, etc.
 - **Loud, clear voice output** — `.videoChat` audio session mode removes the automatic-gain-control ceiling that `.voiceChat` imposes; device volume rocker now controls the full range
+- **Bluetooth/AirPods voice routing** — voice mode supports Bluetooth and wired headphone output/input, handles headset mic sample-rate changes, and keeps TTS at a safer headphone volume
+- **Headphone volume safety warning** — while voice mode is active, Dominus watches headphone/Bluetooth system volume and shows a persistent dismissible warning if volume is very high or very low
 - **Half-duplex voice with no echo** — orb stays green until *every* queued TTS sentence has fully drained from the speaker (350 ms hardware grace included), then flips to listening — the mic never picks up the AI's tail
 - **Sentence-complete TTS chunking** — sentences fire to TTS the instant their punctuation lands, never mid-sentence; only true runaways (>300 chars) ever get cut
 - **Per-message action bar on AI replies** — Copy (clipboard, ✓ flash confirms), Share (system share sheet), and Speaker button under every assistant bubble. Tap the speaker to hear any past response read aloud; tap it again to stop mid-playback. Speaker icon swaps to a stop icon while that specific message is playing so state is always visible.
@@ -124,7 +126,9 @@ The same single button controls every step. No hold-to-talk. Auto-send only star
 | Voice UI | Full-screen black orb surface while voice mode is active; chat title/log/input are hidden until voice mode exits |
 | Silence handling | Ambient-only silence is stored silently unless the recording lasts about 60 seconds, then Dominus may briefly check in |
 | Interrupt | Button tap stops generation + TTS immediately, then restarts STT after a short audio-drain grace period |
-| Audio session | `AVAudioSession` `.videoChat` mode — keeps hardware echo cancellation, drops the AGC volume cap that `.voiceChat` applies |
+| Audio session | `AVAudioSession` `.videoChat` / `.voiceChat` voice routing with `.allowBluetooth`, `.allowBluetoothA2DP`, and `.defaultToSpeaker` so AirPods, Bluetooth headsets, wired headphones, and speaker routes work without per-device code |
+| Bluetooth input stability | Mic taps use the active hardware input format and resample dynamically, preventing headset sample-rate changes (16-24 kHz vs 48 kHz) from crashing recording |
+| Headphone safety | TTS volume is route-aware: lower app-level speech volume for headphones/Bluetooth, stronger output for phone speaker, plus persistent high/low system-volume warnings during voice mode |
 | Half-duplex gating | `outstandingUtterances` counter tracks every queued sentence; mic engine stays off until counter hits zero + 350 ms hardware drain |
 | Streaming TTS | Spoken sentence-by-sentence as tokens arrive — `preUtteranceDelay`/`postUtteranceDelay` set to 0 so Apple cross-fades sentences with no gap |
 
