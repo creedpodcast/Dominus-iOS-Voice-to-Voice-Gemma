@@ -57,19 +57,46 @@ final class ProfileStore {
         }
         try? context.save()
         loadFacts()
+        MemoryRetriever.shared.rememberLongTerm(
+            kind: memoryKind(for: trimmedKey),
+            title: trimmedKey,
+            content: "User \(trimmedKey): \(trimmedValue)",
+            sourceID: "profile:\(trimmedKey)"
+        )
         print("👤 Profile upserted: \(trimmedKey) = \(trimmedValue)")
     }
 
     // MARK: - Delete
 
     func delete(_ fact: ProfileFact) {
+        MemoryStore.shared.delete(scope: .longTerm, sourceID: "profile:\(fact.key)")
         context.delete(fact)
         try? context.save()
         loadFacts()
     }
 
     func deleteAll() {
+        facts.forEach {
+            MemoryStore.shared.delete(scope: .longTerm, sourceID: "profile:\($0.key)")
+        }
         facts.forEach { context.delete($0) }
+        try? context.save()
+        loadFacts()
+    }
+
+    func deleteFactsMatching(memoryText: String) {
+        let normalizedMemory = normalized(memoryText)
+        let matches = facts.filter { fact in
+            let normalizedValue = normalized(fact.value)
+            guard !normalizedValue.isEmpty else { return false }
+            return normalizedMemory.contains(normalizedValue)
+        }
+
+        guard !matches.isEmpty else { return }
+        matches.forEach { fact in
+            MemoryStore.shared.delete(scope: .longTerm, sourceID: "profile:\(fact.key)")
+            context.delete(fact)
+        }
         try? context.save()
         loadFacts()
     }
@@ -83,7 +110,11 @@ final class ProfileStore {
 
         if !facts.isEmpty {
             let lines = facts.map { "- \($0.key): \($0.value)" }.joined(separator: "\n")
-            parts.append("What you know about the user:\n\(lines)")
+            parts.append("""
+            What you know about the user:
+            \(lines)
+            Use these facts only when they are relevant to the user's current message.
+            """)
         }
 
         let p = persona.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -140,5 +171,22 @@ final class ProfileStore {
                 }
             }
         }
+    }
+
+    private func memoryKind(for key: String) -> MemoryKind {
+        if key.contains("favorite") || key == "interest" || key == "dislike" {
+            return .preference
+        }
+        if key == "goal" {
+            return .goal
+        }
+        return .userFact
+    }
+
+    private func normalized(_ text: String) -> String {
+        text.lowercased()
+            .replacingOccurrences(of: "•", with: " ")
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }

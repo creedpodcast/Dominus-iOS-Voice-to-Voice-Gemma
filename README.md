@@ -38,7 +38,11 @@ Talk to an AI that talks back. Tap once to speak, then pause — after real word
 - **Input field auto-clears on send** — text field empties the moment the send button is tapped; no manual deletion required before typing the next message.
 - **Larger action icons and context ring** — per-message action icons at 18 pt and the context usage ring at 40 × 40 pt for readability at any text size.
 - Text chat with Gemma 2B (streaming, token-by-token)
-- RAG long-term memory (semantic search + keyword fallback) — scoped per conversation (no cross-chat bleed)
+- **Memory Hub with editable long-term blocks** — users can view, add, edit, delete, and categorize long-term memory inside the app
+- **Temporary memory review** — per-chat memory candidates appear as reviewable bullet blocks before they are promoted to long-term memory
+- **Hands-free memory confirmation** — Dominus can suggest a memory, show Yes/No controls, accept spoken/text confirmation, and show darkened "Added to Memory" / "Forgot Memory" status bubbles in the chat
+- **RAG memory trace view** — the Memory screen can show what the retrieval layer searched and which hub/category/block candidates were handed to Gemma
+- RAG long-term memory (semantic search + keyword fallback) — retrieves from the Memory Hub and current-chat summaries while filtering memory status bubbles out of the LLM prompt
 - LLM-generated chat titles (after 5 user turns or on chat exit) and absolute-date timestamps in the sidebar
 - User profile with auto-extraction ("my name is X" → stored as fact) **plus an editable Profile sheet** (person.circle button) for manual facts and a free-text "How should Dominus talk to you?" persona prompt
 - Multiple conversation threads (create, rename, delete, switch)
@@ -132,14 +136,17 @@ The same single button controls every step. No hold-to-talk. Auto-send only star
 | Half-duplex gating | `outstandingUtterances` counter tracks every queued sentence; mic engine stays off until counter hits zero + 350 ms hardware drain |
 | Streaming TTS | Spoken sentence-by-sentence as tokens arrive — `preUtteranceDelay`/`postUtteranceDelay` set to 0 so Apple cross-fades sentences with no gap |
 
-### Memory (RAG)
+### Memory Hub + RAG
 | Component | Details |
 |---|---|
 | Vector embeddings | `NLEmbedding.sentenceEmbedding` — Apple built-in 512-dim model |
 | Similarity | vDSP cosine similarity (hardware-accelerated) |
-| Storage | SwiftData (on-device persistence) |
-| Retrieval | Top-5 semantically relevant past exchanges injected into system prompt |
-| Raw history | Last 10 turns kept in context — older turns covered by RAG |
+| Storage | SwiftData (on-device persistence for memory records, hub categories, and embeddings) |
+| Memory Hub | Editable long-term memory blocks grouped into built-in or custom categories |
+| Temporary memory | Conversation-scoped candidates and summaries that can be accepted into the Memory Hub or deleted |
+| Retrieval | Memory Hub summaries, long-term blocks, and current-chat summaries are scored, filtered, and injected only when relevant |
+| Trace UI | Shows the latest query, hub search, block candidates, current-chat candidates, and final context pack count |
+| Raw history | Last 10 turns kept in context — older turns are compacted into short-term RAG summaries |
 
 ### User Profile
 | Component | Details |
@@ -165,10 +172,12 @@ DominusApp/
 ├── WhisperManager.swift             STT — WhisperKit on-device transcription with progress
 ├── LoadingView.swift                SplashLoadingView + LoadingBarView + StatusPillView
 ├── VoiceOrb.swift                   Animated voice orb overlay (PTT visual feedback)
+├── MemoryView.swift                 Memory Hub UI — hub, trace, temporary memory, editable blocks
 ├── Memory/
 │   ├── MemoryEmbedder.swift         NLEmbedding vectorisation + cosine similarity
-│   ├── MemoryStore.swift            SwiftData persistence layer
-│   └── MemoryRetriever.swift        remember() + retrieve() public interface
+│   ├── MemoryStore.swift            SwiftData persistence, categories, hub rebuilds
+│   ├── MemoryTraceStore.swift       Observable retrieval trace for the Memory Trace tab
+│   └── MemoryRetriever.swift        remember(), retrieve(), candidate accept/delete interface
 └── Profile/
     ├── ProfileStore.swift           Fact extraction, persona, storage, system prompt injection
     ├── ProfileView.swift            Editable profile sheet — facts list + persona text field

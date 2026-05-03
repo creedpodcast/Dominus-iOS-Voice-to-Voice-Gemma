@@ -50,6 +50,7 @@ struct ContentView: View {
 
     // Profile sheet
     @State private var showProfileSheet = false
+    @State private var showMemorySheet = false
 
     // Push-to-talk state
     @State private var pttState: PTTState = .idle
@@ -556,10 +557,17 @@ struct ContentView: View {
         .navigationTitle("Chats")
         .toolbar {
             ToolbarItem(placement: .navigationBarLeading) {
-                Button {
-                    showProfileSheet = true
-                } label: {
-                    Image(systemName: "person.circle")
+                HStack {
+                    Button {
+                        showProfileSheet = true
+                    } label: {
+                        Image(systemName: "person.circle")
+                    }
+                    Button {
+                        showMemorySheet = true
+                    } label: {
+                        Image(systemName: "brain.head.profile")
+                    }
                 }
             }
             ToolbarItem(placement: .navigationBarTrailing) {
@@ -572,6 +580,9 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showProfileSheet) {
             ProfileView()
+        }
+        .sheet(isPresented: $showMemorySheet) {
+            MemoryView(conversation: store.selectedConversation())
         }
     }
 
@@ -656,6 +667,13 @@ struct ContentView: View {
         return min(1.0, Double(estimated) / Double(maxTokens))
     }
 
+    private var pendingMemorySuggestionCount: Int {
+        guard let id = store.selectedID else { return 0 }
+        return MemoryStore.shared.fetch(conversationID: id).filter {
+            $0.kind == .memoryCandidate
+        }.count
+    }
+
     // MARK: - Detail header
 
     private var detailHeader: some View {
@@ -681,6 +699,29 @@ struct ContentView: View {
                 .accessibilityLabel(store.voiceEnabled ? "Mute spoken replies" : "Speak replies aloud")
             }
 
+            Button {
+                showMemorySheet = true
+            } label: {
+                ZStack(alignment: .topTrailing) {
+                    Image(systemName: "doc.text.magnifyingglass")
+                        .font(.system(size: 16, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 34, height: 34)
+                        .contentShape(Rectangle())
+
+                    if pendingMemorySuggestionCount > 0 {
+                        Text("\(min(pendingMemorySuggestionCount, 9))")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundStyle(.white)
+                            .frame(width: 15, height: 15)
+                            .background(Color.orange, in: Circle())
+                            .offset(x: 1, y: -1)
+                    }
+                }
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Review memory")
+
             ContextRingView(usage: contextUsage)
         }
         .padding(.horizontal)
@@ -697,7 +738,13 @@ struct ContentView: View {
                     VStack(spacing: 12) {
                         let msgs = store.selectedConversation()?.messages ?? []
                         ForEach(msgs) { msg in
-                            ChatBubble(messageID: msg.id, role: msg.role, text: msg.content)
+                            ChatBubble(
+                                messageID: msg.id,
+                                role: msg.role,
+                                text: msg.content,
+                                onAcceptMemory: { store.confirmLatestPendingMemory(accept: true) },
+                                onDismissMemory: { store.confirmLatestPendingMemory(accept: false) }
+                            )
                                 .id(msg.id)
                         }
                     }
@@ -910,6 +957,8 @@ struct ChatBubble: View {
     let messageID: UUID
     let role: ChatMessage.Role
     let text: String
+    var onAcceptMemory: (() -> Void)? = nil
+    var onDismissMemory: (() -> Void)? = nil
 
     @ObservedObject private var speech = SpeechManager.shared
     @State private var copied: Bool = false
@@ -918,11 +967,29 @@ struct ChatBubble: View {
         speech.nowPlayingMessageID == messageID
     }
 
+    private var isMemoryNotice: Bool {
+        text.hasPrefix("Added to Memory:")
+            || text.hasPrefix("Memory Suggestion:")
+            || text.hasPrefix("Memory suggestion dismissed")
+            || text.hasPrefix("Forgot Memory:")
+    }
+
+    private var isMemorySuggestion: Bool {
+        text.hasPrefix("Memory Suggestion:")
+    }
+
     var body: some View {
         HStack(alignment: .bottom) {
             if role == .assistant {
                 VStack(alignment: .leading, spacing: 4) {
-                    bubbleView(background: Color(.systemGray5), foreground: .primary, align: .leading)
+                    bubbleView(
+                        background: isMemoryNotice ? Color(.systemGray4) : Color(.systemGray5),
+                        foreground: isMemoryNotice ? Color(.secondaryLabel) : .primary,
+                        align: .leading
+                    )
+                    if isMemorySuggestion {
+                        memorySuggestionActions
+                    }
                     assistantActions
                 }
                 Spacer(minLength: 48)
@@ -942,6 +1009,37 @@ struct ChatBubble: View {
             .foregroundColor(foreground)
             .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
             .frame(maxWidth: UIScreen.main.bounds.width * 0.72, alignment: align)
+    }
+
+    private var memorySuggestionActions: some View {
+        HStack(spacing: 8) {
+            Button {
+                onAcceptMemory?()
+            } label: {
+                Label("Yes", systemImage: "checkmark.circle.fill")
+                    .font(.system(size: 13, weight: .semibold))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+            }
+            .buttonStyle(.plain)
+            .background(Color.green.opacity(0.16), in: Capsule())
+            .foregroundStyle(.green)
+            .accessibilityLabel("Add suggestion to memory")
+
+            Button {
+                onDismissMemory?()
+            } label: {
+                Label("No", systemImage: "xmark.circle.fill")
+                    .font(.system(size: 13, weight: .semibold))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+            }
+            .buttonStyle(.plain)
+            .background(Color.red.opacity(0.14), in: Capsule())
+            .foregroundStyle(.red)
+            .accessibilityLabel("Dismiss memory suggestion")
+        }
+        .padding(.leading, 6)
     }
 
     private var assistantActions: some View {
