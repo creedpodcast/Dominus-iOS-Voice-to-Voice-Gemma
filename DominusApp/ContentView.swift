@@ -720,7 +720,7 @@ struct ContentView: View {
                 }
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("Review memory")
+            .accessibilityLabel("Open Memory Journal")
 
             ContextRingView(usage: contextUsage)
         }

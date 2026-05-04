@@ -517,7 +517,7 @@ final class ChatStore: ObservableObject {
 
             if case let .candidate(record) = capturedMemorySignal {
                 appendMemoryStatus(
-                    "Memory Suggestion:\n\(record.content)\nSay yes to add this to Memory Hub, or no to dismiss.",
+                    "Memory Suggestion:\n\(record.content)\nSay yes to add this to Memory Journal, or no to dismiss.",
                     convoIndex: convoIndex,
                     speak: false
                 )
@@ -807,7 +807,7 @@ final class ChatStore: ObservableObject {
 
     private func captureMemorySignals(from userText: String, in conversation: Conversation, conversationID: UUID) -> CapturedMemorySignal? {
         if let explicitMemory = explicitRememberContent(from: userText, in: conversation) {
-            let content = memoryBullet(from: explicitMemory)
+            let content = normalizedMemoryBullet(from: explicitMemory)
             MemoryRetriever.shared.rememberLongTerm(
                 kind: .userFact,
                 title: "User asked Dominus to remember",
@@ -820,7 +820,7 @@ final class ChatStore: ObservableObject {
         guard let record = MemoryRetriever.shared.rememberCandidate(
             conversationID: conversationID,
             title: "Possible long-term memory",
-            content: memoryBullet(from: candidate)
+            content: normalizedMemoryBullet(from: candidate)
         ) else { return nil }
         return .candidate(record)
     }
@@ -948,10 +948,43 @@ final class ChatStore: ObservableObject {
             #"(?i)\badd\s+(?:this|that|it)\s+to\s+(?:your\s+)?memory\b\s*[.!?]?$"#
         ]
         if matchesAnyRegex(text, patterns: contextReferencePatterns) {
-            return previousMeaningfulMessage(in: conversation)
+            return recentMemoryContext(in: conversation)
         }
 
         return nil
+    }
+
+    private func recentMemoryContext(in conversation: Conversation, maxMessages: Int = 8) -> String? {
+        let relevantMessages = conversation.messages
+            .dropLast()
+            .reversed()
+            .filter { !isMemoryStatusMessage($0.content) }
+            .prefix(maxMessages)
+            .reversed()
+
+        let lines = relevantMessages.compactMap { message -> String? in
+            let content = message.content
+                .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard content.count >= 8 else { return nil }
+            guard !matchesAnyRegex(content, patterns: [
+                #"(?i)\bremember\s+(?:this|that|it)\b"#,
+                #"(?i)\bi want you to remember\s+(?:this|that|it)\b"#,
+                #"(?i)\badd\s+(?:this|that|it)\s+to\s+(?:your\s+)?memory\b"#
+            ]) else { return nil }
+
+            let label = message.role == .user ? "User" : "Dominus"
+            let capped = content.count > 260
+                ? String(content.prefix(260)).trimmingCharacters(in: .whitespacesAndNewlines) + "..."
+                : content
+            return "\(label): \(capped)"
+        }
+
+        guard !lines.isEmpty else {
+            return previousMeaningfulMessage(in: conversation)
+        }
+
+        return "Recent conversation to remember:\n" + lines.joined(separator: "\n")
     }
 
     private func memoryCandidateContent(from text: String) -> String? {
@@ -1037,6 +1070,55 @@ final class ChatStore: ObservableObject {
         }
 
         return nil
+    }
+
+    private func normalizedMemoryBullet(from text: String) -> String {
+        memoryBullet(from: normalizedMemoryStatement(from: text))
+    }
+
+    private func normalizedMemoryStatement(from text: String) -> String {
+        var normalized = text
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if normalized.hasSuffix(".") || normalized.hasSuffix("!") || normalized.hasSuffix("?") {
+            normalized.removeLast()
+        }
+
+        let replacements: [(String, String)] = [
+            (#"(?i)^i\s+love\s+(.+)$"#, "Creed likes $1"),
+            (#"(?i)^i\s+like\s+(.+)$"#, "Creed likes $1"),
+            (#"(?i)^i\s+enjoy\s+(.+)$"#, "Creed enjoys $1"),
+            (#"(?i)^i\s+prefer\s+(.+)$"#, "Creed prefers $1"),
+            (#"(?i)^my\s+favorite\s+(.+?)\s+is\s+(.+)$"#, "Creed's favorite $1 is $2"),
+            (#"(?i)^my\s+favourite\s+(.+?)\s+is\s+(.+)$"#, "Creed's favorite $1 is $2"),
+            (#"(?i)^my\s+(.+?)\s+is\s+(.+)$"#, "Creed's $1 is $2"),
+            (#"(?i)^i(?:'m| am)\s+writing\s+(.+)$"#, "Creed is writing $1"),
+            (#"(?i)^i\s+(?:am\s+)?working\s+on\s+(.+)$"#, "Creed is working on $1"),
+            (#"(?i)^i\s+want\s+to\s+(.+)$"#, "Creed wants to $1")
+        ]
+
+        for (pattern, replacement) in replacements {
+            let updated = normalized.replacingOccurrences(
+                of: pattern,
+                with: replacement,
+                options: .regularExpression
+            )
+            if updated != normalized {
+                normalized = updated
+                break
+            }
+        }
+
+        if normalized.lowercased().hasPrefix("recent conversation to remember:") {
+            return normalized
+        }
+
+        if normalized.range(of: #"(?i)\b(creed|user)\b"#, options: .regularExpression) == nil {
+            normalized = "Creed said: \(normalized)"
+        }
+
+        return normalized
     }
 
     private func memoryBullet(from text: String) -> String {

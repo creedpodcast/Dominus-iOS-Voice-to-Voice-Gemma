@@ -2,19 +2,13 @@ import SwiftUI
 
 struct MemoryView: View {
     @Environment(\.dismiss) private var dismiss
-    @ObservedObject private var traceStore = MemoryTraceStore.shared
 
     let conversation: Conversation?
 
-    @State private var selectedTab: MemoryTab = .hub
-    @State private var temporaryMemories: [MemoryRecord] = []
-    @State private var longTermMemories: [MemoryRecord] = []
-    @State private var hubMemories: [MemoryHubRecord] = []
-    @State private var categories: [MemoryCategoryInfo] = []
+    @State private var pendingSuggestions: [MemoryRecord] = []
+    @State private var journalMemories: [MemoryRecord] = []
     @State private var showAddMemory = false
-    @State private var selectedCategory: MemoryCategoryInfo?
     @State private var editingMemory: MemoryRecord?
-    @State private var showAddCategory = false
     @State private var refreshTask: Task<Void, Never>?
 
     private var conversationID: UUID? {
@@ -24,81 +18,73 @@ struct MemoryView: View {
     var body: some View {
         NavigationStack {
             List {
-                Picker("Memory Type", selection: $selectedTab) {
-                    ForEach(MemoryTab.allCases) { tab in
-                        Label(tab.title, systemImage: tab.icon).tag(tab)
+                if !pendingSuggestions.isEmpty {
+                    Section {
+                        ForEach(pendingSuggestions) { memory in
+                            MemoryRecordRow(
+                                memory: memory,
+                                onAccept: {
+                                    accept(memory)
+                                },
+                                onDelete: {
+                                    forgetEverywhere(memory)
+                                    refresh()
+                                }
+                            )
+                        }
+                    } header: {
+                        Label("Suggested Memories", systemImage: "lightbulb")
+                    } footer: {
+                        Text("These are not part of the journal until you accept them.")
                     }
                 }
-                .pickerStyle(.segmented)
-                .listRowInsets(EdgeInsets(top: 12, leading: 16, bottom: 8, trailing: 16))
 
                 Section {
-                    if selectedTab == .trace {
-                        if traceStore.steps.isEmpty {
-                            EmptyMemoryView(tab: selectedTab)
-                        } else {
-                            MemoryTraceHeader(
-                                query: traceStore.latestQuery,
-                                updatedAt: traceStore.updatedAt
-                            )
-                            ForEach(traceStore.steps) { step in
-                                MemoryTraceRow(step: step)
-                            }
-                        }
-                    } else if selectedTab == .hub {
-                        if hubCategories.isEmpty {
-                            EmptyMemoryView(tab: selectedTab)
-                        } else {
-                            ForEach(hubCategories, id: \.info.id) { category in
-                                Button {
-                                    selectedCategory = category.info
-                                } label: {
-                                    MemoryHubRow(category: category.info, hub: category.hub)
-                                }
-                                .buttonStyle(.plain)
-                            }
-                        }
-                    } else if currentMemories.isEmpty {
-                        EmptyMemoryView(tab: selectedTab)
+                    if journalMemories.isEmpty {
+                        ContentUnavailableView(
+                            "No Journal Memories",
+                            systemImage: "book.closed",
+                            description: Text("Add one manually, say \"remember this\", or accept a suggested memory from chat.")
+                        )
                     } else {
-                        ForEach(currentMemories) { memory in
-                            memoryRow(for: memory)
+                        ForEach(journalMemories) { memory in
+                            MemoryRecordRow(
+                                memory: memory,
+                                onDelete: {
+                                    forgetEverywhere(memory)
+                                    refresh()
+                                },
+                                onEdit: {
+                                    editingMemory = memory
+                                }
+                            )
                         }
                         .onDelete { offsets in
-                            delete(offsets: offsets)
+                            deleteJournal(offsets: offsets)
                         }
                     }
                 } header: {
-                    Label(selectedTab.title, systemImage: selectedTab.icon)
+                    Label("Memory Journal", systemImage: "book.closed")
                 } footer: {
-                    Text("\(selectedTab.footer) \(currentMemoryCount) saved.")
+                    Text("This is the single trusted memory source Dominus searches with RAG. Each entry stays editable and deletable.")
                         .font(.caption)
                 }
             }
-            .navigationTitle("Memory")
+            .navigationTitle("Memory Journal")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Done") { dismiss() }
                 }
-                ToolbarItemGroup(placement: .confirmationAction) {
-                    if selectedTab == .hub {
-                        Button {
-                            showAddCategory = true
-                        } label: {
-                            Image(systemName: "folder.badge.plus")
-                        }
-                    }
+                ToolbarItem(placement: .confirmationAction) {
                     Button {
                         showAddMemory = true
                     } label: {
                         Image(systemName: "plus")
                     }
-                    .disabled(selectedTab == .hub || selectedTab == .trace || (selectedTab == .temporary && conversationID == nil))
                 }
             }
             .onAppear {
-                MemoryStore.shared.rebuildHub()
                 refresh()
                 startRefreshing()
             }
@@ -107,71 +93,30 @@ struct MemoryView: View {
                 refreshTask = nil
             }
             .sheet(isPresented: $showAddMemory, onDismiss: refresh) {
-                AddMemorySheet(
-                    defaultTab: selectedTab,
-                    conversationID: conversationID,
-                    categories: categories
-                )
+                JournalMemorySheet(mode: .add)
                 .presentationDetents([.medium, .large])
             }
-            .sheet(item: $selectedCategory, onDismiss: refresh) { category in
-                MemoryHubDetailView(category: category, categories: categories)
-                    .presentationDetents([.medium, .large])
-            }
             .sheet(item: $editingMemory, onDismiss: refresh) { memory in
-                EditMemorySheet(memory: memory, categories: categories)
-                    .presentationDetents([.medium, .large])
-            }
-            .sheet(isPresented: $showAddCategory, onDismiss: refresh) {
-                AddCategorySheet()
-                    .presentationDetents([.medium])
+                JournalMemorySheet(mode: .edit(memory))
+                .presentationDetents([.medium, .large])
             }
         }
-    }
-
-    private var currentMemories: [MemoryRecord] {
-        switch selectedTab {
-        case .temporary:
-            return temporaryMemories
-        case .longTerm:
-            return longTermMemories
-        case .trace:
-            return []
-        case .hub:
-            return []
-        }
-    }
-
-    private var currentMemoryCount: Int {
-        if selectedTab == .hub { return hubMemories.count }
-        if selectedTab == .trace { return traceStore.steps.count }
-        return currentMemories.count
-    }
-
-    private var hubCategories: [(info: MemoryCategoryInfo, hub: MemoryHubRecord?)] {
-        categories
-            .map { category in
-                (info: category, hub: hubMemories.first { $0.categoryRaw == category.id })
-            }
-            .filter { $0.hub != nil || $0.info.isCustom }
     }
 
     private func refresh() {
         if let conversationID {
-            temporaryMemories = MemoryStore.shared.fetch(conversationID: conversationID)
+            pendingSuggestions = MemoryStore.shared.fetch(conversationID: conversationID)
+                .filter { $0.kind == .memoryCandidate }
         } else {
-            temporaryMemories = []
+            pendingSuggestions = []
         }
-        longTermMemories = MemoryStore.shared.fetch(scope: .longTerm)
-        categories = MemoryStore.shared.memoryCategories()
-        hubMemories = MemoryStore.shared.fetchHubRecords()
+        journalMemories = MemoryStore.shared.fetch(scope: .longTerm)
     }
 
-    private func delete(offsets: IndexSet) {
-        let memories = currentMemories
+    private func deleteJournal(offsets: IndexSet) {
         offsets.forEach { offset in
-            guard memories.indices.contains(offset) else { return }
-            forgetEverywhere(memories[offset])
+            guard journalMemories.indices.contains(offset) else { return }
+            forgetEverywhere(journalMemories[offset])
         }
         refresh()
     }
@@ -189,29 +134,6 @@ struct MemoryView: View {
                 guard !Task.isCancelled else { return }
                 refresh()
             }
-        }
-    }
-
-    @ViewBuilder
-    private func memoryRow(for memory: MemoryRecord) -> some View {
-        if memory.kind == .memoryCandidate {
-            MemoryRecordRow(
-                memory: memory,
-                onAccept: {
-                    accept(memory)
-                },
-                onDelete: {
-                    forgetEverywhere(memory)
-                    refresh()
-                }
-            )
-        } else {
-            MemoryRecordRow(
-                memory: memory,
-                onEdit: {
-                    editingMemory = memory
-                }
-            )
         }
     }
 
@@ -366,6 +288,101 @@ private struct MemoryRecordRow: View {
             }
         }
         .padding(.vertical, 4)
+    }
+}
+
+private struct JournalMemorySheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    let mode: Mode
+
+    @State private var title: String
+    @State private var content: String
+
+    enum Mode {
+        case add
+        case edit(MemoryRecord)
+
+        var navigationTitle: String {
+            switch self {
+            case .add:
+                return "Add Memory"
+            case .edit:
+                return "Edit Memory"
+            }
+        }
+    }
+
+    init(mode: Mode) {
+        self.mode = mode
+        switch mode {
+        case .add:
+            _title = State(initialValue: "")
+            _content = State(initialValue: "")
+        case .edit(let memory):
+            _title = State(initialValue: memory.title ?? "")
+            _content = State(initialValue: memory.content)
+        }
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    TextField("Optional title", text: $title)
+                        .autocorrectionDisabled()
+                } header: {
+                    Text("Title")
+                }
+
+                Section {
+                    TextEditor(text: $content)
+                        .frame(minHeight: 180)
+                } header: {
+                    Text("Memory")
+                } footer: {
+                    Text("Dominus searches these journal entries when they are relevant to the latest message.")
+                }
+            }
+            .navigationTitle(mode.navigationTitle)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        save()
+                        dismiss()
+                    }
+                    .disabled(content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+        }
+    }
+
+    private func save() {
+        let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let optionalTitle = cleanTitle.isEmpty ? nil : cleanTitle
+        let cleanContent = content.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        switch mode {
+        case .add:
+            MemoryRetriever.shared.rememberLongTerm(
+                kind: .userFact,
+                title: optionalTitle,
+                content: cleanContent,
+                categoryKey: MemoryStore.uncategorizedCategoryKey
+            )
+        case .edit(let memory):
+            MemoryStore.shared.update(
+                memory,
+                kind: .userFact,
+                title: optionalTitle,
+                content: cleanContent,
+                categoryKey: MemoryStore.uncategorizedCategoryKey
+            )
+        }
     }
 }
 
