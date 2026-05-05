@@ -62,14 +62,26 @@ struct ContentView: View {
     // Remember whether voice was on before PTT so we can restore it
     @State private var voiceWasEnabled: Bool = false
     @State private var voiceAutoSendTask: Task<Void, Never>?
+    @State private var listeningSilenceFillerTask: Task<Void, Never>?
     @State private var isInterruptRestartPending = false
     @State private var latestVisibleVoiceTranscript = ""
     @State private var lastVoiceActivityAt: Date?
     @State private var headphoneVolumeWarning: HeadphoneVolumeWarning?
     @State private var dismissedHeadphoneVolumeWarning: HeadphoneVolumeWarning?
     @State private var volumeMonitorTask: Task<Void, Never>?
+    @State private var appLoadedSoundPlayer: AVAudioPlayer?
+    @State private var hasPlayedAppLoadedSound = false
 
     private let voiceAutoSendDelay: TimeInterval = 2.5
+    private let listeningSilenceFillerDelay: TimeInterval = 20
+    private let appLoadedSoundVolume: Float = 0.02
+    private let listeningSilenceFillers = [
+        "What's up?",
+        "You still there?",
+        "I'm here when you're ready.",
+        "I'll wait here until you're ready.",
+        "Take your time.",
+        "No rush. Just Chilling."]
 
     private var isFullyLoaded: Bool {
         store.isLoaded && whisper.modelReady
@@ -121,6 +133,10 @@ struct ContentView: View {
             }
         }
         .animation(.easeInOut(duration: 0.5), value: isFullyLoaded)
+        .onChange(of: isFullyLoaded) { loaded in
+            guard loaded else { return }
+            playAppLoadedSoundIfNeeded()
+        }
         .task {
             store.boot()
             store.loadModelIfNeeded()
@@ -259,10 +275,12 @@ struct ContentView: View {
         whisper.startRecording()
         startPulse()
         pttState = .listening
+        scheduleListeningSilenceFiller()
     }
 
     private func returnToIdle() {
         resetVoiceAutoSendState()
+        cancelListeningSilenceFiller()
         stopVolumeMonitoring()
         isInterruptRestartPending = false
         stopPulse()
@@ -316,6 +334,7 @@ struct ContentView: View {
         }
 
         latestVisibleVoiceTranscript = visibleTranscript
+        cancelListeningSilenceFiller()
         if lastVoiceActivityAt == nil {
             lastVoiceActivityAt = whisper.lastAudioActivityAt ?? Date()
         }
@@ -358,6 +377,36 @@ struct ContentView: View {
         voiceAutoSendTask = nil
     }
 
+    private func scheduleListeningSilenceFiller() {
+        listeningSilenceFillerTask?.cancel()
+        listeningSilenceFillerTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: UInt64(listeningSilenceFillerDelay * 1_000_000_000))
+            guard !Task.isCancelled,
+                  pttState == .listening,
+                  !whisper.isMicMuted,
+                  WhisperManager.visibleTranscript(from: whisper.liveTranscript).isEmpty,
+                  latestVisibleVoiceTranscript.isEmpty
+            else { return }
+
+            playListeningSilenceFiller()
+        }
+    }
+
+    private func cancelListeningSilenceFiller() {
+        listeningSilenceFillerTask?.cancel()
+        listeningSilenceFillerTask = nil
+    }
+
+    private func playListeningSilenceFiller() {
+        cancelListeningSilenceFiller()
+        resetVoiceAutoSendState()
+        stopPulse()
+        whisper.cancelRecording()
+        pttState = .aiTalking
+        SpeechManager.shared.stopAndClear()
+        SpeechManager.shared.enqueue(listeningSilenceFillers.randomElement() ?? "You still there?")
+    }
+
     private func resetVoiceAutoSendState() {
         cancelVoiceAutoSend()
         latestVisibleVoiceTranscript = ""
@@ -385,6 +434,34 @@ struct ContentView: View {
         volumeMonitorTask = nil
         headphoneVolumeWarning = nil
         dismissedHeadphoneVolumeWarning = nil
+    }
+
+    private func playAppLoadedSoundIfNeeded() {
+        guard !hasPlayedAppLoadedSound else { return }
+        hasPlayedAppLoadedSound = true
+
+        guard let url = Bundle.main.url(
+            forResource: "AppLoadedSoundEffect",
+            withExtension: "wav",
+            subdirectory: "SoundEffects"
+        ) ?? Bundle.main.url(
+            forResource: "AppLoadedSoundEffect",
+            withExtension: "wav"
+        ) else {
+            print("🔇 App loaded sound effect not found in bundle.")
+            return
+        }
+
+        do {
+            let player = try AVAudioPlayer(contentsOf: url)
+            player.volume = appLoadedSoundVolume
+            player.prepareToPlay()
+            player.setVolume(appLoadedSoundVolume, fadeDuration: 0)
+            player.play()
+            appLoadedSoundPlayer = player
+        } catch {
+            print("🔇 Failed to play app loaded sound effect:", error.localizedDescription)
+        }
     }
 
     private func updateHeadphoneVolumeWarning() {
@@ -430,6 +507,7 @@ struct ContentView: View {
 
     private func submitVoiceRecording() {
         resetVoiceAutoSendState()
+        cancelListeningSilenceFiller()
         stopPulse()
         Task {
             let spoken = await whisper.stopAndTranscribe()

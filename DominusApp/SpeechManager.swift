@@ -73,6 +73,7 @@ final class SpeechManager: NSObject, ObservableObject, AVSpeechSynthesizerDelega
     }
 
     func stopAndClear() {
+        ThinkingFillerManager.shared.cancelScheduling()
         outstandingUtterances = 0
         isSpeaking            = false
         isStartingPlayback    = false

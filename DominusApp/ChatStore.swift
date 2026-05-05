@@ -275,6 +275,7 @@ final class ChatStore: ObservableObject {
     /// silence, not for the AI to keep speaking the already-buffered sentences.
     func stopGeneration() {
         generationTask?.cancel()
+        ThinkingFillerManager.shared.cancelScheduling()
         SpeechManager.shared.stopAndClear()
     }
 
@@ -444,6 +445,20 @@ final class ChatStore: ObservableObject {
         }
         llmMessages = trimLLMHistory(llmMessages)
 
+        let shouldUseThinkingFiller = voiceEnabled && includeAmbientCues
+        if voiceEnabled {
+            SpeechManager.shared.stopAndClear()
+        }
+        if shouldUseThinkingFiller {
+            ThinkingFillerManager.shared.start(
+                for: hasVisibleUserText
+                    ? visibleUserText
+                    : ambientOnlyUserPrompt(for: eligibleAmbientCues, duration: ambientDuration),
+                recentAssistantText: recentAssistantText,
+                personality: .curious
+            )
+        }
+
         do {
             let stream = try await engine.streamChat(llmMessages, temperature: 0.7, seed: 42)
 
@@ -457,10 +472,7 @@ final class ChatStore: ObservableObject {
             var assistantText = ""
             var ttsBuffer     = ""
             var lastEnqueuedAtCount = 0
-
-            if voiceEnabled {
-                SpeechManager.shared.stopAndClear()
-            }
+            var realSpeechHasStarted = false
 
             for try await token in stream {
                 // Exit immediately if a new message was sent
@@ -485,6 +497,10 @@ final class ChatStore: ObservableObject {
                     // Fire on complete sentences immediately — no minimum length guard.
                     // 300-char ceiling only cuts truly runaway sentences.
                     if hitSentenceEnd || hitNewline || bufferTooLong {
+                        if !realSpeechHasStarted {
+                            ThinkingFillerManager.shared.prepareForRealAnswer()
+                            realSpeechHasStarted = true
+                        }
                         SpeechManager.shared.enqueue(ttsBuffer)
                         lastEnqueuedAtCount = assistantText.count
                         ttsBuffer = ""
@@ -493,8 +509,13 @@ final class ChatStore: ObservableObject {
             }
 
             if voiceEnabled && !ttsBuffer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                if !realSpeechHasStarted {
+                    ThinkingFillerManager.shared.prepareForRealAnswer()
+                    realSpeechHasStarted = true
+                }
                 SpeechManager.shared.enqueue(ttsBuffer)
             }
+            ThinkingFillerManager.shared.prepareForRealAnswer()
 
             for cue in eligibleAmbientCues {
                 conversations[convoIndex].ambientCueLastAcknowledgedTurn[cue.key] = nextUserTurn
@@ -549,6 +570,7 @@ final class ChatStore: ObservableObject {
                 SpeechManager.shared.stopAndClear()
                 print("❌ Llama generation error:", error.localizedDescription)
             }
+            ThinkingFillerManager.shared.cancelScheduling()
             conversations[convoIndex].updatedAt = Date()
             saveToDisk()
         }
