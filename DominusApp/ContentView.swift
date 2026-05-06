@@ -34,6 +34,7 @@ struct ContentView: View {
     @StateObject private var speech  = SpeechRecognitionManager.shared
     @StateObject private var whisper = WhisperManager.shared
     @ObservedObject private var speechMgr = SpeechManager.shared
+    @ObservedObject private var audioSettings = AudioSettingsStore.shared
 
     @Environment(\.scenePhase) private var scenePhase
 
@@ -51,6 +52,7 @@ struct ContentView: View {
     // Profile sheet
     @State private var showProfileSheet = false
     @State private var showMemorySheet = false
+    @State private var showAudioSettingsSheet = false
 
     // Push-to-talk state
     @State private var pttState: PTTState = .idle
@@ -63,6 +65,7 @@ struct ContentView: View {
     @State private var voiceWasEnabled: Bool = false
     @State private var voiceAutoSendTask: Task<Void, Never>?
     @State private var listeningSilenceFillerTask: Task<Void, Never>?
+    @State private var voiceModeAutoExitTask: Task<Void, Never>?
     @State private var isInterruptRestartPending = false
     @State private var latestVisibleVoiceTranscript = ""
     @State private var lastVoiceActivityAt: Date?
@@ -70,11 +73,13 @@ struct ContentView: View {
     @State private var dismissedHeadphoneVolumeWarning: HeadphoneVolumeWarning?
     @State private var volumeMonitorTask: Task<Void, Never>?
     @State private var appLoadedSoundPlayer: AVAudioPlayer?
+    @State private var voiceModeSoundPlayer: AVAudioPlayer?
+    @State private var isVoiceModeTransitioning = false
     @State private var hasPlayedAppLoadedSound = false
 
     private let voiceAutoSendDelay: TimeInterval = 2.5
     private let listeningSilenceFillerDelay: TimeInterval = 20
-    private let appLoadedSoundVolume: Float = 0.02
+    private let voiceModeAutoExitDelay: TimeInterval = 60
     private let listeningSilenceFillers = [
         "What's up?",
         "You still there?",
@@ -242,14 +247,26 @@ struct ContentView: View {
     // MARK: - PTT button handler
 
     private func handlePTTTap() {
+        guard !isVoiceModeTransitioning else { return }
+
         switch pttState {
 
         case .idle:
             voiceWasEnabled    = store.voiceEnabled
             store.voiceEnabled = true
             SpeechManager.shared.stopAndClear()
-            startVolumeMonitoring()
-            beginListening()
+            isVoiceModeTransitioning = true
+            Task { @MainActor in
+                await playVoiceModeSound(named: "ActivateVoicetoVoice")
+                guard isVoiceModeTransitioning, pttState == .idle else {
+                    isVoiceModeTransitioning = false
+                    return
+                }
+                isVoiceModeTransitioning = false
+                scheduleVoiceModeAutoExit()
+                startVolumeMonitoring()
+                beginListening()
+            }
 
         case .listening:
             // If mic is muted there's nothing to transcribe — ignore the tap so the user
@@ -281,6 +298,7 @@ struct ContentView: View {
     private func returnToIdle() {
         resetVoiceAutoSendState()
         cancelListeningSilenceFiller()
+        cancelVoiceModeAutoExit()
         stopVolumeMonitoring()
         isInterruptRestartPending = false
         stopPulse()
@@ -297,7 +315,12 @@ struct ContentView: View {
         isInterruptRestartPending = false
         SpeechManager.shared.stopAndClear()
         store.stopGeneration()
-        returnToIdle()
+        isVoiceModeTransitioning = true
+        Task { @MainActor in
+            await playVoiceModeSound(named: "DeactivateVoicetoVoice")
+            returnToIdle()
+            isVoiceModeTransitioning = false
+        }
     }
 
     /// Called by the orb's stop button — kills the current AI response (generation + TTS)
@@ -334,6 +357,7 @@ struct ContentView: View {
         }
 
         latestVisibleVoiceTranscript = visibleTranscript
+        scheduleVoiceModeAutoExit()
         cancelListeningSilenceFiller()
         if lastVoiceActivityAt == nil {
             lastVoiceActivityAt = whisper.lastAudioActivityAt ?? Date()
@@ -399,12 +423,28 @@ struct ContentView: View {
 
     private func playListeningSilenceFiller() {
         cancelListeningSilenceFiller()
+        scheduleVoiceModeAutoExit()
         resetVoiceAutoSendState()
         stopPulse()
         whisper.cancelRecording()
         pttState = .aiTalking
         SpeechManager.shared.stopAndClear()
         SpeechManager.shared.enqueue(listeningSilenceFillers.randomElement() ?? "You still there?")
+    }
+
+    private func scheduleVoiceModeAutoExit() {
+        voiceModeAutoExitTask?.cancel()
+        voiceModeAutoExitTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: UInt64(voiceModeAutoExitDelay * 1_000_000_000))
+            guard !Task.isCancelled, pttState != .idle else { return }
+            await playVoiceModeSound(named: "DeactivateVoicetoVoice")
+            returnToIdle()
+        }
+    }
+
+    private func cancelVoiceModeAutoExit() {
+        voiceModeAutoExitTask?.cancel()
+        voiceModeAutoExitTask = nil
     }
 
     private func resetVoiceAutoSendState() {
@@ -454,13 +494,53 @@ struct ContentView: View {
 
         do {
             let player = try AVAudioPlayer(contentsOf: url)
-            player.volume = appLoadedSoundVolume
+            let volume = Float(audioSettings.startupSoundVolume)
+            player.volume = volume
             player.prepareToPlay()
-            player.setVolume(appLoadedSoundVolume, fadeDuration: 0)
+            player.setVolume(volume, fadeDuration: 0)
             player.play()
             appLoadedSoundPlayer = player
         } catch {
             print("🔇 Failed to play app loaded sound effect:", error.localizedDescription)
+        }
+    }
+
+    private func playVoiceModeSound(named resourceName: String) async {
+        guard let url = Bundle.main.url(
+            forResource: resourceName,
+            withExtension: "wav",
+            subdirectory: "SoundEffects"
+        ) ?? Bundle.main.url(
+            forResource: resourceName,
+            withExtension: "wav"
+        ) else {
+            print("🔇 Voice mode sound not found:", resourceName)
+            return
+        }
+
+        do {
+            do {
+                try AVAudioSession.sharedInstance().setCategory(
+                    .playback,
+                    mode: .default,
+                    options: []
+                )
+                try AVAudioSession.sharedInstance().setActive(true, options: [])
+            } catch {
+                print("🔇 Voice mode sound session setup failed:", error.localizedDescription)
+            }
+
+            let player = try AVAudioPlayer(contentsOf: url)
+            let volume = Float(audioSettings.voiceModeVolume(for: resourceName))
+            player.volume = volume
+            player.prepareToPlay()
+            player.setVolume(volume, fadeDuration: 0)
+            player.play()
+            voiceModeSoundPlayer = player
+            let duration = max(0.25, min(player.duration + 0.08, 1.2))
+            try? await Task.sleep(nanoseconds: UInt64(duration * 1_000_000_000))
+        } catch {
+            print("🔇 Failed to play voice mode sound:", error.localizedDescription)
         }
     }
 
@@ -516,6 +596,7 @@ struct ContentView: View {
                 beginListening()
                 return
             }
+            scheduleVoiceModeAutoExit()
             store.send(
                 visibleVoiceText,
                 includeAmbientCues: true,
@@ -646,6 +727,11 @@ struct ContentView: View {
                     } label: {
                         Image(systemName: "brain.head.profile")
                     }
+                    Button {
+                        showAudioSettingsSheet = true
+                    } label: {
+                        Image(systemName: "slider.horizontal.3")
+                    }
                 }
             }
             ToolbarItem(placement: .navigationBarTrailing) {
@@ -661,6 +747,9 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showMemorySheet) {
             MemoryView(conversation: store.selectedConversation())
+        }
+        .sheet(isPresented: $showAudioSettingsSheet) {
+            AudioSettingsView()
         }
     }
 
@@ -736,11 +825,11 @@ struct ContentView: View {
     // Estimates token usage from history chars + current draft. ~4 chars per token.
     private var contextUsage: Double {
         let maxTokens = 2048
-        let maxMessages = 20
-        let systemOverhead = 300
+        let rawPromptMessages = 8
+        let systemOverhead = 450
 
         let messages = store.selectedConversation()?.messages ?? []
-        let windowChars = messages.suffix(maxMessages).reduce(0) { $0 + $1.content.count }
+        let windowChars = messages.suffix(rawPromptMessages).reduce(0) { $0 + $1.content.count }
         let estimated = systemOverhead + (windowChars + prompt.count) / 4
         return min(1.0, Double(estimated) / Double(maxTokens))
     }
@@ -1006,8 +1095,8 @@ struct ContextRingView: View {
 
     private var ringColor: Color {
         switch usage {
-        case ..<0.6:  return .green
-        case ..<0.85: return .yellow
+        case ..<0.45: return .green
+        case ..<0.70: return .yellow
         default:      return .red
         }
     }

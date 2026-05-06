@@ -109,7 +109,9 @@ final class SpeechManager: NSObject, ObservableObject, AVSpeechSynthesizerDelega
             }
         }
 
-        return isPrivateListening ? 0.34 : 0.85
+        let routeCap: Float = isPrivateListening ? 0.48 : 1.0
+        let userVolume = Float(AudioSettingsStore.shared.aiVoiceResponseVolume)
+        return min(1.0, max(0.0, routeCap * userVolume))
     }
 
     // MARK: - AVSpeechSynthesizerDelegate

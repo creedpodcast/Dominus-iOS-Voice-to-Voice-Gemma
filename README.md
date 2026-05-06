@@ -22,6 +22,7 @@ Talk to an AI that talks back. Tap once to speak, then pause — after real word
   - TTS auto-enables during voice turns, restores your previous setting after
 - **Full-screen loading splash on launch** — blocks interaction until both Gemma and Whisper are fully ready; shows live progress bars per component
 - **Startup ready sound** — plays a bundled local sound effect once the loading screen finishes and both models are ready
+- **Audio settings** — sidebar audio controls let the user adjust and test startup, voice-mode activation, voice-mode deactivation, and AI voice-response volume independently
 - **In-use status indicators** — floating pill appears whenever the app is processing in the background (transcribing, thinking, generating)
 - **WhisperKit on-device STT** — accurate Whisper-based transcription with live preview while recording
 - **Hidden ambient cue awareness** — Whisper non-speech markers such as `[coughing]`, `(keyboard typing)`, `[silence]`, and `[laughter]` are removed from the visible transcript/chat while still being tracked privately per conversation. Dominus can acknowledge them naturally with a 12-turn cooldown, answer later if asked what it heard, and check in after roughly one minute of silence.
@@ -36,6 +37,7 @@ Talk to an AI that talks back. Tap once to speak, then pause — after real word
 - **Sentence-complete TTS chunking** — sentences fire to TTS the instant their punctuation lands, never mid-sentence; only true runaways (>300 chars) ever get cut
 - **Voice thinking fillers** — while Gemma is preparing a voice response, Dominus can speak short local filler phrases such as quick greetings, light thinking sounds, or deeper-thinking phrases without adding them to the LLM prompt or chat log
 - **Listening-silence check-ins** — if voice mode hears no visible transcript for about 20 seconds, Dominus gently checks in and then returns to listening
+- **Voice-mode entry/exit cues** — local sounds play before listening starts and when voice mode exits; after 60 seconds without renewed voice activity, voice mode exits automatically
 - **Per-message action bar on AI replies** — Copy (clipboard, ✓ flash confirms), Share (system share sheet), and Speaker button under every assistant bubble. Tap the speaker to hear any past response read aloud; tap it again to stop mid-playback. Speaker icon swaps to a stop icon while that specific message is playing so state is always visible.
 - **Selectable bubble text** — long-press any message (user or AI) to select and copy partial text.
 - **Input field auto-clears on send** — text field empties the moment the send button is tapped; no manual deletion required before typing the next message.
@@ -134,11 +136,13 @@ The same single button controls every step. No hold-to-talk. Auto-send only star
 | Voice UI | Full-screen black orb surface while voice mode is active; chat title/log/input are hidden until voice mode exits |
 | Thinking fillers | Local `ThinkingFillerManager` chooses restrained voice-only filler phrases based on greetings, short prompts, complex prompts, follow-ups, and long delays |
 | Listening silence | If no visible transcript appears for about 20 seconds, Dominus stops the empty recording, speaks a short check-in, then returns to listening |
+| Auto-exit | Voice mode exits automatically after 60 seconds without renewed voice activity and plays the deactivation cue |
 | Silence handling | Ambient-only silence is stored silently unless the recording lasts about 60 seconds, then Dominus may briefly check in |
 | Interrupt | Button tap stops generation + TTS immediately, then restarts STT after a short audio-drain grace period |
 | Audio session | `AVAudioSession` `.videoChat` / `.voiceChat` voice routing with `.allowBluetooth`, `.allowBluetoothA2DP`, and `.defaultToSpeaker` so AirPods, Bluetooth headsets, wired headphones, and speaker routes work without per-device code |
 | Bluetooth input stability | Mic taps use the active hardware input format and resample dynamically, preventing headset sample-rate changes (16-24 kHz vs 48 kHz) from crashing recording |
-| Headphone safety | TTS volume is route-aware: lower app-level speech volume for headphones/Bluetooth, stronger output for phone speaker, plus persistent high/low system-volume warnings during voice mode |
+| Audio settings | Startup cue, voice-mode activation cue, voice-mode deactivation cue, and AI voice response volume can each be adjusted and previewed in-app |
+| Headphone safety | TTS volume is route-aware: user-controlled AI voice volume still keeps a lower app-level cap for headphones/Bluetooth, plus persistent high/low system-volume warnings during voice mode |
 | Half-duplex gating | `outstandingUtterances` counter tracks every queued sentence; mic engine stays off until counter hits zero + 350 ms hardware drain |
 | Streaming TTS | Spoken sentence-by-sentence as tokens arrive — `preUtteranceDelay`/`postUtteranceDelay` set to 0 so Apple cross-fades sentences with no gap |
 
@@ -152,7 +156,7 @@ The same single button controls every step. No hold-to-talk. Auto-send only star
 | Memory suggestions | Conversation-scoped candidates that can be accepted into the Memory Journal or dismissed |
 | Retrieval | Memory Journal entries and current-chat summaries are scored, filtered, and injected only when relevant |
 | Normalization | Common first-person memory phrases are converted into Creed-focused facts before storage |
-| Raw history | Last 10 turns kept in context — older turns are compacted into short-term RAG summaries |
+| Raw history | Latest 3-4 turns kept in context — older current-chat turns are compacted into conversation-scoped RAG summaries |
 
 ### User Profile
 | Component | Details |
@@ -179,6 +183,8 @@ DominusApp/
 ├── LoadingView.swift                SplashLoadingView + LoadingBarView + StatusPillView
 ├── VoiceOrb.swift                   Animated voice orb overlay (PTT visual feedback)
 ├── ThinkingFillerManager.swift      Voice-only local filler orchestration while Gemma prepares responses
+├── AudioSettingsStore.swift         Saved per-sound volume preferences
+├── AudioSettingsView.swift          In-app audio sliders and preview buttons
 ├── SoundEffects/                    Bundled local UI audio, including the startup-ready sound
 ├── MemoryView.swift                 Memory Journal UI — suggested memories plus editable long-term entries
 ├── Memory/

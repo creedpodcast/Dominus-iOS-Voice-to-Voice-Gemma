@@ -15,6 +15,7 @@ final class MemoryRetriever {
     private let store    = MemoryStore.shared
     private let embedder = MemoryEmbedder.shared
     private let minimumSemanticScore: Float = 0.15
+    private let minimumConversationSemanticScore: Float = 0.22
     private let minimumContextSemanticScore: Float = 0.30
     private let minimumHubSemanticScore: Float = 0.32
 
@@ -176,8 +177,8 @@ final class MemoryRetriever {
             candidates: broadMemoryQuestion ? [] : store.fetch(conversationID: conversationID).filter {
                 $0.kind != .memoryCandidate
             },
-            limit: min(topK, 4),
-            semanticThreshold: minimumContextSemanticScore
+            limit: min(topK, 5),
+            semanticThreshold: minimumConversationSemanticScore
         )
         let globalMatches = topMatches(
             query: query,

@@ -182,9 +182,12 @@ final class ChatStore: ObservableObject {
     /// Core identity — kept intentionally short to conserve token budget.
     private let systemPrompt = "You are Dominus — a friendly but curious AI Assistant. Answer the user's latest message directly. Older chat messages are background context, not a new request. If provided memory directly answers the latest message, use it plainly; otherwise ignore unrelated memory. Do not keep bringing up memory after the user changes topics. Do not add unsolicited greetings, introductions, or preambles, even on the first turn of a new chat."
     
-    /// Keep only the last 4 turns (8 messages) of raw conversation in the prompt.
-    /// Older context is covered by RAG memory retrieval instead.
-    private let maxTurnsToKeep = 10
+    /// Keep only the latest few raw turns in the prompt.
+    /// Older current-chat context is covered by conversation RAG summaries/exchanges.
+    private let maxTurnsToKeep = 4
+    private let minTurnsToKeep = 3
+    private let targetContextUsage: Double = 0.45
+    private let approximateContextTokenLimit = 2048
 
     private var saveURL: URL {
         FileManager.default
@@ -765,12 +768,27 @@ final class ChatStore: ObservableObject {
         return result.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// Keep system message + last N turns (each turn = 1 user + 1 assistant message).
+    /// Keep system message + recent raw turns. If the prompt estimate still rises
+    /// past the 45% target, drop older raw turns down to the minimum recent window.
     private func trimLLMHistory(_ llm: [LlamaChatMessage]) -> [LlamaChatMessage] {
         let maxMessages = 1 + (maxTurnsToKeep * 2)
-        if llm.count <= maxMessages { return llm }
-        let tail = llm.suffix(maxMessages - 1)
-        return [llm[0]] + tail
+        let minMessages = 1 + (minTurnsToKeep * 2)
+
+        var trimmed = llm.count <= maxMessages
+            ? llm
+            : [llm[0]] + Array(llm.suffix(maxMessages - 1))
+
+        while trimmed.count > minMessages,
+              estimatedTokens(for: trimmed) > Int(Double(approximateContextTokenLimit) * targetContextUsage) {
+            trimmed.remove(at: 1)
+        }
+
+        return trimmed
+    }
+
+    private func estimatedTokens(for messages: [LlamaChatMessage]) -> Int {
+        let chars = messages.reduce(0) { $0 + $1.content.count }
+        return max(1, chars / 4)
     }
 
     /// Persist compact summaries for messages that are about to live outside the raw prompt window.
