@@ -176,6 +176,9 @@ final class ChatStore: ObservableObject {
     /// Tracks an in-flight LLM title generation. Cancelled when the user sends a new message
     /// so chat generation always wins over title generation for the single LlamaService instance.
     private var titleTask: Task<Void, Never>?
+    /// Background memory refinement also uses the single LlamaService instance, so chat wins.
+    private var memoryRefinementTask: Task<Void, Never>?
+    private var pendingMemoryRefinements: [MemoryRecord] = []
 
     private let engine = GemmaEngine()
 
@@ -250,15 +253,42 @@ final class ChatStore: ObservableObject {
     }
 
     func confirmLatestPendingMemory(accept: Bool) {
-        guard let convoIndex = indexForSelectedConversation(),
-              let pendingMemory = latestPendingMemoryCandidate(conversationID: conversations[convoIndex].id)
-        else { return }
+        guard let convoIndex = indexForSelectedConversation() else { return }
+        let pending = latestPendingMemoryCandidates(conversationID: conversations[convoIndex].id)
+        guard !pending.isEmpty else { return }
 
         handlePendingMemoryConfirmation(
             accept ? .accept : .dismiss,
-            record: pendingMemory,
+            records: pending,
             convoIndex: convoIndex
         )
+    }
+
+    func rememberMessage(_ messageID: UUID) {
+        guard let convoIndex = indexForSelectedConversation(),
+              let message = conversations[convoIndex].messages.first(where: { $0.id == messageID })
+        else { return }
+        guard !isMemoryStatusMessage(message.content) else { return }
+
+        let summary = MemorySummaryBuilder.chatBubbleSummary(
+            from: message.content,
+            isUser: message.role == .user,
+            maxBullets: 3
+        )
+        guard !summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+
+        let kind: MemoryKind = message.role == .user ? .userFact : .wikiEntry
+        let memorySource = message.role == .user
+            ? "User: \(message.content)"
+            : summary
+        let savedRecords = MemoryRetriever.shared.rememberLongTerm(
+            kind: kind,
+            title: nil,
+            content: memorySource,
+            categoryKey: MemoryStore.uncategorizedCategoryKey
+        )
+        savedRecords.forEach { scheduleMemoryRefinement(for: $0) }
+        appendMemoryStatus("Added to Memory:\n\(summary)", convoIndex: convoIndex, speak: voiceEnabled)
     }
 
     func renameConversation(_ convoID: UUID, to newTitle: String) {
@@ -291,11 +321,14 @@ final class ChatStore: ObservableObject {
         // Title generation rides on the same LlamaService — cancel it first and await its
         // unwind so the new chat stream doesn't collide with an in-flight title stream.
         titleTask?.cancel()
+        memoryRefinementTask?.cancel()
         generationTask?.cancel()
         let prevTitle = titleTask
+        let prevMemoryRefinement = memoryRefinementTask
         let prevGen = generationTask
         generationTask = Task { @MainActor [weak self] in
             await prevTitle?.value
+            await prevMemoryRefinement?.value
             await prevGen?.value
             await self?._send(
                 userText,
@@ -358,11 +391,17 @@ final class ChatStore: ObservableObject {
         saveToDisk()
 
         if hasVisibleUserText,
-           let decision = memoryConfirmationDecision(from: visibleUserText),
-           let pendingMemory = latestPendingMemoryCandidate(conversationID: conversations[convoIndex].id) {
-            handlePendingMemoryConfirmation(decision, record: pendingMemory, convoIndex: convoIndex)
-            isGenerating = false
-            return
+           let decision = memoryConfirmationDecision(from: visibleUserText) {
+            let pending = latestPendingMemoryCandidates(conversationID: conversations[convoIndex].id)
+            if !pending.isEmpty {
+                handlePendingMemoryConfirmation(
+                    decision,
+                    records: pending,
+                    convoIndex: convoIndex
+                )
+                isGenerating = false
+                return
+            }
         }
 
         if hasVisibleUserText,
@@ -383,12 +422,6 @@ final class ChatStore: ObservableObject {
                 in: conversations[convoIndex],
                 conversationID: conversations[convoIndex].id
             )
-        }
-
-        if case let .added(content) = capturedMemorySignal {
-            appendMemoryStatus("Added to Memory:\n\(content)", convoIndex: convoIndex, speak: voiceEnabled)
-            isGenerating = false
-            return
         }
 
         // ── Build LLM context ──────────────────────────────────────────────
@@ -539,9 +572,10 @@ final class ChatStore: ObservableObject {
                 }
             }
 
-            if case let .candidate(record) = capturedMemorySignal {
+            if case let .candidates(records) = capturedMemorySignal {
+                let preview = records.map(\.content).joined(separator: "\n")
                 appendMemoryStatus(
-                    "Memory Suggestion:\n\(record.content)\nSay yes to add this to Memory Journal, or no to dismiss.",
+                    "Memory Suggestion:\nAdded Memory Preview:\n\(preview)\nSay yes to add this to Memory Journal, or no to dismiss.",
                     convoIndex: convoIndex,
                     speak: false
                 )
@@ -579,6 +613,7 @@ final class ChatStore: ObservableObject {
         }
 
         isGenerating = false
+        startMemoryRefinementWorkerIfNeeded()
     }
 
     // MARK: - Helpers
@@ -820,8 +855,8 @@ final class ChatStore: ObservableObject {
 
     private func compactSummary(for messages: [ChatMessage]) -> String {
         messages.map { message in
+            guard message.role == .user else { return "" }
             guard !isMemoryStatusMessage(message.content) else { return "" }
-            let label = message.role == .user ? "User" : "Assistant"
             let oneLine = message.content
                 .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -829,7 +864,7 @@ final class ChatStore: ObservableObject {
             let capped = oneLine.count > 220
                 ? String(oneLine.prefix(220)).trimmingCharacters(in: .whitespacesAndNewlines) + "..."
                 : oneLine
-            return "\(label): \(capped)"
+            return "User: \(capped)"
         }
         .filter { !$0.isEmpty }
         .joined(separator: "\n")
@@ -841,35 +876,37 @@ final class ChatStore: ObservableObject {
     }
 
     private enum CapturedMemorySignal {
-        case added(String)
-        case candidate(MemoryRecord)
+        case candidates([MemoryRecord])
     }
 
     private func captureMemorySignals(from userText: String, in conversation: Conversation, conversationID: UUID) -> CapturedMemorySignal? {
         if let explicitMemory = explicitRememberContent(from: userText, in: conversation) {
-            let content = normalizedMemoryBullet(from: explicitMemory)
-            MemoryRetriever.shared.rememberLongTerm(
-                kind: .userFact,
+            let records = MemoryRetriever.shared.rememberCandidates(
+                conversationID: conversationID,
                 title: "User asked Dominus to remember",
-                content: content
+                content: explicitMemory
             )
-            return .added(content)
+            return records.isEmpty ? nil : .candidates(records)
         }
 
         guard let candidate = memoryCandidateContent(from: userText) else { return nil }
-        guard let record = MemoryRetriever.shared.rememberCandidate(
+        let records = MemoryRetriever.shared.rememberCandidates(
             conversationID: conversationID,
             title: "Possible long-term memory",
-            content: normalizedMemoryBullet(from: candidate)
-        ) else { return nil }
-        return .candidate(record)
+            content: candidate
+        )
+        return records.isEmpty ? nil : .candidates(records)
     }
 
-    private func latestPendingMemoryCandidate(conversationID: UUID) -> MemoryRecord? {
-        MemoryStore.shared.fetch(conversationID: conversationID)
+    private func latestPendingMemoryCandidates(conversationID: UUID) -> [MemoryRecord] {
+        let candidates = MemoryStore.shared.fetch(conversationID: conversationID)
             .filter { $0.kind == .memoryCandidate }
             .sorted { $0.updatedAt > $1.updatedAt }
-            .first
+        guard let latest = candidates.first else { return [] }
+        guard let sourceID = latest.sourceID, !sourceID.isEmpty else { return [latest] }
+        return candidates
+            .filter { $0.sourceID == sourceID }
+            .sorted { $0.createdAt < $1.createdAt }
     }
 
     private func memoryConfirmationDecision(from text: String) -> MemoryConfirmationDecision? {
@@ -905,14 +942,15 @@ final class ChatStore: ObservableObject {
         return nil
     }
 
-    private func handlePendingMemoryConfirmation(_ decision: MemoryConfirmationDecision, record: MemoryRecord, convoIndex: Int) {
+    private func handlePendingMemoryConfirmation(_ decision: MemoryConfirmationDecision, records: [MemoryRecord], convoIndex: Int) {
         switch decision {
         case .accept:
-            let content = record.content
-            MemoryRetriever.shared.acceptCandidate(record)
+            let content = records.map(\.content).joined(separator: "\n")
+            records.compactMap { MemoryRetriever.shared.acceptCandidate($0) }
+                .forEach { scheduleMemoryRefinement(for: $0) }
             appendMemoryStatus("Added to Memory:\n\(content)", convoIndex: convoIndex, speak: voiceEnabled)
         case .dismiss:
-            MemoryStore.shared.delete(record)
+            records.forEach { MemoryStore.shared.delete($0) }
             appendMemoryStatus("Memory suggestion dismissed.", convoIndex: convoIndex, speak: voiceEnabled)
         }
     }
@@ -994,11 +1032,11 @@ final class ChatStore: ObservableObject {
         return nil
     }
 
-    private func recentMemoryContext(in conversation: Conversation, maxMessages: Int = 8) -> String? {
+    private func recentMemoryContext(in conversation: Conversation, maxMessages: Int = 10) -> String? {
         let relevantMessages = conversation.messages
             .dropLast()
             .reversed()
-            .filter { !isMemoryStatusMessage($0.content) }
+            .filter { $0.role == .user && !isMemoryStatusMessage($0.content) }
             .prefix(maxMessages)
             .reversed()
 
@@ -1013,11 +1051,10 @@ final class ChatStore: ObservableObject {
                 #"(?i)\badd\s+(?:this|that|it)\s+to\s+(?:your\s+)?memory\b"#
             ]) else { return nil }
 
-            let label = message.role == .user ? "User" : "Dominus"
             let capped = content.count > 260
                 ? String(content.prefix(260)).trimmingCharacters(in: .whitespacesAndNewlines) + "..."
                 : content
-            return "\(label): \(capped)"
+            return "User: \(capped)"
         }
 
         guard !lines.isEmpty else {
@@ -1077,7 +1114,7 @@ final class ChatStore: ObservableObject {
     }
 
     private func previousMeaningfulMessage(in conversation: Conversation) -> String? {
-        let candidates = conversation.messages.dropLast().reversed()
+        let candidates = conversation.messages.dropLast().reversed().filter { $0.role == .user }
         for message in candidates {
             let content = message.content
                 .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
@@ -1112,70 +1149,6 @@ final class ChatStore: ObservableObject {
         return nil
     }
 
-    private func normalizedMemoryBullet(from text: String) -> String {
-        memoryBullet(from: normalizedMemoryStatement(from: text))
-    }
-
-    private func normalizedMemoryStatement(from text: String) -> String {
-        var normalized = text
-            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-
-        if normalized.hasSuffix(".") || normalized.hasSuffix("!") || normalized.hasSuffix("?") {
-            normalized.removeLast()
-        }
-
-        let replacements: [(String, String)] = [
-            (#"(?i)^i\s+love\s+(.+)$"#, "Creed likes $1"),
-            (#"(?i)^i\s+like\s+(.+)$"#, "Creed likes $1"),
-            (#"(?i)^i\s+enjoy\s+(.+)$"#, "Creed enjoys $1"),
-            (#"(?i)^i\s+prefer\s+(.+)$"#, "Creed prefers $1"),
-            (#"(?i)^my\s+favorite\s+(.+?)\s+is\s+(.+)$"#, "Creed's favorite $1 is $2"),
-            (#"(?i)^my\s+favourite\s+(.+?)\s+is\s+(.+)$"#, "Creed's favorite $1 is $2"),
-            (#"(?i)^my\s+(.+?)\s+is\s+(.+)$"#, "Creed's $1 is $2"),
-            (#"(?i)^i(?:'m| am)\s+writing\s+(.+)$"#, "Creed is writing $1"),
-            (#"(?i)^i\s+(?:am\s+)?working\s+on\s+(.+)$"#, "Creed is working on $1"),
-            (#"(?i)^i\s+want\s+to\s+(.+)$"#, "Creed wants to $1")
-        ]
-
-        for (pattern, replacement) in replacements {
-            let updated = normalized.replacingOccurrences(
-                of: pattern,
-                with: replacement,
-                options: .regularExpression
-            )
-            if updated != normalized {
-                normalized = updated
-                break
-            }
-        }
-
-        if normalized.lowercased().hasPrefix("recent conversation to remember:") {
-            return normalized
-        }
-
-        if normalized.range(of: #"(?i)\b(creed|user)\b"#, options: .regularExpression) == nil {
-            normalized = "Creed said: \(normalized)"
-        }
-
-        return normalized
-    }
-
-    private func memoryBullet(from text: String) -> String {
-        var normalized = text
-            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-
-        if normalized.hasSuffix(".") || normalized.hasSuffix("!") || normalized.hasSuffix("?") {
-            normalized.removeLast()
-        }
-
-        guard !normalized.isEmpty else { return "" }
-        let first = normalized.prefix(1).uppercased()
-        let rest = normalized.dropFirst()
-        return "• \(first)\(rest)"
-    }
-
     /// Auto-title a new conversation from the first user message.
     /// This is a placeholder — replaced by the LLM-generated title once available.
     private func autoTitleIfNeeded(convoIndex: Int, userText: String) {
@@ -1201,6 +1174,138 @@ final class ChatStore: ObservableObject {
     func generateTitleForCurrentIfNeeded() {
         guard let id = selectedID else { return }
         scheduleTitleGeneration(for: id)
+    }
+
+    func refineMemoryWithLLM(_ record: MemoryRecord) {
+        scheduleMemoryRefinement(for: record)
+    }
+
+    func refineUnsummarizedMemoriesWithLLM() {
+        MemoryStore.shared.fetch(scope: .longTerm)
+            .filter { memoryNeedsRefinement($0) }
+            .forEach { scheduleMemoryRefinement(for: $0) }
+    }
+
+    private func scheduleMemoryRefinement(for record: MemoryRecord) {
+        guard record.scope == .longTerm else { return }
+        guard record.kind != .memoryCandidate else { return }
+        pendingMemoryRefinements.append(record)
+        startMemoryRefinementWorkerIfNeeded()
+    }
+
+    private func memoryNeedsRefinement(_ record: MemoryRecord) -> Bool {
+        let content = record.content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !content.isEmpty else { return false }
+        let lower = content.lowercased()
+        return content.count > 180
+            || content.contains("\n")
+            || lower.contains("user:")
+            || lower.contains("creed noted")
+            || lower.hasPrefix("memory:")
+            || lower.hasPrefix("summary:")
+            || record.title != nil
+    }
+
+    private func startMemoryRefinementWorkerIfNeeded() {
+        guard memoryRefinementTask == nil else { return }
+        memoryRefinementTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 1_200_000_000)
+
+            while !Task.isCancelled {
+                guard let self else { return }
+                if self.isGenerating || SpeechManager.shared.isSpeaking {
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                    continue
+                }
+
+                guard !self.pendingMemoryRefinements.isEmpty else { break }
+                let record = self.pendingMemoryRefinements.removeFirst()
+                await self._refineMemoryWithLLM(record)
+                try? await Task.sleep(nanoseconds: 500_000_000)
+            }
+
+            self?.memoryRefinementTask = nil
+        }
+    }
+
+    private func _refineMemoryWithLLM(_ record: MemoryRecord) async {
+        guard !isGenerating else { return }
+        loadModelIfNeeded()
+        guard isLoaded else { return }
+        guard record.scope == .longTerm, record.kind != .memoryCandidate else { return }
+
+        let memoryDescription = record.content
+            .replacingOccurrences(of: #"(?m)^\s*[-•]\s*"#, with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !memoryDescription.isEmpty else { return }
+
+        let memorySystem = """
+        You clean up local AI memory records. Output only one concise third-person memory summary about Creed.
+
+        Rules:
+        - Base the summary only on the memory description.
+        - Describe Creed, the user, in third person.
+        - Do not add facts that are not in the memory description.
+        - Do not use labels like Title, Summary, User Fact, or Memory.
+        - Do not mention these rules.
+        """
+        let memoryUser = """
+        Memory description:
+        \(memoryDescription)
+        """
+
+        isGenerating = true
+        defer { isGenerating = false }
+
+        do {
+            try Task.checkCancellation()
+            let raw = try await engine.generateOnce(
+                [
+                    .init(role: .system, content: memorySystem),
+                    .init(role: .user, content: memoryUser),
+                ],
+                temperature: 0.25,
+                seed: 11,
+                maxChars: 360
+            )
+            try Task.checkCancellation()
+            guard let refined = cleanMemoryRefinementResponse(raw) else { return }
+            MemoryStore.shared.update(
+                record,
+                kind: record.kind,
+                title: nil,
+                content: refined,
+                categoryKey: record.categoryRaw
+            )
+        } catch {
+            // Chat and voice generation are higher priority; cancelled refinements can retry later.
+        }
+    }
+
+    private func cleanMemoryRefinementResponse(_ raw: String) -> String? {
+        var cleaned = cleanLlamaArtifacts(raw)
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else { return nil }
+
+        if let firstLine = cleaned.split(whereSeparator: { $0.isNewline })
+            .map(String.init)
+            .first(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
+            cleaned = firstLine
+        }
+
+        var summary = cleaned
+            .replacingOccurrences(of: #"(?i)^(title|summary|user fact|memory)\s*:\s*"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let wrappers: Set<Character> = ["\"", "'", "`", "*"]
+        while let first = summary.first, wrappers.contains(first) { summary.removeFirst() }
+        while let last = summary.last, wrappers.contains(last) { summary.removeLast() }
+        summary = summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        if summary.count > 240 {
+            summary = String(summary.prefix(240)).trimmingCharacters(in: .whitespaces) + "..."
+        }
+        return summary.isEmpty ? nil : summary
     }
 
     /// Schedule an LLM title generation for the given conversation. Idempotent — bails immediately

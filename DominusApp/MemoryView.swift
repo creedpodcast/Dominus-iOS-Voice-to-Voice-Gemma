@@ -4,6 +4,8 @@ struct MemoryView: View {
     @Environment(\.dismiss) private var dismiss
 
     let conversation: Conversation?
+    var onRequestLLMRefinement: (MemoryRecord) -> Void = { _ in }
+    var onRequestJournalCleanup: () -> Void = {}
 
     @State private var pendingSuggestions: [MemoryRecord] = []
     @State private var journalMemories: [MemoryRecord] = []
@@ -86,6 +88,7 @@ struct MemoryView: View {
             }
             .onAppear {
                 refresh()
+                onRequestJournalCleanup()
                 startRefreshing()
             }
             .onDisappear {
@@ -93,11 +96,11 @@ struct MemoryView: View {
                 refreshTask = nil
             }
             .sheet(isPresented: $showAddMemory, onDismiss: refresh) {
-                JournalMemorySheet(mode: .add)
+                JournalMemorySheet(mode: .add, onRequestLLMRefinement: onRequestLLMRefinement)
                 .presentationDetents([.medium, .large])
             }
             .sheet(item: $editingMemory, onDismiss: refresh) { memory in
-                JournalMemorySheet(mode: .edit(memory))
+                JournalMemorySheet(mode: .edit(memory), onRequestLLMRefinement: onRequestLLMRefinement)
                 .presentationDetents([.medium, .large])
             }
         }
@@ -122,7 +125,9 @@ struct MemoryView: View {
     }
 
     private func accept(_ memory: MemoryRecord) {
-        MemoryRetriever.shared.acceptCandidate(memory)
+        if let saved = MemoryRetriever.shared.acceptCandidate(memory) {
+            onRequestLLMRefinement(saved)
+        }
         refresh()
     }
 
@@ -145,7 +150,6 @@ struct MemoryView: View {
 
 private enum MemoryTab: String, CaseIterable, Identifiable {
     case hub
-    case trace
     case temporary
     case longTerm
 
@@ -154,7 +158,6 @@ private enum MemoryTab: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .hub:       return "Hub"
-        case .trace:     return "Trace"
         case .temporary: return "Temporary"
         case .longTerm:  return "Blocks"
         }
@@ -163,7 +166,6 @@ private enum MemoryTab: String, CaseIterable, Identifiable {
     var icon: String {
         switch self {
         case .hub:       return "point.3.connected.trianglepath.dotted"
-        case .trace:     return "waveform.path.ecg"
         case .temporary: return "clock.arrow.circlepath"
         case .longTerm:  return "square.stack.3d.up"
         }
@@ -173,8 +175,6 @@ private enum MemoryTab: String, CaseIterable, Identifiable {
         switch self {
         case .hub:
             return "The hub is the centralized category map built from editable memory blocks."
-        case .trace:
-            return "Trace shows the latest memory search and context pack sent into the AI."
         case .temporary:
             return "Current-chat memory is deleted when this chat is deleted. It helps Dominus recall older parts of the active conversation."
         case .longTerm:
@@ -238,12 +238,7 @@ private struct MemoryRecordRow: View {
                     .foregroundStyle(.tertiary)
             }
 
-            if let title = memory.title, !title.isEmpty {
-                Text(title)
-                    .font(.subheadline.weight(.semibold))
-            }
-
-            Text(memory.content)
+            Text(displayContent)
                 .font(.callout)
                 .textSelection(.enabled)
 
@@ -289,14 +284,20 @@ private struct MemoryRecordRow: View {
         }
         .padding(.vertical, 4)
     }
+
+    private var displayContent: String {
+        memory.content
+            .replacingOccurrences(of: #"(?m)^\s*[-•]\s*"#, with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 }
 
 private struct JournalMemorySheet: View {
     @Environment(\.dismiss) private var dismiss
 
     let mode: Mode
+    var onRequestLLMRefinement: (MemoryRecord) -> Void = { _ in }
 
-    @State private var title: String
     @State private var content: String
 
     enum Mode {
@@ -313,14 +314,16 @@ private struct JournalMemorySheet: View {
         }
     }
 
-    init(mode: Mode) {
+    init(
+        mode: Mode,
+        onRequestLLMRefinement: @escaping (MemoryRecord) -> Void = { _ in }
+    ) {
         self.mode = mode
+        self.onRequestLLMRefinement = onRequestLLMRefinement
         switch mode {
         case .add:
-            _title = State(initialValue: "")
             _content = State(initialValue: "")
         case .edit(let memory):
-            _title = State(initialValue: memory.title ?? "")
             _content = State(initialValue: memory.content)
         }
     }
@@ -329,15 +332,14 @@ private struct JournalMemorySheet: View {
         NavigationStack {
             Form {
                 Section {
-                    TextField("Optional title", text: $title)
-                        .autocorrectionDisabled()
-                } header: {
-                    Text("Title")
-                }
-
-                Section {
                     TextEditor(text: $content)
                         .frame(minHeight: 180)
+                    Button {
+                        generateSummary()
+                    } label: {
+                        Label("Summarize Memory", systemImage: "wand.and.sparkles")
+                    }
+                    .disabled(content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 } header: {
                     Text("Memory")
                 } footer: {
@@ -361,27 +363,32 @@ private struct JournalMemorySheet: View {
         }
     }
 
+    private func generateSummary() {
+        guard let summary = MemorySummaryBuilder.summary(from: content, maxItems: 5) else { return }
+        content = summary
+    }
+
     private func save() {
-        let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        let optionalTitle = cleanTitle.isEmpty ? nil : cleanTitle
         let cleanContent = content.trimmingCharacters(in: .whitespacesAndNewlines)
 
         switch mode {
         case .add:
-            MemoryRetriever.shared.rememberLongTerm(
+            let saved = MemoryRetriever.shared.rememberLongTerm(
                 kind: .userFact,
-                title: optionalTitle,
+                title: nil,
                 content: cleanContent,
                 categoryKey: MemoryStore.uncategorizedCategoryKey
             )
+            saved.forEach(onRequestLLMRefinement)
         case .edit(let memory):
             MemoryStore.shared.update(
                 memory,
                 kind: .userFact,
-                title: optionalTitle,
-                content: cleanContent,
+                title: nil,
+                content: MemorySummaryBuilder.bulletSummary(from: cleanContent, maxBullets: 3),
                 categoryKey: MemoryStore.uncategorizedCategoryKey
             )
+            onRequestLLMRefinement(memory)
         }
     }
 }
@@ -391,6 +398,7 @@ private struct MemoryHubDetailView: View {
 
     let category: MemoryCategoryInfo
     let categories: [MemoryCategoryInfo]
+    var onRequestLLMRefinement: (MemoryRecord) -> Void = { _ in }
 
     @State private var sourceMemories: [MemoryRecord] = []
     @State private var hubSummary = ""
@@ -466,12 +474,17 @@ private struct MemoryHubDetailView: View {
                     categories: categories,
                     presetTitle: category.title,
                     presetKind: category.defaultKind,
-                    presetCategoryKey: category.id
+                    presetCategoryKey: category.id,
+                    onRequestLLMRefinement: onRequestLLMRefinement
                 )
                 .presentationDetents([.medium, .large])
             }
             .sheet(item: $editingMemory, onDismiss: refresh) { memory in
-                EditMemorySheet(memory: memory, categories: categories)
+                EditMemorySheet(
+                    memory: memory,
+                    categories: categories,
+                    onRequestLLMRefinement: onRequestLLMRefinement
+                )
                     .presentationDetents([.medium, .large])
             }
         }
@@ -513,55 +526,7 @@ private struct EmptyMemoryView: View {
         if tab == .hub {
             return "The hub will appear after memory blocks are saved."
         }
-        if tab == .trace {
-            return "Ask Dominus a question to see the latest memory search trace."
-        }
         return "Tap plus to add one manually, or keep chatting so Dominus can create memory automatically."
-    }
-}
-
-private struct MemoryTraceHeader: View {
-    let query: String
-    let updatedAt: Date?
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Latest Query")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-            Text(query)
-                .font(.callout)
-                .textSelection(.enabled)
-            if let updatedAt {
-                Text(updatedAt, style: .time)
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-            }
-        }
-        .padding(.vertical, 4)
-    }
-}
-
-private struct MemoryTraceRow: View {
-    let step: MemoryTraceStep
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(step.title)
-                    .font(.subheadline.weight(.semibold))
-                Spacer()
-                Text(step.timestamp, style: .time)
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-            }
-
-            Text(step.detail)
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .textSelection(.enabled)
-        }
-        .padding(.vertical, 4)
     }
 }
 
@@ -574,9 +539,9 @@ private struct AddMemorySheet: View {
     let presetTitle: String?
     let presetKind: MemoryKind?
     let presetCategoryKey: String?
+    var onRequestLLMRefinement: (MemoryRecord) -> Void
 
     @State private var tab: MemoryTab
-    @State private var title = ""
     @State private var content = ""
     @State private var longTermKind: MemoryKind = .userFact
     @State private var categoryKey: String
@@ -588,7 +553,8 @@ private struct AddMemorySheet: View {
         categories: [MemoryCategoryInfo],
         presetTitle: String? = nil,
         presetKind: MemoryKind? = nil,
-        presetCategoryKey: String? = nil
+        presetCategoryKey: String? = nil,
+        onRequestLLMRefinement: @escaping (MemoryRecord) -> Void = { _ in }
     ) {
         self.defaultTab = defaultTab
         self.conversationID = conversationID
@@ -596,8 +562,8 @@ private struct AddMemorySheet: View {
         self.presetTitle = presetTitle
         self.presetKind = presetKind
         self.presetCategoryKey = presetCategoryKey
+        self.onRequestLLMRefinement = onRequestLLMRefinement
         _tab = State(initialValue: defaultTab)
-        _title = State(initialValue: presetTitle ?? "")
         _longTermKind = State(initialValue: presetKind ?? .userFact)
         _categoryKey = State(initialValue: presetCategoryKey ?? MemoryStore.uncategorizedCategoryKey)
     }
@@ -634,14 +600,15 @@ private struct AddMemorySheet: View {
                     }
                 }
 
-                Section("Title") {
-                    TextField("Optional label", text: $title)
-                        .autocorrectionDisabled()
-                }
-
                 Section("Memory") {
                     TextEditor(text: $content)
                         .frame(minHeight: 140)
+                    Button {
+                        generateSummary()
+                    } label: {
+                        Label("Summarize Memory", systemImage: "wand.and.sparkles")
+                    }
+                    .disabled(content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
 
                 Section {
@@ -678,36 +645,37 @@ private struct AddMemorySheet: View {
     }
 
     private func addMemory() {
-        let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanContent = content.trimmingCharacters(in: .whitespacesAndNewlines)
-        let optionalTitle = cleanTitle.isEmpty ? nil : cleanTitle
 
         switch tab {
         case .hub:
-            return
-        case .trace:
             return
         case .temporary:
             guard let conversationID else { return }
             MemoryRetriever.shared.rememberConversationNote(
                 conversationID: conversationID,
-                title: optionalTitle,
+                title: nil,
                 content: cleanContent
             )
         case .longTerm:
-            MemoryRetriever.shared.rememberLongTerm(
+            let saved = MemoryRetriever.shared.rememberLongTerm(
                 kind: longTermKind,
-                title: optionalTitle,
+                title: nil,
                 content: cleanContent,
                 categoryKey: categoryKey
             )
+            saved.forEach(onRequestLLMRefinement)
         }
 
         savedCount += 1
     }
 
+    private func generateSummary() {
+        guard let summary = MemorySummaryBuilder.summary(from: content, maxItems: 5) else { return }
+        content = summary
+    }
+
     private func resetDraft() {
-        title = presetTitle ?? ""
         content = ""
         categoryKey = presetCategoryKey ?? MemoryStore.uncategorizedCategoryKey
     }
@@ -718,16 +686,20 @@ private struct EditMemorySheet: View {
 
     let memory: MemoryRecord
     let categories: [MemoryCategoryInfo]
+    var onRequestLLMRefinement: (MemoryRecord) -> Void
 
-    @State private var title: String
     @State private var content: String
     @State private var kind: MemoryKind
     @State private var categoryKey: String
 
-    init(memory: MemoryRecord, categories: [MemoryCategoryInfo]) {
+    init(
+        memory: MemoryRecord,
+        categories: [MemoryCategoryInfo],
+        onRequestLLMRefinement: @escaping (MemoryRecord) -> Void = { _ in }
+    ) {
         self.memory = memory
         self.categories = categories
-        _title = State(initialValue: memory.title ?? "")
+        self.onRequestLLMRefinement = onRequestLLMRefinement
         _content = State(initialValue: memory.content)
         _kind = State(initialValue: memory.kind)
         _categoryKey = State(initialValue: memory.categoryRaw ?? MemoryStore.uncategorizedCategoryKey)
@@ -756,14 +728,15 @@ private struct EditMemorySheet: View {
                     }
                 }
 
-                Section("Title") {
-                    TextField("Optional label", text: $title)
-                        .autocorrectionDisabled()
-                }
-
                 Section("Memory") {
                     TextEditor(text: $content)
                         .frame(minHeight: 160)
+                    Button {
+                        generateSummary()
+                    } label: {
+                        Label("Summarize Memory", systemImage: "wand.and.sparkles")
+                    }
+                    .disabled(content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
             .navigationTitle("Edit Memory")
@@ -783,9 +756,12 @@ private struct EditMemorySheet: View {
         }
     }
 
+    private func generateSummary() {
+        guard let summary = MemorySummaryBuilder.summary(from: content, maxItems: 5) else { return }
+        content = summary
+    }
+
     private func save() {
-        let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        let optionalTitle = cleanTitle.isEmpty ? nil : cleanTitle
         let cleanKind = memory.scope == .longTerm ? kind : memory.kind
 
         if let profileKey = profileKey(from: memory.sourceID) {
@@ -799,10 +775,13 @@ private struct EditMemorySheet: View {
         MemoryStore.shared.update(
             memory,
             kind: cleanKind,
-            title: optionalTitle,
-            content: content,
+            title: nil,
+            content: MemorySummaryBuilder.bulletSummary(from: content, maxBullets: 3),
             categoryKey: memory.scope != .conversation ? categoryKey : memory.categoryRaw
         )
+        if memory.scope == .longTerm {
+            onRequestLLMRefinement(memory)
+        }
     }
 
     private func profileKey(from sourceID: String?) -> String? {

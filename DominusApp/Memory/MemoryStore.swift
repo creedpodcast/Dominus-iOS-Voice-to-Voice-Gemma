@@ -537,13 +537,10 @@ final class MemoryStore {
 
     private func hubSummary(for records: [MemoryRecord]) -> String {
         records.prefix(12).map { record in
-            let text = record.content
+            record.content
                 .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+                .replacingOccurrences(of: #"(?m)^\s*[-•]\s*"#, with: "", options: .regularExpression)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            if text.hasPrefix("•") {
-                return text
-            }
-            return "• \(text)"
         }
         .joined(separator: "\n")
     }

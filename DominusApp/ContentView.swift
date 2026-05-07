@@ -68,6 +68,7 @@ struct ContentView: View {
     @State private var voiceModeAutoExitTask: Task<Void, Never>?
     @State private var isInterruptRestartPending = false
     @State private var latestVisibleVoiceTranscript = ""
+    @State private var latestVisibleVoiceTranscriptUpdatedAt: Date?
     @State private var lastVoiceActivityAt: Date?
     @State private var headphoneVolumeWarning: HeadphoneVolumeWarning?
     @State private var dismissedHeadphoneVolumeWarning: HeadphoneVolumeWarning?
@@ -78,6 +79,7 @@ struct ContentView: View {
     @State private var hasPlayedAppLoadedSound = false
 
     private let voiceAutoSendDelay: TimeInterval = 2.5
+    private let voiceActivityGraceDelay: TimeInterval = 0.8
     private let listeningSilenceFillerDelay: TimeInterval = 20
     private let voiceModeAutoExitDelay: TimeInterval = 60
     private let listeningSilenceFillers = [
@@ -356,7 +358,10 @@ struct ContentView: View {
             return
         }
 
-        latestVisibleVoiceTranscript = visibleTranscript
+        if visibleTranscript != latestVisibleVoiceTranscript {
+            latestVisibleVoiceTranscript = visibleTranscript
+            latestVisibleVoiceTranscriptUpdatedAt = Date()
+        }
         scheduleVoiceModeAutoExit()
         cancelListeningSilenceFiller()
         if lastVoiceActivityAt == nil {
@@ -376,18 +381,28 @@ struct ContentView: View {
 
     private func scheduleVoiceAutoSend() {
         let transcriptSnapshot = latestVisibleVoiceTranscript
+        let transcriptUpdatedAt = latestVisibleVoiceTranscriptUpdatedAt ?? Date()
         voiceAutoSendTask?.cancel()
         voiceAutoSendTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: UInt64(voiceAutoSendDelay * 1_000_000_000))
             guard !Task.isCancelled,
                   pttState == .listening,
                   !whisper.isMicMuted,
-                  !transcriptSnapshot.isEmpty,
-                  WhisperManager.visibleTranscript(from: whisper.liveTranscript) == transcriptSnapshot
+                  !transcriptSnapshot.isEmpty
             else { return }
 
+            if latestVisibleVoiceTranscript != transcriptSnapshot {
+                scheduleVoiceAutoSend()
+                return
+            }
+
+            if Date().timeIntervalSince(transcriptUpdatedAt) < voiceAutoSendDelay {
+                scheduleVoiceAutoSend()
+                return
+            }
+
             if let lastVoiceActivityAt,
-               Date().timeIntervalSince(lastVoiceActivityAt) < voiceAutoSendDelay {
+               Date().timeIntervalSince(lastVoiceActivityAt) < voiceActivityGraceDelay {
                 scheduleVoiceAutoSend()
                 return
             }
@@ -450,6 +465,7 @@ struct ContentView: View {
     private func resetVoiceAutoSendState() {
         cancelVoiceAutoSend()
         latestVisibleVoiceTranscript = ""
+        latestVisibleVoiceTranscriptUpdatedAt = nil
         lastVoiceActivityAt = nil
     }
 
@@ -746,7 +762,11 @@ struct ContentView: View {
             ProfileView()
         }
         .sheet(isPresented: $showMemorySheet) {
-            MemoryView(conversation: store.selectedConversation())
+            MemoryView(
+                conversation: store.selectedConversation(),
+                onRequestLLMRefinement: { store.refineMemoryWithLLM($0) },
+                onRequestJournalCleanup: { store.refineUnsummarizedMemoriesWithLLM() }
+            )
         }
         .sheet(isPresented: $showAudioSettingsSheet) {
             AudioSettingsView()
@@ -910,7 +930,8 @@ struct ContentView: View {
                                 role: msg.role,
                                 text: msg.content,
                                 onAcceptMemory: { store.confirmLatestPendingMemory(accept: true) },
-                                onDismissMemory: { store.confirmLatestPendingMemory(accept: false) }
+                                onDismissMemory: { store.confirmLatestPendingMemory(accept: false) },
+                                onRemember: { store.rememberMessage(msg.id) }
                             )
                                 .id(msg.id)
                         }
@@ -1126,9 +1147,11 @@ struct ChatBubble: View {
     let text: String
     var onAcceptMemory: (() -> Void)? = nil
     var onDismissMemory: (() -> Void)? = nil
+    var onRemember: (() -> Void)? = nil
 
     @ObservedObject private var speech = SpeechManager.shared
     @State private var copied: Bool = false
+    @State private var remembered: Bool = false
 
     private var isPlayingThis: Bool {
         speech.nowPlayingMessageID == messageID
@@ -1162,7 +1185,10 @@ struct ChatBubble: View {
                 Spacer(minLength: 48)
             } else {
                 Spacer(minLength: 48)
-                bubbleView(background: .blue, foreground: .white, align: .trailing)
+                VStack(alignment: .trailing, spacing: 4) {
+                    bubbleView(background: .blue, foreground: .white, align: .trailing)
+                    userActions
+                }
             }
         }
     }
@@ -1211,6 +1237,8 @@ struct ChatBubble: View {
 
     private var assistantActions: some View {
         HStack(spacing: 22) {
+            rememberButton
+
             Button {
                 UIPasteboard.general.string = text
                 withAnimation { copied = true }
@@ -1254,5 +1282,29 @@ struct ChatBubble: View {
         }
         .foregroundStyle(.secondary)
         .padding(.leading, 6)
+    }
+
+    private var userActions: some View {
+        HStack(spacing: 14) {
+            rememberButton
+        }
+        .foregroundStyle(.secondary)
+        .padding(.trailing, 6)
+    }
+
+    private var rememberButton: some View {
+        Button {
+            onRemember?()
+            withAnimation { remembered = true }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) {
+                withAnimation { remembered = false }
+            }
+        } label: {
+            Image(systemName: remembered ? "checkmark.circle.fill" : "bookmark")
+                .font(.system(size: 18))
+        }
+        .buttonStyle(.plain)
+        .disabled(isMemoryNotice)
+        .accessibilityLabel("Remember message")
     }
 }

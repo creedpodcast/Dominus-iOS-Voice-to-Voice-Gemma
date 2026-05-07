@@ -18,6 +18,7 @@ final class MemoryRetriever {
     private let minimumConversationSemanticScore: Float = 0.22
     private let minimumContextSemanticScore: Float = 0.30
     private let minimumHubSemanticScore: Float = 0.32
+    private let broadRecallLimit = 16
 
     // MARK: - Store a completed exchange
 
@@ -49,7 +50,7 @@ final class MemoryRetriever {
     }
 
     func rememberSummary(conversationID: UUID, summary: String, sourceID: String) {
-        let trimmed = summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = MemorySummaryBuilder.bulletSummary(from: summary, maxBullets: 5)
         guard !trimmed.isEmpty else { return }
         let convID = conversationID
 
@@ -71,64 +72,113 @@ final class MemoryRetriever {
     }
 
     func rememberConversationNote(conversationID: UUID, title: String? = nil, content: String) {
-        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        store.insert(
-            conversationID: conversationID,
-            kind: .conversationSummary,
-            scope: .conversation,
-            title: title,
-            sourceID: nil,
-            content: trimmed,
-            embedding: nil
+        let atoms = MemoryExtractor.extract(
+            from: content,
+            defaultKind: .conversationSummary,
+            maxAtoms: 5
         )
+        guard !atoms.isEmpty else { return }
+        for atom in atoms {
+            store.insert(
+                conversationID: conversationID,
+                kind: .conversationSummary,
+                scope: .conversation,
+                title: nil,
+                sourceID: nil,
+                content: atom.content,
+                embedding: nil
+            )
+        }
         store.pruneIfNeeded(conversationID: conversationID, keepLatest: 160)
     }
 
     @discardableResult
-    func rememberCandidate(conversationID: UUID, title: String = "Review memory", content: String) -> MemoryRecord? {
-        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        guard !hasSimilarCandidate(conversationID: conversationID, content: trimmed) else { return nil }
-
-        let record = store.insert(
+    func rememberCandidate(
+        conversationID: UUID,
+        title: String = "Review memory",
+        content: String,
+        sourceID: String? = nil
+    ) -> MemoryRecord? {
+        rememberCandidates(
             conversationID: conversationID,
-            kind: .memoryCandidate,
-            scope: .conversation,
             title: title,
-            sourceID: nil,
-            content: trimmed,
-            embedding: nil
-        )
-        store.pruneIfNeeded(conversationID: conversationID, keepLatest: 160)
-        return record
+            content: content,
+            sourceID: sourceID
+        ).first
     }
 
-    func acceptCandidate(_ record: MemoryRecord) {
-        let content = record.content
-        let title = record.title
-        store.insert(
+    @discardableResult
+    func rememberCandidates(
+        conversationID: UUID,
+        title: String = "Review memory",
+        content: String,
+        sourceID: String? = nil
+    ) -> [MemoryRecord] {
+        let atoms = MemoryExtractor.extract(from: content, maxAtoms: 8)
+        guard !atoms.isEmpty else { return [] }
+
+        let groupID = sourceID ?? "candidate:\(UUID().uuidString)"
+        let records = atoms.compactMap { atom -> MemoryRecord? in
+            let content = atom.content
+            guard !hasSimilarCandidate(conversationID: conversationID, content: content) else { return nil }
+            return store.insert(
+                conversationID: conversationID,
+                kind: .memoryCandidate,
+                scope: .conversation,
+                title: nil,
+                sourceID: groupID,
+                categoryKey: atom.categoryKey,
+                content: content,
+                embedding: nil
+            )
+        }
+        store.pruneIfNeeded(conversationID: conversationID, keepLatest: 160)
+        return records
+    }
+
+    @discardableResult
+    func acceptCandidate(_ record: MemoryRecord) -> MemoryRecord? {
+        let atoms = MemoryExtractor.extract(from: record.content, maxAtoms: 1)
+        let atom = atoms.first
+        let content = atom?.content ?? cleanStoredMemoryContent(record.content)
+        let acceptedKind = atom?.kind ?? kindForAcceptedCandidate(record)
+        let saved = store.insert(
             conversationID: nil,
-            kind: .userFact,
+            kind: acceptedKind,
             scope: .longTerm,
-            title: title,
+            title: nil,
             sourceID: nil,
+            categoryKey: record.categoryRaw,
             content: content,
             embedding: nil
         )
         scheduleEmbeddingBackfill(scope: .longTerm, sourceID: nil, content: content)
         store.delete(record)
+        return saved
     }
 
+    private func kindForAcceptedCandidate(_ record: MemoryRecord) -> MemoryKind {
+        let text = "\(record.title ?? "") \(record.content)".lowercased()
+        if text.contains("preference") || text.contains("likes") || text.contains("favorite") {
+            return .preference
+        }
+        if text.contains("goal") || text.contains("wants to") || text.contains("needs to") || text.contains("plans to") || text.contains("interested in") || text.contains("considering") {
+            return .goal
+        }
+        if text.contains("task") || text.contains("book") || text.contains("course") || text.contains("project") {
+            return .taskReference
+        }
+        return .userFact
+    }
+
+    @discardableResult
     func rememberLongTerm(
         kind: MemoryKind,
         title: String? = nil,
         content: String,
         sourceID: String? = nil,
         categoryKey: String? = nil
-    ) {
-        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
+    ) -> [MemoryRecord] {
         let safeKind: MemoryKind
         switch kind {
         case .conversationExchange, .conversationSummary, .memoryCandidate:
@@ -140,17 +190,32 @@ final class MemoryRetriever {
         if let sourceID {
             store.delete(scope: .longTerm, sourceID: sourceID)
         }
-        store.insert(
-            conversationID: nil,
-            kind: safeKind,
-            scope: .longTerm,
-            title: title,
-            sourceID: sourceID,
-            categoryKey: categoryKey,
-            content: trimmed,
-            embedding: nil
+
+        let atoms = MemoryExtractor.extract(
+            from: content,
+            defaultKind: safeKind,
+            defaultCategoryKey: categoryKey ?? MemoryStore.uncategorizedCategoryKey,
+            maxAtoms: 8
         )
-        scheduleEmbeddingBackfill(scope: .longTerm, sourceID: sourceID, content: trimmed)
+        guard !atoms.isEmpty else { return [] }
+
+        var savedRecords: [MemoryRecord] = []
+        for atom in atoms {
+            let savedContent = atom.content
+            let saved = store.insert(
+                conversationID: nil,
+                kind: atom.kind,
+                scope: .longTerm,
+                title: nil,
+                sourceID: sourceID,
+                categoryKey: atom.categoryKey,
+                content: savedContent,
+                embedding: nil
+            )
+            savedRecords.append(saved)
+            scheduleEmbeddingBackfill(scope: .longTerm, sourceID: sourceID, content: savedContent)
+        }
+        return savedRecords
     }
 
     // MARK: - Retrieve relevant memories
@@ -168,50 +233,35 @@ final class MemoryRetriever {
         let hubMatches: [ScoredHub] = []
         let coreLongTerm = broadMemoryQuestion
             ? filterRecentlyMentioned(
-                coreLongTermMemories(limit: 8),
+                coreLongTermMemories(limit: broadRecallLimit),
                 recentAssistantText: wantsDifferentFacts ? recentAssistantText : nil
             )
             : []
+        let conversationCandidates = broadMemoryQuestion ? [] : store.fetch(conversationID: conversationID).filter {
+            $0.kind != .memoryCandidate
+        }
+        let longTermCandidates = store.fetch(scope: .longTerm).filter {
+            $0.kind != .memoryCandidate
+        }
         let conversationMatches = topMatches(
             query: query,
-            candidates: broadMemoryQuestion ? [] : store.fetch(conversationID: conversationID).filter {
-                $0.kind != .memoryCandidate
-            },
+            candidates: conversationCandidates,
             limit: min(topK, 5),
             semanticThreshold: minimumConversationSemanticScore
         )
         let globalMatches = topMatches(
             query: query,
-            candidates: broadMemoryQuestion ? [] : store.fetch(scope: .longTerm),
+            candidates: broadMemoryQuestion ? [] : longTermCandidates,
             limit: 6,
             semanticThreshold: minimumContextSemanticScore
         )
 
         guard !coreLongTerm.isEmpty || !hubMatches.isEmpty || !conversationMatches.isEmpty || !globalMatches.isEmpty else {
             print("🔍 RAG: no relevant memories")
-            MemoryTraceStore.shared.replace(
-                query: query,
-                steps: [
-                    traceStep(
-                        title: "No Relevant Memory",
-                        detail: "Dominus searched the Memory Journal and this chat. Nothing passed the relevance gate."
-                    )
-                ]
-            )
             return ""
         }
 
         print("🔍 RAG matched: journalCore=\(coreLongTerm.count), conversation=\(conversationMatches.count), journal=\(globalMatches.count)")
-        MemoryTraceStore.shared.replace(
-            query: query,
-            steps: traceSteps(
-                query: query,
-                hubMatches: hubMatches,
-                coreLongTerm: coreLongTerm,
-                globalMatches: globalMatches,
-                conversationMatches: conversationMatches
-            )
-        )
 
         return formatMemoryContextPack(
             query: query,
@@ -328,6 +378,17 @@ final class MemoryRetriever {
             "tell me about me",
             "tell me about myself",
             "about myself",
+            "everything you know about me",
+            "everything you remember about me",
+            "all you know about me",
+            "all my memories",
+            "all of my memories",
+            "summarize my memories",
+            "what am i working on",
+            "what all am i working on",
+            "what projects am i working on",
+            "what goals am i working on",
+            "what books am i writing",
             "what are my",
             "what is my",
             "what's my",
@@ -358,18 +419,39 @@ final class MemoryRetriever {
             .preference,
             .goal,
             .taskReference,
-            .appInstruction
+            .wikiEntry
         ]
-        return store.fetch(scope: .longTerm)
+        let unique = store.fetch(scope: .longTerm)
             .filter { coreKinds.contains($0.kind) }
             .reduce(into: [String: MemoryRecord]()) { unique, record in
                 let key = normalizedContent(record.content)
                 unique[key] = unique[key] ?? record
             }
             .values
-            .sorted { $0.updatedAt > $1.updatedAt }
-            .prefix(limit)
-            .map { $0 }
+
+        let grouped = Dictionary(grouping: unique) { record in
+            record.categoryRaw ?? record.kind.rawValue
+        }
+        var categoryBalanced: [MemoryRecord] = []
+        let sortedGroups = grouped.values.map {
+            $0.sorted { $0.updatedAt > $1.updatedAt }
+        }.sorted {
+            ($0.first?.updatedAt ?? .distantPast) > ($1.first?.updatedAt ?? .distantPast)
+        }
+
+        var depth = 0
+        while categoryBalanced.count < limit {
+            var appended = false
+            for group in sortedGroups where categoryBalanced.count < limit {
+                guard group.indices.contains(depth) else { continue }
+                categoryBalanced.append(group[depth])
+                appended = true
+            }
+            guard appended else { break }
+            depth += 1
+        }
+
+        return Array(categoryBalanced.prefix(limit))
     }
 
     private func filterRecentlyMentioned(
@@ -498,8 +580,7 @@ final class MemoryRetriever {
     ) -> String {
         let body = records.map { record in
             let label = record.kind.promptLabel
-            let titlePrefix = record.title.map { " (\($0))" } ?? ""
-            return "- \(label)\(titlePrefix) about Creed: \(record.content)"
+            return "\(label) about Creed: \(cleanStoredMemoryContent(record.content))"
         }.joined(separator: "\n")
         return """
         \(title):
@@ -530,69 +611,9 @@ final class MemoryRetriever {
         }
     }
 
-    private func traceSteps(
-        query: String,
-        hubMatches: [ScoredHub],
-        coreLongTerm: [MemoryRecord],
-        globalMatches: [ScoredMemory],
-        conversationMatches: [ScoredMemory]
-    ) -> [MemoryTraceStep] {
-        var steps: [MemoryTraceStep] = [
-            traceStep(
-                title: "Latest Query",
-                detail: query
-            )
-        ]
-
-        steps.append(traceStep(
-            title: "Memory Journal Search",
-            detail: "Dominus searched user-approved journal entries directly."
-        ))
-
-        let longTermRecords = dedupeRecords(coreLongTerm + globalMatches.map(\.record))
-        let longTermDetail = longTermRecords.isEmpty
-            ? "No journal entries were selected."
-            : longTermRecords.map { record in
-                let title = record.title.map { " · \($0)" } ?? ""
-                return "\(record.kind.promptLabel)\(title): \(record.content)"
-            }.joined(separator: "\n")
-        steps.append(traceStep(title: "Journal Candidates", detail: longTermDetail))
-
-        let chatDetail = conversationMatches.isEmpty
-            ? "No current-chat summaries were selected."
-            : conversationMatches.map { match in
-                "score \(formatScore(match.score)) · \(match.record.content)"
-            }.joined(separator: "\n")
-        steps.append(traceStep(title: "Current Chat Candidates", detail: chatDetail))
-
-        let count = hubMatches.count + longTermRecords.count + conversationMatches.count
-        steps.append(traceStep(
-            title: "Context Pack",
-            detail: "\(count) candidate memory item(s) were handed to Gemma. Gemma is instructed to use only items that directly answer the latest user message."
-        ))
-
-        return steps
-    }
-
-    private func traceStep(title: String, detail: String) -> MemoryTraceStep {
-        MemoryTraceStep(
-            title: title,
-            detail: detail,
-            timestamp: Date()
-        )
-    }
-
-    private func formatScore(_ score: Float) -> String {
-        String(format: "%.2f", score)
-    }
-
     private func compactExchange(userText: String, assistantText: String) -> String {
         let user = userText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let assistant = assistantText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let cappedAssistant = assistant.count > 700
-            ? String(assistant.prefix(700)).trimmingCharacters(in: .whitespacesAndNewlines) + "..."
-            : assistant
-        return "User: \(user)\nAssistant: \(cappedAssistant)"
+        return MemorySummaryBuilder.bulletSummary(from: "User: \(user)", maxBullets: 3)
     }
 
     private func hasSimilarCandidate(conversationID: UUID, content: String) -> Bool {
@@ -602,6 +623,13 @@ final class MemoryRetriever {
             let existing = normalizedContent(record.content)
             return existing == normalized
         }
+    }
+
+    private func cleanStoredMemoryContent(_ content: String) -> String {
+        content
+            .replacingOccurrences(of: #"(?m)^\s*[-•]\s*"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func scheduleEmbeddingBackfill(scope: MemoryScope, sourceID: String?, content: String) {
