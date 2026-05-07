@@ -46,6 +46,8 @@ Talk to an AI that talks back. Tap once to speak, then pause — after real word
 - **Memory Journal** — one editable long-term memory page where users can view, add, edit, delete, and summarize approved memories without separate memory titles
 - **Memory suggestions** — Dominus can detect possible memories, show Yes/No controls, accept spoken/text confirmation, and show darkened "Added to Memory" / "Forgot Memory" status bubbles in the chat
 - RAG long-term memory (semantic search + keyword fallback) — retrieves from the Memory Journal and current-chat summaries while filtering memory status bubbles out of the LLM prompt
+- **Diverse memory recall** — broad questions such as "what do you remember about me?" use category diversity, importance boosts, and recent-recall penalties so Dominus avoids repeating the same facts
+- **Memory retrieval trace** — Memory Journal shows why recent memory candidates were retrieved, including semantic score, keyword score, importance boost, repetition penalty, final score, source, and category
 - **AI-managed memory cleanup** — saved memories are first normalized into Creed-focused facts, then Gemma refines messy entries into concise third-person summaries in the background when the app is idle
 - LLM-generated chat titles (after 5 user turns or on chat exit) and absolute-date timestamps in the sidebar
 - User profile with auto-extraction ("my name is X" → stored as fact) **plus an editable Profile sheet** (person.circle button) for manual facts and a free-text "How should Dominus talk to you?" persona prompt
@@ -155,7 +157,11 @@ The same single button controls every step. No hold-to-talk. Auto-send only star
 | Memory Journal | Single user-facing long-term memory surface with editable description-first entries |
 | Memory suggestions | Conversation-scoped candidates that can be accepted into the Memory Journal or dismissed |
 | Retrieval | Memory Journal entries and current-chat summaries are scored, filtered, and injected only when relevant |
+| Diverse recall | Broad/follow-up memory questions activate exploration mode, balancing semantic relevance with category diversity, importance, and recently-used-memory penalties |
+| Recall history | Recently retrieved memory fingerprints are tracked locally in `UserDefaults` and downranked for a short window so repeated questions can surface different facts |
+| Traceability | Memory Journal includes a retrieval trace with source, category, semantic score, keyword score, importance boost, repetition penalty, and final score |
 | Normalization | Common first-person memory phrases are converted into Creed-focused facts before storage; idle Gemma refinement rewrites long or messy memories into compact third-person summaries |
+| File memory groundwork | `MemoryScope.file` is reserved for future chunked file indexing: file → chunks → embeddings → searchable candidates |
 | Raw history | Latest 3-4 turns kept in context — older current-chat turns are compacted into conversation-scoped RAG summaries |
 
 ### User Profile
@@ -192,7 +198,8 @@ DominusApp/
 │   ├── MemoryExtractor.swift        Deterministic memory extraction, categorization, and first-person normalization
 │   ├── MemorySummaryBuilder.swift   Compact memory summaries for chat bubbles, manual entries, and conversation compaction
 │   ├── MemoryStore.swift            SwiftData persistence, embeddings, and memory records
-│   └── MemoryRetriever.swift        remember(), retrieve(), candidate accept/delete interface
+│   ├── MemoryTraceStore.swift       Observable retrieval trace for memory scoring/debug visibility
+│   └── MemoryRetriever.swift        remember(), retrieve(), diverse scoring, recall history, candidate accept/delete interface
 └── Profile/
     ├── ProfileStore.swift           Fact extraction, persona, storage, system prompt injection
     ├── ProfileView.swift            Editable profile sheet — facts list + persona text field

@@ -31,14 +31,29 @@ enum MemoryScope: String, Codable, CaseIterable, Sendable {
     case conversation
     case longTerm
     case wiki
+    /// Reserved for future file chunk indexing: file -> chunks -> embeddings -> retrieved candidates.
+    case file
 }
 
 enum MemoryHubCategory: String, Codable, CaseIterable, Sendable, Identifiable {
+    case identity
     case profile
+    case project
     case writing
     case business
     case projects
     case goals
+    case belief
+    case technical
+    case creative
+    case file
+    case relationship
+    case location
+    case securityWork
+    case podcast
+    case book
+    case music
+    case appDevelopment
     case health
     case finances
     case preferences
@@ -50,11 +65,24 @@ enum MemoryHubCategory: String, Codable, CaseIterable, Sendable, Identifiable {
 
     var title: String {
         switch self {
+        case .identity:        return "Identity"
         case .profile:         return "Profile"
+        case .project:         return "Project"
         case .writing:         return "Writing"
         case .business:        return "Business"
         case .projects:        return "Projects"
         case .goals:           return "Goals"
+        case .belief:          return "Beliefs"
+        case .technical:       return "Technical"
+        case .creative:        return "Creative"
+        case .file:            return "Files"
+        case .relationship:    return "Relationships"
+        case .location:        return "Location"
+        case .securityWork:    return "Security Work"
+        case .podcast:         return "Podcast"
+        case .book:            return "Books"
+        case .music:           return "Music"
+        case .appDevelopment:  return "App Development"
         case .health:          return "Health & Fitness"
         case .finances:        return "Finances"
         case .preferences:     return "Preferences"
@@ -562,7 +590,25 @@ final class MemoryStore {
         let text = "\(record.title ?? "") \(record.content)".lowercased()
         if text.contains("book") || text.contains("writing") || text.contains("chapter") ||
             text.contains("novel") || text.contains("manuscript") {
-            return .writing
+            return text.contains("book") ? .book : .writing
+        }
+        if text.contains("podcast") || text.contains("episode") || text.contains("show") {
+            return .podcast
+        }
+        if text.contains("music") || text.contains("song") || text.contains("album") || text.contains("artist") {
+            return .music
+        }
+        if text.contains("faith") || text.contains("belief") || text.contains("god") ||
+            text.contains("religion") || text.contains("bible") || text.contains("scripture") {
+            return .belief
+        }
+        if text.contains("security") || text.contains("sop") || text.contains("investigation") ||
+            text.contains("threat") || text.contains("risk") {
+            return .securityWork
+        }
+        if text.contains("code") || text.contains("software") || text.contains("technical") ||
+            text.contains("swift") || text.contains("xcode") {
+            return .technical
         }
         if text.contains("business") || text.contains("company") || text.contains("store") ||
             text.contains("startup") || text.contains("brand") {
@@ -570,7 +616,10 @@ final class MemoryStore {
         }
         if text.contains("project") || text.contains("app") || text.contains("dominus") ||
             text.contains("ai assistant") {
-            return .projects
+            return text.contains("dominus") || text.contains("ios") || text.contains("app") ? .appDevelopment : .projects
+        }
+        if text.contains("creative") || text.contains("design") || text.contains("story") {
+            return .creative
         }
         if text.contains("health") || text.contains("fitness") || text.contains("workout") ||
             text.contains("lifting") || text.contains("diet") {
@@ -586,7 +635,11 @@ final class MemoryStore {
         }
         if text.contains("profile") || text.contains("name") || text.contains("called") || text.contains("location") ||
             text.contains("occupation") || text.contains("role") {
-            return .profile
+            return text.contains("location") || text.contains("lives") ? .location : .identity
+        }
+        if text.contains("friend") || text.contains("wife") || text.contains("family") ||
+            text.contains("relationship") || text.contains("team") {
+            return .relationship
         }
         return .general
     }
@@ -603,11 +656,24 @@ final class MemoryStore {
 
     private func icon(for category: MemoryHubCategory) -> String {
         switch category {
+        case .identity:        return "person.crop.circle"
         case .profile:         return "person.text.rectangle"
+        case .project:         return "folder"
         case .writing:         return "pencil.and.scribble"
         case .business:        return "briefcase"
         case .projects:        return "folder"
         case .goals:           return "target"
+        case .belief:          return "book.closed"
+        case .technical:       return "cpu"
+        case .creative:        return "paintpalette"
+        case .file:            return "doc.text"
+        case .relationship:    return "person.2"
+        case .location:        return "mappin.and.ellipse"
+        case .securityWork:    return "shield"
+        case .podcast:         return "mic"
+        case .book:            return "books.vertical"
+        case .music:           return "music.note"
+        case .appDevelopment:  return "app.connected.to.app.below.fill"
         case .health:          return "heart"
         case .finances:        return "dollarsign.circle"
         case .preferences:     return "star"
@@ -623,7 +689,7 @@ final class MemoryStore {
             return .preference
         case .goals:
             return .goal
-        case .tasks:
+        case .tasks, .project, .projects, .appDevelopment:
             return .taskReference
         case .appInstructions:
             return .appInstruction

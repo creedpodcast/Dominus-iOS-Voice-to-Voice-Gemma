@@ -2,6 +2,7 @@ import SwiftUI
 
 struct MemoryView: View {
     @Environment(\.dismiss) private var dismiss
+    @ObservedObject private var traceStore = MemoryTraceStore.shared
 
     let conversation: Conversation?
     var onRequestLLMRefinement: (MemoryRecord) -> Void = { _ in }
@@ -69,6 +70,27 @@ struct MemoryView: View {
                     Label("Memory Journal", systemImage: "book.closed")
                 } footer: {
                     Text("This is the single trusted memory source Dominus searches with RAG. Each entry stays editable and deletable.")
+                        .font(.caption)
+                }
+
+                Section {
+                    if traceStore.steps.isEmpty {
+                        Text("Ask Dominus a memory question to see retrieval scoring here.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        MemoryTraceHeader(
+                            query: traceStore.latestQuery,
+                            updatedAt: traceStore.updatedAt
+                        )
+                        ForEach(traceStore.steps) { step in
+                            MemoryTraceRow(step: step)
+                        }
+                    }
+                } header: {
+                    Label("Retrieval Trace", systemImage: "waveform.path.ecg")
+                } footer: {
+                    Text("Shows why memory candidates were handed to Gemma. These are candidates, not commands.")
                         .font(.caption)
                 }
             }
@@ -289,6 +311,51 @@ private struct MemoryRecordRow: View {
         memory.content
             .replacingOccurrences(of: #"(?m)^\s*[-•]\s*"#, with: "", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+private struct MemoryTraceHeader: View {
+    let query: String
+    let updatedAt: Date?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Latest Query")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Text(query.isEmpty ? "No query yet." : query)
+                .font(.callout)
+                .textSelection(.enabled)
+            if let updatedAt {
+                Text(updatedAt, style: .time)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .padding(.vertical, 4)
+    }
+}
+
+private struct MemoryTraceRow: View {
+    let step: MemoryTraceStep
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(step.title)
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                Text(step.timestamp, style: .time)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+
+            Text(step.detail)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+        }
+        .padding(.vertical, 4)
     }
 }
 

@@ -19,6 +19,39 @@ final class MemoryRetriever {
     private let minimumContextSemanticScore: Float = 0.30
     private let minimumHubSemanticScore: Float = 0.32
     private let broadRecallLimit = 16
+    private let recallHistoryKey = "memory.recallHistory.v1"
+    private let recallPenaltyWindow: TimeInterval = 20 * 60
+    private let maxRecallHistoryEvents = 120
+
+    private struct RecallEvent: Codable {
+        var memoryID: String
+        var conversationID: String
+        var timestamp: Date
+    }
+
+    private struct ScoreBreakdown {
+        var semantic: Float
+        var keyword: Float
+        var importance: Float
+        var diversity: Float
+        var repetitionPenalty: Float
+
+        var final: Float {
+            max(0, max(semantic, keyword) + importance + diversity - repetitionPenalty)
+        }
+    }
+
+    private struct ScoredMemory {
+        var score: Float { breakdown.final }
+        var breakdown: ScoreBreakdown
+        var record: MemoryRecord
+        var source: String
+    }
+
+    private struct ScoredHub {
+        var score: Float
+        var record: MemoryHubRecord
+    }
 
     // MARK: - Store a completed exchange
 
@@ -230,40 +263,55 @@ final class MemoryRetriever {
     ) -> String {
         let broadMemoryQuestion = shouldIncludeCoreLongTermMemory(for: query)
         let wantsDifferentFacts = isAskingForDifferentMemoryFacts(query)
+        let explorationMode = broadMemoryQuestion || wantsDifferentFacts
         let hubMatches: [ScoredHub] = []
-        let coreLongTerm = broadMemoryQuestion
-            ? filterRecentlyMentioned(
-                coreLongTermMemories(limit: broadRecallLimit),
-                recentAssistantText: wantsDifferentFacts ? recentAssistantText : nil
-            )
-            : []
         let conversationCandidates = broadMemoryQuestion ? [] : store.fetch(conversationID: conversationID).filter {
             $0.kind != .memoryCandidate
         }
         let longTermCandidates = store.fetch(scope: .longTerm).filter {
             $0.kind != .memoryCandidate
         }
+        let coreLongTerm = explorationMode
+            ? explorationMatches(
+                query: query,
+                conversationID: conversationID,
+                candidates: filterRecentlyMentioned(
+                    longTermCandidates,
+                    recentAssistantText: wantsDifferentFacts ? recentAssistantText : nil
+                ),
+                limit: broadRecallLimit
+            )
+            : []
         let conversationMatches = topMatches(
             query: query,
             candidates: conversationCandidates,
             limit: min(topK, 5),
-            semanticThreshold: minimumConversationSemanticScore
+            semanticThreshold: minimumConversationSemanticScore,
+            conversationID: conversationID,
+            source: "current-chat",
+            explorationMode: false
         )
         let globalMatches = topMatches(
             query: query,
             candidates: broadMemoryQuestion ? [] : longTermCandidates,
             limit: 6,
-            semanticThreshold: minimumContextSemanticScore
+            semanticThreshold: minimumContextSemanticScore,
+            conversationID: conversationID,
+            source: "long-term",
+            explorationMode: false
         )
 
         guard !coreLongTerm.isEmpty || !hubMatches.isEmpty || !conversationMatches.isEmpty || !globalMatches.isEmpty else {
             print("🔍 RAG: no relevant memories")
+            MemoryTraceStore.shared.update(query: query, steps: [
+                traceStep(title: "No Matches", detail: "No memory candidates passed semantic, keyword, or broad recall filters.")
+            ])
             return ""
         }
 
         print("🔍 RAG matched: journalCore=\(coreLongTerm.count), conversation=\(conversationMatches.count), journal=\(globalMatches.count)")
 
-        return formatMemoryContextPack(
+        let contextPack = formatMemoryContextPack(
             query: query,
             hubMatches: hubMatches,
             coreLongTerm: coreLongTerm,
@@ -271,6 +319,18 @@ final class MemoryRetriever {
             conversationMatches: conversationMatches,
             wantsDifferentFacts: wantsDifferentFacts
         )
+        let selectedRecords = dedupeScoredRecords(coreLongTerm + globalMatches + conversationMatches)
+        rememberRecallEvents(for: selectedRecords.map(\.record), conversationID: conversationID)
+        MemoryTraceStore.shared.update(
+            query: query,
+            steps: traceSteps(
+                query: query,
+                explorationMode: explorationMode,
+                longTerm: dedupeScoredRecords(coreLongTerm + globalMatches),
+                conversation: conversationMatches
+            )
+        )
+        return contextPack
     }
 
     func deleteConversationMemory(conversationID: UUID) {
@@ -279,14 +339,14 @@ final class MemoryRetriever {
 
     // MARK: - Scoring
 
-    private typealias ScoredMemory = (score: Float, record: MemoryRecord)
-    private typealias ScoredHub = (score: Float, record: MemoryHubRecord)
-
     private func topMatches(
         query: String,
         candidates: [MemoryRecord],
         limit: Int,
-        semanticThreshold: Float? = nil
+        semanticThreshold: Float? = nil,
+        conversationID: UUID,
+        source: String,
+        explorationMode: Bool
     ) -> [ScoredMemory] {
         guard !candidates.isEmpty, limit > 0 else { return [] }
 
@@ -307,17 +367,32 @@ final class MemoryRetriever {
                     semanticScore = embedder.cosineSimilarity(qv, vec)
                 }
                 let lexicalScore = keywordScore(queryWords: queryWords, text: record.content)
-                let score = max(semanticScore, lexicalScore)
+                let breakdown = scoreBreakdown(
+                    semantic: semanticScore,
+                    keyword: lexicalScore,
+                    record: record,
+                    conversationID: conversationID,
+                    explorationMode: explorationMode,
+                    usedCategories: []
+                )
                 guard semanticScore > requiredSemanticScore || lexicalScore > 0 else { continue }
-                scored.append((score: score, record: record))
+                scored.append(ScoredMemory(breakdown: breakdown, record: record, source: source))
             }
         } else {
             // ── Keyword fallback ───────────────────────────────────────
             print("🔍 RAG: using keyword fallback | candidates: \(candidates.count)")
             for record in candidates {
-                let score = keywordScore(queryWords: queryWords, text: record.content)
-                guard score > 0 else { continue }
-                scored.append((score: score, record: record))
+                let lexicalScore = keywordScore(queryWords: queryWords, text: record.content)
+                guard lexicalScore > 0 else { continue }
+                let breakdown = scoreBreakdown(
+                    semantic: 0,
+                    keyword: lexicalScore,
+                    record: record,
+                    conversationID: conversationID,
+                    explorationMode: explorationMode,
+                    usedCategories: []
+                )
+                scored.append(ScoredMemory(breakdown: breakdown, record: record, source: source))
             }
         }
 
@@ -325,11 +400,95 @@ final class MemoryRetriever {
         return Array(scored.prefix(limit))
     }
 
+    private func explorationMatches(
+        query: String,
+        conversationID: UUID,
+        candidates: [MemoryRecord],
+        limit: Int
+    ) -> [ScoredMemory] {
+        let queryVec = embedder.embed(query)
+        let queryWords = expandedKeywords(from: query)
+        var scored: [ScoredMemory] = []
+
+        for record in candidates {
+            let semanticScore: Float
+            if let queryVec, !record.embeddingData.isEmpty {
+                semanticScore = embedder.cosineSimilarity(queryVec, embedder.dataToVector(record.embeddingData))
+            } else {
+                semanticScore = 0
+            }
+            let lexicalScore = keywordScore(queryWords: queryWords, text: record.content)
+            let breakdown = scoreBreakdown(
+                semantic: semanticScore,
+                keyword: lexicalScore,
+                record: record,
+                conversationID: conversationID,
+                explorationMode: true,
+                usedCategories: []
+            )
+            scored.append(ScoredMemory(breakdown: breakdown, record: record, source: sourceLabel(for: record)))
+        }
+
+        return diverseSelection(from: scored, limit: limit, conversationID: conversationID)
+    }
+
+    private func diverseSelection(
+        from scored: [ScoredMemory],
+        limit: Int,
+        conversationID: UUID
+    ) -> [ScoredMemory] {
+        var selected: [ScoredMemory] = []
+        var usedCategories = Set<String>()
+        var remaining = scored.sorted { $0.score > $1.score }
+
+        let bestByCategory = Dictionary(grouping: remaining) { categoryKey(for: $0.record) }
+            .values
+            .compactMap { group in group.sorted { $0.score > $1.score }.first }
+            .sorted { $0.score > $1.score }
+
+        for item in bestByCategory where selected.count < limit {
+            var updated = item
+            updated.breakdown = scoreBreakdown(
+                semantic: item.breakdown.semantic,
+                keyword: item.breakdown.keyword,
+                record: item.record,
+                conversationID: conversationID,
+                explorationMode: true,
+                usedCategories: usedCategories
+            )
+            selected.append(updated)
+            usedCategories.insert(categoryKey(for: item.record))
+            remaining.removeAll { memoryID(for: $0.record) == memoryID(for: item.record) }
+        }
+
+        while selected.count < limit, !remaining.isEmpty {
+            let rescored = remaining.map { item -> ScoredMemory in
+                var updated = item
+                updated.breakdown = scoreBreakdown(
+                    semantic: item.breakdown.semantic,
+                    keyword: item.breakdown.keyword,
+                    record: item.record,
+                    conversationID: conversationID,
+                    explorationMode: true,
+                    usedCategories: usedCategories
+                )
+                return updated
+            }.sorted { $0.score > $1.score }
+
+            guard let next = rescored.first else { break }
+            selected.append(next)
+            usedCategories.insert(categoryKey(for: next.record))
+            remaining.removeAll { memoryID(for: $0.record) == memoryID(for: next.record) }
+        }
+
+        return selected
+    }
+
     private func hubOverviewMatches(records: [MemoryHubRecord], limit: Int) -> [ScoredHub] {
         records
             .sorted { $0.updatedAt > $1.updatedAt }
             .prefix(limit)
-            .map { (score: 1, record: $0) }
+            .map { ScoredHub(score: 1, record: $0) }
     }
 
     private func topHubMatches(
@@ -357,11 +516,57 @@ final class MemoryRetriever {
             let categoryBoost: Float = queryWords.contains(record.category.rawValue) ? 0.35 : 0
             let score = max(semanticScore, lexicalScore) + categoryBoost
             guard lexicalScore > 0 || semanticScore > minimumHubSemanticScore || categoryBoost > 0 else { continue }
-            scored.append((score: score, record: record))
+            scored.append(ScoredHub(score: score, record: record))
         }
 
         scored.sort { $0.score > $1.score }
         return Array(scored.prefix(limit))
+    }
+
+    private func scoreBreakdown(
+        semantic: Float,
+        keyword: Float,
+        record: MemoryRecord,
+        conversationID: UUID,
+        explorationMode: Bool,
+        usedCategories: Set<String>
+    ) -> ScoreBreakdown {
+        let category = categoryKey(for: record)
+        let importance = importanceBoost(for: record)
+        let diversity: Float = explorationMode && !usedCategories.contains(category) ? 0.18 : 0
+        let repetition = recentRecallPenalty(for: record, conversationID: conversationID)
+        return ScoreBreakdown(
+            semantic: semantic,
+            keyword: keyword,
+            importance: importance,
+            diversity: diversity,
+            repetitionPenalty: repetition
+        )
+    }
+
+    private func importanceBoost(for record: MemoryRecord) -> Float {
+        let text = "\(record.kind.rawValue) \(categoryKey(for: record)) \(record.content)".lowercased()
+        var boost: Float = 0.05
+        if record.kind == .goal || record.kind == .taskReference { boost += 0.12 }
+        if text.contains("dominus") || text.contains("octobrain") || text.contains("octoloco") { boost += 0.18 }
+        if text.contains("book") || text.contains("podcast") || text.contains("project") { boost += 0.15 }
+        if text.contains("building") || text.contains("writing") || text.contains("working on") { boost += 0.12 }
+        if text.contains("favorite") || text.contains("likes") || text.contains("food") { boost -= 0.02 }
+        return min(0.45, max(0, boost))
+    }
+
+    private func recentRecallPenalty(for record: MemoryRecord, conversationID: UUID) -> Float {
+        let id = memoryID(for: record)
+        let now = Date()
+        guard let event = recallHistory()
+            .filter({ $0.conversationID == conversationID.uuidString && $0.memoryID == id })
+            .max(by: { $0.timestamp < $1.timestamp })
+        else { return 0 }
+
+        let age = now.timeIntervalSince(event.timestamp)
+        guard age < recallPenaltyWindow else { return 0 }
+        let freshness = Float(1 - (age / recallPenaltyWindow))
+        return 0.45 * freshness
     }
 
     private func shouldIncludeCoreLongTermMemory(for query: String) -> Bool {
@@ -393,7 +598,12 @@ final class MemoryRetriever {
             "what is my",
             "what's my",
             "who am i",
-            "do you remember"
+            "do you remember",
+            "tell me another thing",
+            "name another thing",
+            "name something different",
+            "anything else",
+            "what else"
         ]
         return patterns.contains { lowered.contains($0) }
     }
@@ -408,7 +618,10 @@ final class MemoryRetriever {
             "what more",
             "besides that",
             "besides those",
-            "besides the"
+            "besides the",
+            "tell me another thing",
+            "name another thing",
+            "name something different"
         ]
         return patterns.contains { lowered.contains($0) }
     }
@@ -474,6 +687,83 @@ final class MemoryRetriever {
         return filtered
     }
 
+    // MARK: - Recall history
+
+    private func rememberRecallEvents(for records: [MemoryRecord], conversationID: UUID) {
+        guard !records.isEmpty else { return }
+        let now = Date()
+        var history = recallHistory().filter {
+            now.timeIntervalSince($0.timestamp) < recallPenaltyWindow * 2
+        }
+        history.append(contentsOf: records.map {
+            RecallEvent(
+                memoryID: memoryID(for: $0),
+                conversationID: conversationID.uuidString,
+                timestamp: now
+            )
+        })
+        if history.count > maxRecallHistoryEvents {
+            history = Array(history.suffix(maxRecallHistoryEvents))
+        }
+        if let data = try? JSONEncoder().encode(history) {
+            UserDefaults.standard.set(data, forKey: recallHistoryKey)
+        }
+    }
+
+    private func recallHistory() -> [RecallEvent] {
+        guard let data = UserDefaults.standard.data(forKey: recallHistoryKey),
+              let decoded = try? JSONDecoder().decode([RecallEvent].self, from: data)
+        else { return [] }
+        return decoded
+    }
+
+    private func memoryID(for record: MemoryRecord) -> String {
+        [
+            record.scopeRaw,
+            record.conversationID,
+            String(Int(record.createdAt.timeIntervalSince1970)),
+            normalizedContent(record.content)
+        ].joined(separator: "|")
+    }
+
+    private func categoryKey(for record: MemoryRecord) -> String {
+        if let raw = record.categoryRaw, !raw.isEmpty {
+            return raw
+        }
+        if record.scope == .file {
+            return MemoryHubCategory.file.rawValue
+        }
+        if record.kind == .preference { return MemoryHubCategory.preferences.rawValue }
+        if record.kind == .goal { return MemoryHubCategory.goals.rawValue }
+        if record.kind == .taskReference { return MemoryHubCategory.tasks.rawValue }
+        if record.kind == .appInstruction { return MemoryHubCategory.appInstructions.rawValue }
+
+        let text = "\(record.title ?? "") \(record.content)".lowercased()
+        if text.contains("dominus") || text.contains("xcode") || text.contains("swift") || text.contains("ios app") {
+            return MemoryHubCategory.appDevelopment.rawValue
+        }
+        if text.contains("podcast") { return MemoryHubCategory.podcast.rawValue }
+        if text.contains("book") || text.contains("chapter") { return MemoryHubCategory.book.rawValue }
+        if text.contains("god") || text.contains("religion") || text.contains("faith") || text.contains("bible") {
+            return MemoryHubCategory.belief.rawValue
+        }
+        if text.contains("music") || text.contains("song") { return MemoryHubCategory.music.rawValue }
+        if text.contains("security") || text.contains("sop") { return MemoryHubCategory.securityWork.rawValue }
+        if text.contains("project") { return MemoryHubCategory.project.rawValue }
+        if text.contains("favorite") || text.contains("likes") { return MemoryHubCategory.preferences.rawValue }
+        if text.contains("name") || text.contains("identity") { return MemoryHubCategory.identity.rawValue }
+        return MemoryHubCategory.general.rawValue
+    }
+
+    private func sourceLabel(for record: MemoryRecord) -> String {
+        switch record.scope {
+        case .conversation: return "current-chat"
+        case .longTerm: return "long-term"
+        case .wiki: return "wiki"
+        case .file: return "file"
+        }
+    }
+
     // MARK: - Keyword scoring helpers
 
     /// Meaningful words from a string (lowercased, stop-words removed, length > 2)
@@ -523,7 +813,7 @@ final class MemoryRetriever {
     private func formatMemoryContextPack(
         query: String,
         hubMatches: [ScoredHub],
-        coreLongTerm: [MemoryRecord],
+        coreLongTerm: [ScoredMemory],
         globalMatches: [ScoredMemory],
         conversationMatches: [ScoredMemory],
         wantsDifferentFacts: Bool
@@ -537,7 +827,7 @@ final class MemoryRetriever {
             ))
         }
 
-        let longTermRecords = dedupeRecords(coreLongTerm + globalMatches.map(\.record))
+        let longTermRecords = dedupeRecords((coreLongTerm + globalMatches).map(\.record))
         if !longTermRecords.isEmpty {
             sections.append(formatRecords(
                 title: "Specific memory block candidates",
@@ -609,6 +899,69 @@ final class MemoryRetriever {
         return records.filter { record in
             seen.insert(normalizedContent(record.content)).inserted
         }
+    }
+
+    private func dedupeScoredRecords(_ records: [ScoredMemory]) -> [ScoredMemory] {
+        var seen = Set<String>()
+        return records.filter { record in
+            seen.insert(normalizedContent(record.record.content)).inserted
+        }
+    }
+
+    private func traceSteps(
+        query: String,
+        explorationMode: Bool,
+        longTerm: [ScoredMemory],
+        conversation: [ScoredMemory]
+    ) -> [MemoryTraceStep] {
+        var steps: [MemoryTraceStep] = [
+            traceStep(
+                title: explorationMode ? "Memory Exploration Mode" : "Specific Memory Mode",
+                detail: explorationMode
+                    ? "Broad/follow-up recall detected. Retrieval prioritized category diversity, importance, and memories that were not recently used."
+                    : "Specific recall detected. Retrieval prioritized semantic and keyword relevance."
+            )
+        ]
+
+        if !longTerm.isEmpty {
+            steps.append(traceStep(
+                title: "Long-Term Memory Candidates",
+                detail: longTerm.map(traceLine).joined(separator: "\n\n")
+            ))
+        }
+
+        if !conversation.isEmpty {
+            steps.append(traceStep(
+                title: "Current-Chat Candidates",
+                detail: conversation.map(traceLine).joined(separator: "\n\n")
+            ))
+        }
+
+        let count = longTerm.count + conversation.count
+        steps.append(traceStep(
+            title: "Context Pack",
+            detail: "\(count) candidate memory item(s) were handed to Gemma as optional context for: \"\(query)\"."
+        ))
+        return steps
+    }
+
+    private func traceLine(_ scored: ScoredMemory) -> String {
+        let record = scored.record
+        let preview = cleanStoredMemoryContent(record.content)
+        return """
+        Source: \(scored.source)
+        Category: \(categoryKey(for: record))
+        Preview: \(preview)
+        semantic=\(formatScore(scored.breakdown.semantic)) keyword=\(formatScore(scored.breakdown.keyword)) importance=+\(formatScore(scored.breakdown.importance)) diversity=+\(formatScore(scored.breakdown.diversity)) repetition=-\(formatScore(scored.breakdown.repetitionPenalty)) final=\(formatScore(scored.score))
+        """
+    }
+
+    private func traceStep(title: String, detail: String) -> MemoryTraceStep {
+        MemoryTraceStep(title: title, detail: detail, timestamp: Date())
+    }
+
+    private func formatScore(_ score: Float) -> String {
+        String(format: "%.2f", score)
     }
 
     private func compactExchange(userText: String, assistantText: String) -> String {
