@@ -81,7 +81,6 @@ struct ContentView: View {
     private let voiceAutoSendDelay: TimeInterval = 2.5
     private let voiceActivityGraceDelay: TimeInterval = 0.8
     private let listeningSilenceFillerDelay: TimeInterval = 20
-    private let voiceModeAutoExitDelay: TimeInterval = 60
     private let listeningSilenceFillers = [
         "What's up?",
         "You still there?",
@@ -185,6 +184,10 @@ struct ContentView: View {
         .onChange(of: whisper.lastAudioActivityAt) { activityAt in
             handleListeningAudioActivity(activityAt)
         }
+        .onChange(of: audioSettings.voiceModeInactivityTimeout) { _ in
+            guard pttState == .listening else { return }
+            scheduleVoiceModeAutoExit()
+        }
         // Rename alert
         .alert("Rename Chat", isPresented: $showingRenameAlert) {
             TextField("Chat title", text: $renameText)
@@ -265,7 +268,6 @@ struct ContentView: View {
                     return
                 }
                 isVoiceModeTransitioning = false
-                scheduleVoiceModeAutoExit()
                 startVolumeMonitoring()
                 beginListening()
             }
@@ -295,6 +297,7 @@ struct ContentView: View {
         startPulse()
         pttState = .listening
         scheduleListeningSilenceFiller()
+        scheduleVoiceModeAutoExit()
     }
 
     private func returnToIdle() {
@@ -362,7 +365,6 @@ struct ContentView: View {
             latestVisibleVoiceTranscript = visibleTranscript
             latestVisibleVoiceTranscriptUpdatedAt = Date()
         }
-        scheduleVoiceModeAutoExit()
         cancelListeningSilenceFiller()
         if lastVoiceActivityAt == nil {
             lastVoiceActivityAt = whisper.lastAudioActivityAt ?? Date()
@@ -438,7 +440,6 @@ struct ContentView: View {
 
     private func playListeningSilenceFiller() {
         cancelListeningSilenceFiller()
-        scheduleVoiceModeAutoExit()
         resetVoiceAutoSendState()
         stopPulse()
         whisper.cancelRecording()
@@ -449,9 +450,16 @@ struct ContentView: View {
 
     private func scheduleVoiceModeAutoExit() {
         voiceModeAutoExitTask?.cancel()
+        let delay = audioSettings.voiceModeInactivityTimeout
         voiceModeAutoExitTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: UInt64(voiceModeAutoExitDelay * 1_000_000_000))
-            guard !Task.isCancelled, pttState != .idle else { return }
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            guard !Task.isCancelled,
+                  pttState == .listening,
+                  !store.isGenerating,
+                  !SpeechManager.shared.isSpeaking,
+                  WhisperManager.visibleTranscript(from: whisper.liveTranscript).isEmpty,
+                  latestVisibleVoiceTranscript.isEmpty
+            else { return }
             await playVoiceModeSound(named: "DeactivateVoicetoVoice")
             returnToIdle()
         }
@@ -612,7 +620,6 @@ struct ContentView: View {
                 beginListening()
                 return
             }
-            scheduleVoiceModeAutoExit()
             store.send(
                 visibleVoiceText,
                 includeAmbientCues: true,

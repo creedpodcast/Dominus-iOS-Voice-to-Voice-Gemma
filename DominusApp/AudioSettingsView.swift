@@ -68,6 +68,38 @@ struct AudioSettingsView: View {
                 }
 
                 Section {
+                    Stepper(
+                        value: $settings.voiceModeInactivityTimeout,
+                        in: AudioSettingsStore.minimumVoiceModeInactivityTimeout...AudioSettingsStore.maximumVoiceModeInactivityTimeout,
+                        step: AudioSettingsStore.voiceModeInactivityTimeoutStep
+                    ) {
+                        HStack {
+                            Text("Voice inactivity timeout")
+                            Spacer()
+                            Text(durationText(settings.voiceModeInactivityTimeout))
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                        }
+                    }
+
+                    Slider(
+                        value: $settings.voiceModeInactivityTimeout,
+                        in: AudioSettingsStore.minimumVoiceModeInactivityTimeout...AudioSettingsStore.maximumVoiceModeInactivityTimeout,
+                        step: AudioSettingsStore.voiceModeInactivityTimeoutStep
+                    ) {
+                        Text("Voice inactivity timeout")
+                    } minimumValueLabel: {
+                        Text("30s")
+                            .font(.caption2)
+                    } maximumValueLabel: {
+                        Text("15m")
+                            .font(.caption2)
+                    }
+                } footer: {
+                    Text("Voice mode exits after this much user inactivity while Dominus is listening. Time spent generating or speaking does not count against the timer.")
+                }
+
+                Section {
                     Button(role: .destructive) {
                         settings.resetToDefaults()
                     } label: {
@@ -138,5 +170,18 @@ struct AudioSettingsView: View {
 
     private func volumePercent(_ value: Double) -> String {
         "\(Int((value * 100).rounded()))%"
+    }
+
+    private func durationText(_ value: Double) -> String {
+        let seconds = Int(value.rounded())
+        if seconds < 60 {
+            return "\(seconds) sec"
+        }
+        let minutes = seconds / 60
+        let remainder = seconds % 60
+        if remainder == 0 {
+            return "\(minutes) min"
+        }
+        return "\(minutes)m \(remainder)s"
     }
 }
