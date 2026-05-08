@@ -452,6 +452,9 @@ final class ChatStore: ObservableObject {
         if !memoryContext.isEmpty {
             fullSystemPrompt += "\n\n\(memoryContext)"
         }
+        if case let .contextRequest(contextPacket) = capturedMemorySignal {
+            fullSystemPrompt += "\n\n\(memoryContextResolutionPromptBlock(contextPacket))"
+        }
         let recentAmbientContext = recentAmbientEventsPromptBlock(for: conversations[convoIndex])
         if !recentAmbientContext.isEmpty {
             fullSystemPrompt += "\n\n\(recentAmbientContext)"
@@ -576,7 +579,25 @@ final class ChatStore: ObservableObject {
                 }
             }
 
-            if case let .candidates(records) = capturedMemorySignal {
+            if case let .contextRequest(contextPacket) = capturedMemorySignal {
+                let proposedMemory = memoryCandidateFromAssistantAcknowledgement(
+                    cleanedAssistant,
+                    fallbackContext: contextPacket
+                )
+                let records = MemoryRetriever.shared.rememberContextCandidate(
+                    conversationID: conversations[convoIndex].id,
+                    title: "Dominus proposed memory summary",
+                    content: proposedMemory
+                )
+                if !records.isEmpty {
+                    let preview = records.map(\.content).joined(separator: "\n")
+                    appendMemoryStatus(
+                        "Memory Suggestion:\nAdded Memory Preview:\n\(preview)\nSay yes to add this to Memory Journal, or no to dismiss.",
+                        convoIndex: convoIndex,
+                        speak: false
+                    )
+                }
+            } else if case let .candidates(records) = capturedMemorySignal {
                 let preview = records.map(\.content).joined(separator: "\n")
                 appendMemoryStatus(
                     "Memory Suggestion:\nAdded Memory Preview:\n\(preview)\nSay yes to add this to Memory Journal, or no to dismiss.",
@@ -969,10 +990,14 @@ final class ChatStore: ObservableObject {
 
     private enum CapturedMemorySignal {
         case candidates([MemoryRecord])
+        case contextRequest(String)
     }
 
     private func captureMemorySignals(from userText: String, in conversation: Conversation, conversationID: UUID) -> CapturedMemorySignal? {
         if let explicitMemory = explicitRememberContent(from: userText, in: conversation) {
+            if isRecentContextMemoryPacket(explicitMemory) {
+                return .contextRequest(explicitMemory)
+            }
             let records = MemoryRetriever.shared.rememberCandidates(
                 conversationID: conversationID,
                 title: "User asked Dominus to remember",
@@ -1105,26 +1130,32 @@ final class ChatStore: ObservableObject {
             #"(?i)\bremember(?: this| that)?:?\s+(.+)"#,
             #"(?i)\bremember for later:?\s+(.+)"#,
             #"(?i)\badd this to (?:your )?memory:?\s+(.+)"#,
-            #"(?i)\bi want you to remember(?: this| that)?:?\s+(.+)"#
+            #"(?i)\bi want you to remember(?: this| that)?:?\s+(.+)"#,
+            #"(?i)\bi want (?:the\s+)?ai to remember(?: this| that)?:?\s+(.+)"#,
+            #"(?i)\bi want dominus to remember(?: this| that)?:?\s+(.+)"#
         ]
-        if let direct = firstRegexCapture(in: text, patterns: directPatterns),
-           !isDeicticMemoryReference(direct) {
+        if let direct = firstRegexCapture(in: text, patterns: directPatterns) {
+            if isDeicticMemoryReference(direct) {
+                return recentMemoryContext(in: conversation, hint: direct)
+            }
             return direct
         }
 
         let contextReferencePatterns = [
             #"(?i)\bremember\s+(?:this|that|it)\b\s*[.!?]?$"#,
             #"(?i)\bi want you to remember\s+(?:this|that|it)\b\s*[.!?]?$"#,
+            #"(?i)\bi want (?:the\s+)?ai to remember\s+(?:this|that|it)\b\s*[.!?]?$"#,
+            #"(?i)\bi want dominus to remember\s+(?:this|that|it)\b\s*[.!?]?$"#,
             #"(?i)\badd\s+(?:this|that|it)\s+to\s+(?:your\s+)?memory\b\s*[.!?]?$"#
         ]
         if matchesAnyRegex(text, patterns: contextReferencePatterns) {
-            return recentMemoryContext(in: conversation)
+            return recentMemoryContext(in: conversation, hint: text)
         }
 
         return nil
     }
 
-    private func recentMemoryContext(in conversation: Conversation, maxMessages: Int = 10) -> String? {
+    private func recentMemoryContext(in conversation: Conversation, hint: String? = nil, maxMessages: Int = 10) -> String? {
         let relevantMessages = conversation.messages
             .dropLast()
             .reversed()
@@ -1140,6 +1171,8 @@ final class ChatStore: ObservableObject {
             guard !matchesAnyRegex(content, patterns: [
                 #"(?i)\bremember\s+(?:this|that|it)\b"#,
                 #"(?i)\bi want you to remember\s+(?:this|that|it)\b"#,
+                #"(?i)\bi want (?:the\s+)?ai to remember\s+(?:this|that|it)\b"#,
+                #"(?i)\bi want dominus to remember\s+(?:this|that|it)\b"#,
                 #"(?i)\badd\s+(?:this|that|it)\s+to\s+(?:your\s+)?memory\b"#
             ]) else { return nil }
 
@@ -1153,7 +1186,79 @@ final class ChatStore: ObservableObject {
             return previousMeaningfulMessage(in: conversation)
         }
 
-        return "Recent conversation to remember:\n" + lines.joined(separator: "\n")
+        let hintLine = memoryReferenceHintLine(from: hint)
+        return (["Recent conversation to remember:", hintLine] + lines)
+            .compactMap { $0 }
+            .joined(separator: "\n")
+    }
+
+    private func isRecentContextMemoryPacket(_ text: String) -> Bool {
+        text.hasPrefix("Recent conversation to remember:")
+    }
+
+    private func memoryContextResolutionPromptBlock(_ contextPacket: String) -> String {
+        """
+        The user is asking Dominus to remember "this", "that", or "it" from recent conversation.
+
+        Recent context candidate:
+        \(contextPacket)
+
+        In your reply:
+        - Briefly confirm that you understand.
+        - Include one concise sentence beginning with "I should remember that".
+        - That sentence must describe what Creed wants remembered, not the word "this".
+        - Base it only on the recent context candidate.
+        - Do not say the memory has already been permanently saved; Creed still needs to approve the Memory Suggestion.
+        """
+    }
+
+    private func memoryCandidateFromAssistantAcknowledgement(_ assistantText: String, fallbackContext: String) -> String {
+        let cleaned = assistantText
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if let sentence = firstMemorySummarySentence(in: cleaned) {
+            return normalizeAssistantMemorySummary(sentence)
+        }
+
+        return fallbackContext
+    }
+
+    private func firstMemorySummarySentence(in text: String) -> String? {
+        let nsText = text as NSString
+        let pattern = #"(?i)\bI should remember that\s+[^.!?\n]{8,320}[.!?]?"#
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(in: text, range: NSRange(location: 0, length: nsText.length)),
+              let range = Range(match.range, in: text)
+        else { return nil }
+        return String(text[range]).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func normalizeAssistantMemorySummary(_ sentence: String) -> String {
+        var memory = sentence
+            .replacingOccurrences(
+                of: #"(?i)^I should remember that\s+"#,
+                with: "",
+                options: .regularExpression
+            )
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: ".!?"))
+
+        memory = memory.replacingOccurrences(
+            of: #"(?i)^you(?:'re| are| were)?\s+"#,
+            with: "Creed is ",
+            options: .regularExpression
+        )
+        memory = memory.replacingOccurrences(
+            of: #"(?i)^your\s+"#,
+            with: "Creed's ",
+            options: .regularExpression
+        )
+
+        if memory.range(of: #"(?i)\b(creed|user)\b"#, options: .regularExpression) == nil {
+            memory = "Creed wants Dominus to remember that \(memory)"
+        }
+        return String(memory.prefix(1)).uppercased() + String(memory.dropFirst())
     }
 
     private func memoryCandidateContent(from text: String) -> String? {
@@ -1202,7 +1307,22 @@ final class ChatStore: ObservableObject {
             .lowercased()
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .trimmingCharacters(in: CharacterSet(charactersIn: ".!?"))
-        return ["this", "that", "it"].contains(normalized)
+        if ["this", "that", "it"].contains(normalized) { return true }
+        return normalized.range(
+            of: #"^(this|that|it)\b(?:\s+(?:conversation|topic|book|idea|thing|part|detail|point|about\b.*))?$"#,
+            options: .regularExpression
+        ) != nil
+    }
+
+    private func memoryReferenceHintLine(from hint: String?) -> String? {
+        guard let hint else { return nil }
+        let normalized = hint
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty,
+              !["this", "that", "it", "this.", "that.", "it."].contains(normalized.lowercased())
+        else { return nil }
+        return "Reference request: \(normalized)"
     }
 
     private func previousMeaningfulMessage(in conversation: Conversation) -> String? {

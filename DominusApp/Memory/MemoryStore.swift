@@ -110,6 +110,24 @@ struct MemoryRecordMetadata {
     var semanticContext: String
 }
 
+enum MemoryEmbeddingAspect: String, CaseIterable, Codable, Sendable {
+    case literal
+    case topical
+    case emotional
+    case preference
+    case identity
+
+    var promptLabel: String {
+        switch self {
+        case .literal:    return "literal"
+        case .topical:    return "topic"
+        case .emotional:  return "emotional"
+        case .preference: return "preference"
+        case .identity:   return "identity"
+        }
+    }
+}
+
 enum MemoryMetadataBuilder {
     static func build(
         content: String,
@@ -315,6 +333,11 @@ final class MemoryRecord {
     var categoryRaw: String?
     var content: String
     var embeddingData: Data      // [Float] packed as raw bytes
+    var literalEmbeddingData: Data = Data()
+    var topicalEmbeddingData: Data = Data()
+    var emotionalEmbeddingData: Data = Data()
+    var preferenceEmbeddingData: Data = Data()
+    var identityEmbeddingData: Data = Data()
     var topicsRaw: String = ""
     var entitiesRaw: String = ""
     var meaningSignalsRaw: String = ""
@@ -386,6 +409,20 @@ final class MemoryRecord {
         semanticContext.isEmpty ? content : semanticContext
     }
 
+    var hasEmbeddingVariants: Bool {
+        !literalEmbeddingData.isEmpty &&
+        !topicalEmbeddingData.isEmpty &&
+        !emotionalEmbeddingData.isEmpty &&
+        !preferenceEmbeddingData.isEmpty &&
+        !identityEmbeddingData.isEmpty
+    }
+
+    var embeddingVariantCount: Int {
+        MemoryEmbeddingAspect.allCases.filter {
+            !embeddingData(for: $0).isEmpty
+        }.count
+    }
+
     var retrievalText: String {
         [
             title,
@@ -398,6 +435,50 @@ final class MemoryRecord {
         ]
         .compactMap { $0 }
         .joined(separator: "\n")
+    }
+
+    func embeddingData(for aspect: MemoryEmbeddingAspect) -> Data {
+        switch aspect {
+        case .literal:    return literalEmbeddingData
+        case .topical:    return topicalEmbeddingData
+        case .emotional:  return emotionalEmbeddingData
+        case .preference: return preferenceEmbeddingData
+        case .identity:   return identityEmbeddingData
+        }
+    }
+
+    func embeddingText(for aspect: MemoryEmbeddingAspect) -> String {
+        switch aspect {
+        case .literal:
+            return content
+        case .topical:
+            return [
+                title.map { "Title: \($0)" },
+                "Topics: \(topics.joined(separator: ", "))",
+                "Category: \(categoryRaw ?? MemoryStore.uncategorizedCategoryKey)",
+                "Memory: \(content)"
+            ].compactMap { $0 }.joined(separator: "\n")
+        case .emotional:
+            return [
+                emotionalToneRaw.map { "Emotional tone: \($0)" },
+                meaningSignals.isEmpty ? nil : "Meaning signals: \(meaningSignals.joined(separator: ", "))",
+                "Memory: \(content)"
+            ].compactMap { $0 }.joined(separator: "\n")
+        case .preference:
+            return [
+                "Preference, goal, concern, or constraint for Creed.",
+                "Kind: \(kind.promptLabel)",
+                meaningSignals.isEmpty ? nil : "Meaning signals: \(meaningSignals.joined(separator: ", "))",
+                "Memory: \(content)"
+            ].compactMap { $0 }.joined(separator: "\n")
+        case .identity:
+            return [
+                "Identity, style, relationship, project, or personal-history signal for Creed.",
+                entities.isEmpty ? nil : "People or entities: \(entities.joined(separator: ", "))",
+                topics.isEmpty ? nil : "Topics: \(topics.joined(separator: ", "))",
+                "Memory: \(content)"
+            ].compactMap { $0 }.joined(separator: "\n")
+        }
     }
 
     private func splitMetadata(_ raw: String) -> [String] {
@@ -448,6 +529,7 @@ final class MemoryStore {
     private let container: ModelContainer
     private var context: ModelContext { container.mainContext }
     private let customCategoriesKey = "dominus_memory_custom_categories"
+    private var scheduledEmbeddingBackfillKeys = Set<String>()
 
     init() {
         do {
@@ -510,6 +592,7 @@ final class MemoryStore {
         if scope != .conversation {
             rebuildHub()
         }
+        scheduleRecordEmbedding(record: record, content: content)
         return record
     }
 
@@ -657,9 +740,9 @@ final class MemoryStore {
         let data = MemoryEmbedder.shared.vectorToData(embedding)
         let normalizedContent = normalized(content)
 
-        let matches = fetch(scope: scope).filter { record in
+        let matches = fetchRaw(scope: scope).filter { record in
             if let sourceID {
-                return record.sourceID == sourceID
+                return record.sourceID == sourceID && normalized(record.content) == normalizedContent
             }
             return normalized(record.content) == normalizedContent
         }
@@ -667,6 +750,44 @@ final class MemoryStore {
         guard !matches.isEmpty else { return }
         matches.forEach { record in
             record.embeddingData = data
+            record.updatedAt = Date()
+        }
+        try? context.save()
+    }
+
+    func updateEmbeddingVariants(
+        scope: MemoryScope,
+        sourceID: String?,
+        content: String,
+        embeddings: [MemoryEmbeddingAspect: [Float]]
+    ) {
+        guard !embeddings.isEmpty else { return }
+        let normalizedContent = normalized(content)
+
+        let matches = fetchRaw(scope: scope).filter { record in
+            if let sourceID {
+                return record.sourceID == sourceID && normalized(record.content) == normalizedContent
+            }
+            return normalized(record.content) == normalizedContent
+        }
+
+        guard !matches.isEmpty else { return }
+        matches.forEach { record in
+            for (aspect, vector) in embeddings {
+                let data = MemoryEmbedder.shared.vectorToData(vector)
+                switch aspect {
+                case .literal:
+                    record.literalEmbeddingData = data
+                case .topical:
+                    record.topicalEmbeddingData = data
+                case .emotional:
+                    record.emotionalEmbeddingData = data
+                case .preference:
+                    record.preferenceEmbeddingData = data
+                case .identity:
+                    record.identityEmbeddingData = data
+                }
+            }
             record.updatedAt = Date()
         }
         try? context.save()
@@ -696,6 +817,7 @@ final class MemoryStore {
         apply(metadata, to: record)
         record.updatedAt = Date()
         record.embeddingData = Data()
+        clearEmbeddingVariants(for: record)
         try? context.save()
 
         if record.scope != .conversation {
@@ -804,6 +926,15 @@ final class MemoryStore {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    private func fetchRaw(scope: MemoryScope) -> [MemoryRecord] {
+        let raw = scope.rawValue
+        let descriptor = FetchDescriptor<MemoryRecord>(
+            predicate: #Predicate { $0.scopeRaw == raw },
+            sortBy: [SortDescriptor(\.updatedAt, order: .reverse)]
+        )
+        return (try? context.fetch(descriptor)) ?? []
+    }
+
     private func scheduleHubEmbedding(categoryKey: String, summary: String) {
         Task.detached(priority: .utility) {
             let embedding = MemoryEmbedder.shared.embed(summary)
@@ -821,8 +952,24 @@ final class MemoryStore {
         let scope = record.scope
         let sourceID = record.sourceID
         let searchContent = record.embeddingText
+        let backfillKey = [
+            scope.rawValue,
+            sourceID ?? "",
+            normalized(content)
+        ].joined(separator: "|")
+        guard scheduledEmbeddingBackfillKeys.insert(backfillKey).inserted else { return }
+        let variantTexts = Dictionary(
+            uniqueKeysWithValues: MemoryEmbeddingAspect.allCases.map {
+                ($0, record.embeddingText(for: $0))
+            }
+        )
         Task.detached(priority: .utility) {
             let embedding = MemoryEmbedder.shared.embed(searchContent)
+            let variantEmbeddings = variantTexts.reduce(into: [MemoryEmbeddingAspect: [Float]]()) { result, item in
+                if let vector = MemoryEmbedder.shared.embed(item.value) {
+                    result[item.key] = vector
+                }
+            }
             await MainActor.run {
                 MemoryStore.shared.updateEmbedding(
                     scope: scope,
@@ -830,6 +977,13 @@ final class MemoryStore {
                     content: content,
                     embedding: embedding
                 )
+                MemoryStore.shared.updateEmbeddingVariants(
+                    scope: scope,
+                    sourceID: sourceID,
+                    content: content,
+                    embeddings: variantEmbeddings
+                )
+                MemoryStore.shared.scheduledEmbeddingBackfillKeys.remove(backfillKey)
             }
         }
     }
@@ -843,20 +997,31 @@ final class MemoryStore {
         record.semanticContext = metadata.semanticContext
     }
 
+    private func clearEmbeddingVariants(for record: MemoryRecord) {
+        record.literalEmbeddingData = Data()
+        record.topicalEmbeddingData = Data()
+        record.emotionalEmbeddingData = Data()
+        record.preferenceEmbeddingData = Data()
+        record.identityEmbeddingData = Data()
+    }
+
     private func hydrateMetadataIfNeeded(_ records: [MemoryRecord]) -> [MemoryRecord] {
         var changed = false
-        for record in records where record.semanticContext.isEmpty {
-            let metadata = MemoryMetadataBuilder.build(
-                content: record.content,
-                kind: record.kind,
-                categoryKey: record.categoryRaw,
-                title: record.title
-            )
-            apply(metadata, to: record)
-            if record.embeddingData.isEmpty {
+        for record in records {
+            if record.semanticContext.isEmpty {
+                let metadata = MemoryMetadataBuilder.build(
+                    content: record.content,
+                    kind: record.kind,
+                    categoryKey: record.categoryRaw,
+                    title: record.title
+                )
+                apply(metadata, to: record)
+                changed = true
+            }
+
+            if record.embeddingData.isEmpty || !record.hasEmbeddingVariants {
                 scheduleRecordEmbedding(record: record, content: record.content)
             }
-            changed = true
         }
         if changed {
             try? context.save()

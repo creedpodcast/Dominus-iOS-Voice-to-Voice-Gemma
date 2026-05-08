@@ -332,6 +332,7 @@ private struct MemoryRecordRow: View {
             entities.isEmpty ? nil : "Entities: \(entities)",
             signals.isEmpty ? nil : "Signals: \(signals)",
             tone.map { "Tone: \($0)" },
+            "Embeddings: \(memory.embeddingVariantCount)/\(MemoryEmbeddingAspect.allCases.count)",
             "Importance: \(importance)"
         ].compactMap { $0 }
         return parts.joined(separator: "  ")

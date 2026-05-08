@@ -9,6 +9,7 @@ struct MemoryEmbedder: @unchecked Sendable {
     static let shared = MemoryEmbedder()
 
     private let embedding: NLEmbedding?
+    private let embeddingLock = NSLock()
 
     init() {
         self.embedding = NLEmbedding.sentenceEmbedding(for: .english)
@@ -21,6 +22,8 @@ struct MemoryEmbedder: @unchecked Sendable {
     func embed(_ text: String) -> [Float]? {
         guard let embedding else { return nil }
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        embeddingLock.lock()
+        defer { embeddingLock.unlock() }
         guard let vector = embedding.vector(for: text) else { return nil }
         return vector.map { Float($0) }
     }

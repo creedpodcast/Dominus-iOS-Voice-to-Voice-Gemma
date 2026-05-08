@@ -31,6 +31,7 @@ final class MemoryRetriever {
 
     private struct ScoreBreakdown {
         var semantic: Float
+        var semanticAspect: String? = nil
         var keyword: Float
         var importance: Float
         var diversity: Float
@@ -191,7 +192,53 @@ final class MemoryRetriever {
     }
 
     @discardableResult
+    func rememberContextCandidate(
+        conversationID: UUID,
+        title: String = "Review recent context",
+        content: String
+    ) -> [MemoryRecord] {
+        let cleaned = cleanStoredMemoryContent(content)
+        guard !cleaned.isEmpty else { return [] }
+        guard !hasSimilarCandidate(conversationID: conversationID, content: cleaned) else { return [] }
+
+        let sourceID = "context-candidate:\(UUID().uuidString)"
+        let record = store.insert(
+            conversationID: conversationID,
+            kind: .memoryCandidate,
+            scope: .conversation,
+            title: title,
+            sourceID: sourceID,
+            categoryKey: MemoryHubCategory.general.rawValue,
+            content: cleaned,
+            embedding: nil
+        )
+        store.pruneIfNeeded(conversationID: conversationID, keepLatest: 160)
+        return [record]
+    }
+
+    @discardableResult
     func acceptCandidate(_ record: MemoryRecord) -> MemoryRecord? {
+        if record.sourceID?.hasPrefix("context-candidate:") == true {
+            let content = cleanStoredMemoryContent(record.content)
+            guard !content.isEmpty else {
+                store.delete(record)
+                return nil
+            }
+            let saved = store.insert(
+                conversationID: nil,
+                kind: .taskReference,
+                scope: .longTerm,
+                title: record.title,
+                sourceID: nil,
+                categoryKey: record.categoryRaw,
+                content: content,
+                embedding: nil
+            )
+            scheduleEmbeddingBackfill(scope: .longTerm, sourceID: nil, content: content)
+            store.delete(record)
+            return saved
+        }
+
         let atoms = MemoryExtractor.extract(from: record.content, maxAtoms: 1)
         let atom = atoms.first
         let content = atom?.content ?? cleanStoredMemoryContent(record.content)
@@ -380,16 +427,12 @@ final class MemoryRetriever {
             // ── Semantic path ──────────────────────────────────────────
             print("🔍 RAG: using semantic search | candidates: \(candidates.count)")
             for record in candidates {
-                let semanticScore: Float
-                if record.embeddingData.isEmpty {
-                    semanticScore = 0
-                } else {
-                    let vec = embedder.dataToVector(record.embeddingData)
-                    semanticScore = embedder.cosineSimilarity(qv, vec)
-                }
+                let semanticMatch = bestSemanticMatch(queryVector: qv, record: record)
+                let semanticScore = semanticMatch.score
                 let lexicalScore = keywordScore(queryWords: queryWords, text: record.retrievalText)
                 let breakdown = scoreBreakdown(
                     semantic: semanticScore,
+                    semanticAspect: semanticMatch.aspect,
                     keyword: lexicalScore,
                     record: record,
                     conversationID: conversationID,
@@ -432,15 +475,16 @@ final class MemoryRetriever {
         var scored: [ScoredMemory] = []
 
         for record in candidates {
-            let semanticScore: Float
-            if let queryVec, !record.embeddingData.isEmpty {
-                semanticScore = embedder.cosineSimilarity(queryVec, embedder.dataToVector(record.embeddingData))
+            let semanticMatch: (score: Float, aspect: String?)
+            if let queryVec {
+                semanticMatch = bestSemanticMatch(queryVector: queryVec, record: record)
             } else {
-                semanticScore = 0
+                semanticMatch = (0, nil)
             }
             let lexicalScore = keywordScore(queryWords: queryWords, text: record.retrievalText)
             let breakdown = scoreBreakdown(
-                semantic: semanticScore,
+                semantic: semanticMatch.score,
+                semanticAspect: semanticMatch.aspect,
                 keyword: lexicalScore,
                 record: record,
                 conversationID: conversationID,
@@ -546,6 +590,7 @@ final class MemoryRetriever {
 
     private func scoreBreakdown(
         semantic: Float,
+        semanticAspect: String? = nil,
         keyword: Float,
         record: MemoryRecord,
         conversationID: UUID,
@@ -558,11 +603,36 @@ final class MemoryRetriever {
         let repetition = recentRecallPenalty(for: record, conversationID: conversationID)
         return ScoreBreakdown(
             semantic: semantic,
+            semanticAspect: semanticAspect,
             keyword: keyword,
             importance: importance,
             diversity: diversity,
             repetitionPenalty: repetition
         )
+    }
+
+    private func bestSemanticMatch(
+        queryVector: [Float],
+        record: MemoryRecord
+    ) -> (score: Float, aspect: String?) {
+        var bestScore: Float = 0
+        var bestAspect: String?
+
+        func consider(_ data: Data, aspect: String) {
+            guard !data.isEmpty else { return }
+            let score = embedder.cosineSimilarity(queryVector, embedder.dataToVector(data))
+            if score > bestScore {
+                bestScore = score
+                bestAspect = aspect
+            }
+        }
+
+        consider(record.embeddingData, aspect: "rich")
+        for aspect in MemoryEmbeddingAspect.allCases {
+            consider(record.embeddingData(for: aspect), aspect: aspect.promptLabel)
+        }
+
+        return (bestScore, bestAspect)
     }
 
     private func importanceBoost(for record: MemoryRecord) -> Float {
@@ -995,7 +1065,7 @@ final class MemoryRetriever {
         Category: \(categoryKey(for: record))
         Metadata: \(metadata.isEmpty ? "none" : String(metadata.dropFirst(2).dropLast()))
         Preview: \(preview)
-        semantic=\(formatScore(scored.breakdown.semantic)) keyword=\(formatScore(scored.breakdown.keyword)) importance=+\(formatScore(scored.breakdown.importance)) diversity=+\(formatScore(scored.breakdown.diversity)) repetition=-\(formatScore(scored.breakdown.repetitionPenalty)) final=\(formatScore(scored.score))
+        semantic=\(formatScore(scored.breakdown.semantic)) aspect=\(scored.breakdown.semanticAspect ?? "none") keyword=\(formatScore(scored.breakdown.keyword)) importance=+\(formatScore(scored.breakdown.importance)) diversity=+\(formatScore(scored.breakdown.diversity)) repetition=-\(formatScore(scored.breakdown.repetitionPenalty)) final=\(formatScore(scored.score))
         """
     }
 

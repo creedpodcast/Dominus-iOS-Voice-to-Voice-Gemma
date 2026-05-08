@@ -37,7 +37,7 @@ Talk to an AI that talks back. Tap once to speak, then pause — after real word
 - **Sentence-complete TTS chunking** — sentences fire to TTS the instant their punctuation lands, never mid-sentence; only true runaways (>300 chars) ever get cut
 - **Voice thinking fillers** — while Gemma is preparing a voice response, Dominus can speak short local filler phrases such as quick greetings, light thinking sounds, or deeper-thinking phrases without adding them to the LLM prompt or chat log
 - **Listening-silence check-ins** — if voice mode hears no visible transcript for about 20 seconds, Dominus gently checks in and then returns to listening
-- **Voice-mode entry/exit cues** — local sounds play before listening starts and when voice mode exits; voice mode exits after the selected listening-only inactivity timeout without renewed user activity
+- **Voice-mode entry/exit cues** — local sounds play during voice-mode entry and exit without blocking the first recording; voice mode exits after the selected listening-only inactivity timeout without renewed user activity
 - **Per-message action bar on AI replies** — Copy (clipboard, ✓ flash confirms), Share (system share sheet), and Speaker button under every assistant bubble. Tap the speaker to hear any past response read aloud; tap it again to stop mid-playback. Speaker icon swaps to a stop icon while that specific message is playing so state is always visible.
 - **Selectable bubble text** — long-press any message (user or AI) to select and copy partial text.
 - **Input field auto-clears on send** — text field empties the moment the send button is tapped; no manual deletion required before typing the next message.
@@ -46,8 +46,11 @@ Talk to an AI that talks back. Tap once to speak, then pause — after real word
 - **Memory Journal** — one editable long-term memory page where users can view, add, edit, delete, and summarize approved memories without separate memory titles
 - **Memory suggestions** — Dominus can detect possible memories, show Yes/No controls, accept spoken/text confirmation, and show darkened "Added to Memory" / "Forgot Memory" status bubbles in the chat
 - RAG long-term memory (semantic search + keyword fallback) — retrieves from the Memory Journal and current-chat summaries while filtering memory status bubbles out of the LLM prompt
+- **Rich memory records** — saved memories track topics, entities, meaning signals, emotional tone, importance, recurrence, source IDs, and generated semantic context for less literal recall
+- **Multiple memory embeddings** — each memory can carry literal, topical, emotional, preference, and identity/style vectors; retrieval uses the strongest matching meaning angle
+- **Context-aware "remember this" flow** — deictic memory requests ask Gemma to summarize what should be remembered from recent turns, then show the interpreted memory as a Yes/No suggestion before journal storage
 - **Diverse memory recall** — broad questions such as "what do you remember about me?" use category diversity, importance boosts, and recent-recall penalties so Dominus avoids repeating the same facts
-- **Memory retrieval trace** — Memory Journal shows why recent memory candidates were retrieved, including semantic score, keyword score, importance boost, repetition penalty, final score, source, and category
+- **Memory retrieval trace** — Memory Journal shows why recent memory candidates were retrieved, including semantic score, matched semantic aspect, keyword score, importance boost, repetition penalty, final score, source, and category
 - **AI-managed memory cleanup** — saved memories are first normalized into Creed-focused facts, then Gemma refines messy entries into concise third-person summaries in the background when the app is idle
 - LLM-generated chat titles (after 5 user turns or on chat exit) and absolute-date timestamps in the sidebar
 - User profile with auto-extraction ("my name is X" → stored as fact) **plus an editable Profile sheet** (person.circle button) for manual facts and a free-text "How should Dominus talk to you?" persona prompt
@@ -151,15 +154,15 @@ The same single button controls every step. No hold-to-talk. Auto-send only star
 ### Memory Journal + RAG
 | Component | Details |
 |---|---|
-| Vector embeddings | `NLEmbedding.sentenceEmbedding` — Apple built-in 512-dim model |
+| Vector embeddings | `NLEmbedding.sentenceEmbedding` — Apple built-in 512-dim model; memory records can store rich-context plus literal, topical, emotional, preference, and identity/style aspect embeddings |
 | Similarity | vDSP cosine similarity (hardware-accelerated) |
-| Storage | SwiftData (on-device persistence for memory records and embeddings) |
+| Storage | SwiftData (on-device persistence for memory records, metadata, and embeddings) |
 | Memory Journal | Single user-facing long-term memory surface with editable description-first entries |
-| Memory suggestions | Conversation-scoped candidates that can be accepted into the Memory Journal or dismissed |
+| Memory suggestions | Conversation-scoped candidates that can be accepted into the Memory Journal or dismissed; "remember this/that/it" asks Gemma to interpret recent turns before showing the suggestion |
 | Retrieval | Memory Journal entries and current-chat summaries are scored, filtered, and injected only when relevant |
 | Diverse recall | Broad/follow-up memory questions activate exploration mode, balancing semantic relevance with category diversity, importance, and recently-used-memory penalties |
 | Recall history | Recently retrieved memory fingerprints are tracked locally in `UserDefaults` and downranked for a short window so repeated questions can surface different facts |
-| Traceability | Memory Journal includes a retrieval trace with source, category, semantic score, keyword score, importance boost, repetition penalty, and final score |
+| Traceability | Memory Journal includes a retrieval trace with source, category, semantic score, matched semantic aspect, keyword score, importance boost, repetition penalty, and final score |
 | Normalization | Common first-person memory phrases are converted into Creed-focused facts before storage; idle Gemma refinement rewrites long or messy memories into compact third-person summaries |
 | File memory groundwork | `MemoryScope.file` is reserved for future chunked file indexing: file → chunks → embeddings → searchable candidates |
 | Raw history | Latest 3-4 turns kept in context — older current-chat turns are compacted into conversation-scoped RAG summaries |
