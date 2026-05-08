@@ -101,6 +101,208 @@ struct MemoryCategoryInfo: Identifiable, Hashable {
     var isCustom: Bool
 }
 
+struct MemoryRecordMetadata {
+    var topics: [String]
+    var entities: [String]
+    var meaningSignals: [String]
+    var emotionalTone: String?
+    var importanceScore: Double
+    var semanticContext: String
+}
+
+enum MemoryMetadataBuilder {
+    static func build(
+        content: String,
+        kind: MemoryKind,
+        categoryKey: String?,
+        title: String?
+    ) -> MemoryRecordMetadata {
+        let text = normalized(content)
+        let lower = text.lowercased()
+        let category = categoryKey ?? MemoryStore.uncategorizedCategoryKey
+        let topics = inferredTopics(from: lower, kind: kind, categoryKey: category)
+        let entities = inferredEntities(from: text)
+        let signals = inferredMeaningSignals(from: lower, kind: kind)
+        let tone = inferredTone(from: lower)
+        let importance = inferredImportance(
+            from: lower,
+            kind: kind,
+            categoryKey: category,
+            topicCount: topics.count,
+            entityCount: entities.count
+        )
+
+        let contextParts = [
+            title.map { "Title: \($0)" },
+            "Kind: \(kind.promptLabel)",
+            "Category: \(category)",
+            topics.isEmpty ? nil : "Topics: \(topics.joined(separator: ", "))",
+            entities.isEmpty ? nil : "People or entities: \(entities.joined(separator: ", "))",
+            signals.isEmpty ? nil : "Meaning signals: \(signals.joined(separator: ", "))",
+            tone.map { "Tone: \($0)" },
+            "Memory: \(text)"
+        ].compactMap { $0 }
+
+        return MemoryRecordMetadata(
+            topics: topics,
+            entities: entities,
+            meaningSignals: signals,
+            emotionalTone: tone,
+            importanceScore: importance,
+            semanticContext: contextParts.joined(separator: "\n")
+        )
+    }
+
+    private static func normalized(_ text: String) -> String {
+        text.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func inferredTopics(from lower: String, kind: MemoryKind, categoryKey: String) -> [String] {
+        var topics: [String] = []
+        func add(_ topic: String) {
+            guard !topics.contains(topic) else { return }
+            topics.append(topic)
+        }
+
+        add(categoryKey.replacingOccurrences(of: "custom:", with: ""))
+        if kind == .preference { add("preference") }
+        if kind == .goal { add("goal") }
+        if kind == .taskReference { add("task") }
+        if kind == .appInstruction { add("instruction") }
+
+        let topicRules: [(String, [String])] = [
+            ("identity", ["name", "called", "identity", "profile", "occupation", "role"]),
+            ("location", ["location", "city", "state", "lives", "home"]),
+            ("relationship", ["wife", "family", "friend", "team", "relationship"]),
+            ("health", ["gym", "workout", "fitness", "diet", "health", "sleep"]),
+            ("writing", ["book", "writing", "chapter", "story", "novel", "manuscript"]),
+            ("project", ["project", "building", "working on", "app", "startup"]),
+            ("dominus", ["dominus", "assistant", "voice", "memory", "rag", "swiftui", "xcode", "ios"]),
+            ("design", ["design", "ui", "ux", "interface", "feel", "style"]),
+            ("faith", ["god", "faith", "bible", "scripture", "prayer", "belief"]),
+            ("business", ["business", "brand", "company", "store", "customer"]),
+            ("finance", ["money", "budget", "income", "finance", "invest"]),
+            ("security", ["security", "sop", "risk", "threat", "investigation"]),
+            ("music", ["music", "song", "album", "artist"]),
+            ("podcast", ["podcast", "episode", "show"]),
+            ("learning", ["course", "class", "training", "study", "learn"])
+        ]
+
+        for (topic, needles) in topicRules where needles.contains(where: { lower.contains($0) }) {
+            add(topic)
+        }
+
+        return Array(topics.prefix(8))
+    }
+
+    private static func inferredEntities(from text: String) -> [String] {
+        let stopWords: Set<String> = [
+            "Creed", "User", "Dominus", "Memory", "The", "This", "That", "And", "But",
+            "For", "With", "From", "When", "Where", "What", "Why", "How"
+        ]
+        guard let regex = try? NSRegularExpression(pattern: #"\b[A-Z][A-Za-z0-9]*(?:\s+[A-Z][A-Za-z0-9]*){0,3}\b"#) else {
+            return []
+        }
+        let nsText = text as NSString
+        let matches = regex.matches(in: text, range: NSRange(location: 0, length: nsText.length))
+        var seen = Set<String>()
+        let entities = matches.compactMap { match -> String? in
+            let value = nsText.substring(with: match.range)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard value.count > 2,
+                  !stopWords.contains(value),
+                  !seen.contains(value)
+            else { return nil }
+            seen.insert(value)
+            return value
+        }
+        return Array(entities.prefix(8))
+    }
+
+    private static func inferredMeaningSignals(from lower: String, kind: MemoryKind) -> [String] {
+        var signals: [String] = []
+        func add(_ signal: String) {
+            guard !signals.contains(signal) else { return }
+            signals.append(signal)
+        }
+
+        switch kind {
+        case .preference:
+            add("personal taste")
+        case .goal:
+            add("future intent")
+        case .taskReference:
+            add("active work")
+        case .appInstruction:
+            add("assistant behavior")
+        case .userFact:
+            add("stable user fact")
+        default:
+            break
+        }
+
+        if lower.contains("prefer") || lower.contains("like") || lower.contains("love") || lower.contains("favorite") {
+            add("preference")
+        }
+        if lower.contains("hate") || lower.contains("dislike") || lower.contains("do not like") {
+            add("negative preference")
+        }
+        if lower.contains("want") || lower.contains("need") || lower.contains("plan") || lower.contains("considering") {
+            add("goal or intention")
+        }
+        if lower.contains("worried") || lower.contains("concern") || lower.contains("afraid") || lower.contains("anxious") {
+            add("concern")
+        }
+        if lower.contains("remember") || lower.contains("always") || lower.contains("never") {
+            add("high recall value")
+        }
+        if lower.contains("feel") || lower.contains("vibe") || lower.contains("tone") {
+            add("experience preference")
+        }
+        return signals
+    }
+
+    private static func inferredTone(from lower: String) -> String? {
+        if lower.contains("love") || lower.contains("excited") || lower.contains("favorite") || lower.contains("enjoy") {
+            return "positive"
+        }
+        if lower.contains("hate") || lower.contains("frustrated") || lower.contains("annoy") || lower.contains("dislike") {
+            return "negative"
+        }
+        if lower.contains("worried") || lower.contains("concern") || lower.contains("afraid") || lower.contains("anxious") {
+            return "concerned"
+        }
+        if lower.contains("need") || lower.contains("must") || lower.contains("important") || lower.contains("always") || lower.contains("never") {
+            return "urgent"
+        }
+        return nil
+    }
+
+    private static func inferredImportance(
+        from lower: String,
+        kind: MemoryKind,
+        categoryKey: String,
+        topicCount: Int,
+        entityCount: Int
+    ) -> Double {
+        var score = 0.45
+        if kind == .goal || kind == .taskReference || kind == .appInstruction { score += 0.18 }
+        if kind == .preference { score += 0.12 }
+        if categoryKey == MemoryHubCategory.appDevelopment.rawValue || categoryKey == MemoryHubCategory.identity.rawValue {
+            score += 0.08
+        }
+        if lower.contains("always") || lower.contains("never") || lower.contains("important") || lower.contains("remember") {
+            score += 0.15
+        }
+        if lower.contains("dominus") || lower.contains("octobrain") || lower.contains("project") || lower.contains("working on") {
+            score += 0.1
+        }
+        score += min(0.1, Double(topicCount + entityCount) * 0.015)
+        return min(1, max(0.1, score))
+    }
+}
+
 /// SwiftData model for a single stored memory chunk.
 @Model
 final class MemoryRecord {
@@ -113,6 +315,13 @@ final class MemoryRecord {
     var categoryRaw: String?
     var content: String
     var embeddingData: Data      // [Float] packed as raw bytes
+    var topicsRaw: String = ""
+    var entitiesRaw: String = ""
+    var meaningSignalsRaw: String = ""
+    var emotionalToneRaw: String?
+    var importanceScore: Double = 0.45
+    var recurrenceCount: Int = 1
+    var semanticContext: String = ""
     var createdAt: Date
     var updatedAt: Date = Date()
 
@@ -125,9 +334,16 @@ final class MemoryRecord {
         categoryRaw: String? = nil,
         content: String,
         embeddingData: Data,
+        metadata: MemoryRecordMetadata? = nil,
         createdAt: Date = Date(),
         updatedAt: Date = Date()
     ) {
+        let resolvedMetadata = metadata ?? MemoryMetadataBuilder.build(
+            content: content,
+            kind: kind,
+            categoryKey: categoryRaw,
+            title: title
+        )
         self.conversationID = conversationID
         self.kindRaw        = kind.rawValue
         self.scopeRaw       = scope.rawValue
@@ -136,6 +352,12 @@ final class MemoryRecord {
         self.categoryRaw    = categoryRaw
         self.content        = content
         self.embeddingData  = embeddingData
+        self.topicsRaw = resolvedMetadata.topics.joined(separator: "|")
+        self.entitiesRaw = resolvedMetadata.entities.joined(separator: "|")
+        self.meaningSignalsRaw = resolvedMetadata.meaningSignals.joined(separator: "|")
+        self.emotionalToneRaw = resolvedMetadata.emotionalTone
+        self.importanceScore = resolvedMetadata.importanceScore
+        self.semanticContext = resolvedMetadata.semanticContext
         self.createdAt      = createdAt
         self.updatedAt      = updatedAt
     }
@@ -146,6 +368,40 @@ final class MemoryRecord {
 
     var scope: MemoryScope {
         MemoryScope(rawValue: scopeRaw) ?? .conversation
+    }
+
+    var topics: [String] {
+        splitMetadata(topicsRaw)
+    }
+
+    var entities: [String] {
+        splitMetadata(entitiesRaw)
+    }
+
+    var meaningSignals: [String] {
+        splitMetadata(meaningSignalsRaw)
+    }
+
+    var embeddingText: String {
+        semanticContext.isEmpty ? content : semanticContext
+    }
+
+    var retrievalText: String {
+        [
+            title,
+            content,
+            semanticContext,
+            topics.joined(separator: " "),
+            entities.joined(separator: " "),
+            meaningSignals.joined(separator: " "),
+            emotionalToneRaw
+        ]
+        .compactMap { $0 }
+        .joined(separator: "\n")
+    }
+
+    private func splitMetadata(_ raw: String) -> [String] {
+        raw.split(separator: "|").map(String.init).filter { !$0.isEmpty }
     }
 }
 
@@ -230,6 +486,12 @@ final class MemoryStore {
         content: String,
         embedding: [Float]?
     ) -> MemoryRecord {
+        let metadata = MemoryMetadataBuilder.build(
+            content: content,
+            kind: kind,
+            categoryKey: categoryKey,
+            title: title
+        )
         let data = embedding.map { MemoryEmbedder.shared.vectorToData($0) } ?? Data()
         let record = MemoryRecord(
             conversationID: conversationID?.uuidString ?? "",
@@ -240,6 +502,7 @@ final class MemoryStore {
             categoryRaw: categoryKey,
             content: content,
             embeddingData: data,
+            metadata: metadata,
             updatedAt: Date()
         )
         context.insert(record)
@@ -256,7 +519,7 @@ final class MemoryStore {
         let descriptor = FetchDescriptor<MemoryRecord>(
             sortBy: [SortDescriptor(\.createdAt, order: .reverse)]
         )
-        return (try? context.fetch(descriptor)) ?? []
+        return hydrateMetadataIfNeeded((try? context.fetch(descriptor)) ?? [])
     }
 
     /// Fetch only the memories that belong to a single conversation.
@@ -267,7 +530,7 @@ final class MemoryStore {
             predicate: #Predicate { $0.conversationID == idStr },
             sortBy: [SortDescriptor(\.createdAt, order: .reverse)]
         )
-        return (try? context.fetch(descriptor)) ?? []
+        return hydrateMetadataIfNeeded((try? context.fetch(descriptor)) ?? [])
     }
 
     func fetch(scope: MemoryScope) -> [MemoryRecord] {
@@ -276,7 +539,7 @@ final class MemoryStore {
             predicate: #Predicate { $0.scopeRaw == raw },
             sortBy: [SortDescriptor(\.updatedAt, order: .reverse)]
         )
-        return (try? context.fetch(descriptor)) ?? []
+        return hydrateMetadataIfNeeded((try? context.fetch(descriptor)) ?? [])
     }
 
     func fetchHubRecords() -> [MemoryHubRecord] {
@@ -420,10 +683,17 @@ final class MemoryStore {
         guard !trimmed.isEmpty else { return }
 
         let cleanTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let metadata = MemoryMetadataBuilder.build(
+            content: trimmed,
+            kind: kind,
+            categoryKey: categoryKey,
+            title: cleanTitle.isEmpty ? nil : cleanTitle
+        )
         record.kindRaw = kind.rawValue
         record.title = cleanTitle.isEmpty ? nil : cleanTitle
         record.categoryRaw = categoryKey
         record.content = trimmed
+        apply(metadata, to: record)
         record.updatedAt = Date()
         record.embeddingData = Data()
         try? context.save()
@@ -550,8 +820,9 @@ final class MemoryStore {
     private func scheduleRecordEmbedding(record: MemoryRecord, content: String) {
         let scope = record.scope
         let sourceID = record.sourceID
+        let searchContent = record.embeddingText
         Task.detached(priority: .utility) {
-            let embedding = MemoryEmbedder.shared.embed(content)
+            let embedding = MemoryEmbedder.shared.embed(searchContent)
             await MainActor.run {
                 MemoryStore.shared.updateEmbedding(
                     scope: scope,
@@ -561,6 +832,36 @@ final class MemoryStore {
                 )
             }
         }
+    }
+
+    private func apply(_ metadata: MemoryRecordMetadata, to record: MemoryRecord) {
+        record.topicsRaw = metadata.topics.joined(separator: "|")
+        record.entitiesRaw = metadata.entities.joined(separator: "|")
+        record.meaningSignalsRaw = metadata.meaningSignals.joined(separator: "|")
+        record.emotionalToneRaw = metadata.emotionalTone
+        record.importanceScore = metadata.importanceScore
+        record.semanticContext = metadata.semanticContext
+    }
+
+    private func hydrateMetadataIfNeeded(_ records: [MemoryRecord]) -> [MemoryRecord] {
+        var changed = false
+        for record in records where record.semanticContext.isEmpty {
+            let metadata = MemoryMetadataBuilder.build(
+                content: record.content,
+                kind: record.kind,
+                categoryKey: record.categoryRaw,
+                title: record.title
+            )
+            apply(metadata, to: record)
+            if record.embeddingData.isEmpty {
+                scheduleRecordEmbedding(record: record, content: record.content)
+            }
+            changed = true
+        }
+        if changed {
+            try? context.save()
+        }
+        return records
     }
 
     private func hubSummary(for records: [MemoryRecord]) -> String {

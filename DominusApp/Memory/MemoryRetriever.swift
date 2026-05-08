@@ -104,6 +104,27 @@ final class MemoryRetriever {
         }
     }
 
+    func rememberEpisodeSummary(conversationID: UUID, summary: String) {
+        let trimmed = summary
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        let sourceID = "episode:\(conversationID.uuidString)"
+        store.delete(scope: .longTerm, sourceID: sourceID)
+        let saved = store.insert(
+            conversationID: nil,
+            kind: .conversationSummary,
+            scope: .longTerm,
+            title: nil,
+            sourceID: sourceID,
+            categoryKey: MemoryHubCategory.projects.rawValue,
+            content: trimmed,
+            embedding: nil
+        )
+        scheduleEmbeddingBackfill(scope: .longTerm, sourceID: sourceID, content: saved.content)
+    }
+
     func rememberConversationNote(conversationID: UUID, title: String? = nil, content: String) {
         let atoms = MemoryExtractor.extract(
             from: content,
@@ -366,7 +387,7 @@ final class MemoryRetriever {
                     let vec = embedder.dataToVector(record.embeddingData)
                     semanticScore = embedder.cosineSimilarity(qv, vec)
                 }
-                let lexicalScore = keywordScore(queryWords: queryWords, text: record.content)
+                let lexicalScore = keywordScore(queryWords: queryWords, text: record.retrievalText)
                 let breakdown = scoreBreakdown(
                     semantic: semanticScore,
                     keyword: lexicalScore,
@@ -382,7 +403,7 @@ final class MemoryRetriever {
             // ── Keyword fallback ───────────────────────────────────────
             print("🔍 RAG: using keyword fallback | candidates: \(candidates.count)")
             for record in candidates {
-                let lexicalScore = keywordScore(queryWords: queryWords, text: record.content)
+                let lexicalScore = keywordScore(queryWords: queryWords, text: record.retrievalText)
                 guard lexicalScore > 0 else { continue }
                 let breakdown = scoreBreakdown(
                     semantic: 0,
@@ -417,7 +438,7 @@ final class MemoryRetriever {
             } else {
                 semanticScore = 0
             }
-            let lexicalScore = keywordScore(queryWords: queryWords, text: record.content)
+            let lexicalScore = keywordScore(queryWords: queryWords, text: record.retrievalText)
             let breakdown = scoreBreakdown(
                 semantic: semanticScore,
                 keyword: lexicalScore,
@@ -545,9 +566,11 @@ final class MemoryRetriever {
     }
 
     private func importanceBoost(for record: MemoryRecord) -> Float {
-        let text = "\(record.kind.rawValue) \(categoryKey(for: record)) \(record.content)".lowercased()
-        var boost: Float = 0.05
+        let text = "\(record.kind.rawValue) \(categoryKey(for: record)) \(record.retrievalText)".lowercased()
+        var boost = Float(record.importanceScore) * 0.18
+        boost += min(0.08, Float(max(0, record.recurrenceCount - 1)) * 0.02)
         if record.kind == .goal || record.kind == .taskReference { boost += 0.12 }
+        if record.sourceID?.hasPrefix("episode:") == true { boost += 0.16 }
         if text.contains("dominus") || text.contains("octobrain") || text.contains("octoloco") { boost += 0.18 }
         if text.contains("book") || text.contains("podcast") || text.contains("project") { boost += 0.15 }
         if text.contains("building") || text.contains("writing") || text.contains("working on") { boost += 0.12 }
@@ -603,7 +626,14 @@ final class MemoryRetriever {
             "name another thing",
             "name something different",
             "anything else",
-            "what else"
+            "what else",
+            "where did we leave off",
+            "what were we working on",
+            "what did we decide",
+            "previous chat",
+            "last chat",
+            "last conversation",
+            "remember when we talked"
         ]
         return patterns.contains { lowered.contains($0) }
     }
@@ -730,6 +760,9 @@ final class MemoryRetriever {
         if let raw = record.categoryRaw, !raw.isEmpty {
             return raw
         }
+        if record.sourceID?.hasPrefix("episode:") == true {
+            return MemoryHubCategory.projects.rawValue
+        }
         if record.scope == .file {
             return MemoryHubCategory.file.rawValue
         }
@@ -756,6 +789,9 @@ final class MemoryRetriever {
     }
 
     private func sourceLabel(for record: MemoryRecord) -> String {
+        if record.sourceID?.hasPrefix("episode:") == true {
+            return "conversation-episode"
+        }
         switch record.scope {
         case .conversation: return "current-chat"
         case .longTerm: return "long-term"
@@ -788,8 +824,12 @@ final class MemoryRetriever {
             ["favorite", "favourite", "prefer", "preference", "like", "love", "enjoy"],
             ["food", "meal", "cuisine", "dish", "eat", "eating"],
             ["book", "novel", "writing", "manuscript"],
-            ["project", "goal", "plan", "working"],
-            ["name", "called", "titled"]
+            ["project", "goal", "plan", "working", "building", "task"],
+            ["name", "called", "titled", "identity", "profile"],
+            ["feel", "tone", "vibe", "experience", "style", "design"],
+            ["worried", "concern", "afraid", "anxious", "risk"],
+            ["memory", "remember", "recall", "know", "context"],
+            ["assistant", "dominus", "app", "voice", "rag", "swiftui"]
         ]
 
         for group in synonymGroups where !words.isDisjoint(with: group) {
@@ -870,7 +910,8 @@ final class MemoryRetriever {
     ) -> String {
         let body = records.map { record in
             let label = record.kind.promptLabel
-            return "\(label) about Creed: \(cleanStoredMemoryContent(record.content))"
+            let metadata = compactMetadataLine(for: record)
+            return "\(label) about Creed\(metadata): \(cleanStoredMemoryContent(record.content))"
         }.joined(separator: "\n")
         return """
         \(title):
@@ -948,9 +989,11 @@ final class MemoryRetriever {
     private func traceLine(_ scored: ScoredMemory) -> String {
         let record = scored.record
         let preview = cleanStoredMemoryContent(record.content)
+        let metadata = compactMetadataLine(for: record)
         return """
         Source: \(scored.source)
         Category: \(categoryKey(for: record))
+        Metadata: \(metadata.isEmpty ? "none" : String(metadata.dropFirst(2).dropLast()))
         Preview: \(preview)
         semantic=\(formatScore(scored.breakdown.semantic)) keyword=\(formatScore(scored.breakdown.keyword)) importance=+\(formatScore(scored.breakdown.importance)) diversity=+\(formatScore(scored.breakdown.diversity)) repetition=-\(formatScore(scored.breakdown.repetitionPenalty)) final=\(formatScore(scored.score))
         """
@@ -986,8 +1029,14 @@ final class MemoryRetriever {
     }
 
     private func scheduleEmbeddingBackfill(scope: MemoryScope, sourceID: String?, content: String) {
+        let searchContent = MemoryMetadataBuilder.build(
+            content: content,
+            kind: .userFact,
+            categoryKey: nil,
+            title: nil
+        ).semanticContext
         Task.detached(priority: .utility) {
-            let embedding = MemoryEmbedder.shared.embed(content)
+            let embedding = MemoryEmbedder.shared.embed(searchContent)
             await MainActor.run {
                 MemoryStore.shared.updateEmbedding(
                     scope: scope,
@@ -1005,5 +1054,18 @@ final class MemoryRetriever {
             .replacingOccurrences(of: "•", with: " ")
             .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func compactMetadataLine(for record: MemoryRecord) -> String {
+        let topics = record.topics.prefix(4).joined(separator: ", ")
+        let signals = record.meaningSignals.prefix(3).joined(separator: ", ")
+        let tone = record.emotionalToneRaw
+        let parts = [
+            topics.isEmpty ? nil : "topics: \(topics)",
+            signals.isEmpty ? nil : "signals: \(signals)",
+            tone.map { "tone: \($0)" }
+        ].compactMap { $0 }
+        guard !parts.isEmpty else { return "" }
+        return " [\(parts.joined(separator: "; "))]"
     }
 }

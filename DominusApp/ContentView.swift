@@ -142,12 +142,16 @@ struct ContentView: View {
         .onChange(of: isFullyLoaded) { loaded in
             guard loaded else { return }
             playAppLoadedSoundIfNeeded()
+            prepareVoiceStackForFastEntry()
         }
         .task {
             store.boot()
             store.loadModelIfNeeded()
             setupVoiceCallbacks()
             await whisper.loadModel()
+            if isFullyLoaded {
+                prepareVoiceStackForFastEntry()
+            }
         }
         // Re-check both models whenever the app returns to foreground;
         // also fire a title-generation pass when the user backgrounds the app
@@ -156,8 +160,14 @@ struct ContentView: View {
             switch phase {
             case .active:
                 store.loadModelIfNeeded()
-                Task { await whisper.loadModel() }
+                Task {
+                    await whisper.loadModel()
+                    if isFullyLoaded {
+                        prepareVoiceStackForFastEntry()
+                    }
+                }
             case .background:
+                store.updateCurrentEpisodeSummary()
                 store.generateTitleForCurrentIfNeeded()
             default:
                 break
@@ -260,16 +270,11 @@ struct ContentView: View {
             voiceWasEnabled    = store.voiceEnabled
             store.voiceEnabled = true
             SpeechManager.shared.stopAndClear()
-            isVoiceModeTransitioning = true
+            startVolumeMonitoring()
+            beginListening()
+            isVoiceModeTransitioning = false
             Task { @MainActor in
                 await playVoiceModeSound(named: "ActivateVoicetoVoice")
-                guard isVoiceModeTransitioning, pttState == .idle else {
-                    isVoiceModeTransitioning = false
-                    return
-                }
-                isVoiceModeTransitioning = false
-                startVolumeMonitoring()
-                beginListening()
             }
 
         case .listening:
@@ -285,6 +290,12 @@ struct ContentView: View {
     }
 
     // MARK: - Listening helpers
+
+    private func prepareVoiceStackForFastEntry() {
+        guard pttState == .idle, !whisper.isRecording, !store.isGenerating else { return }
+        whisper.prewarmVoiceMode()
+        SpeechManager.shared.prepareForVoiceMode()
+    }
 
     private func beginListening() {
         resetVoiceAutoSendState()
@@ -544,11 +555,19 @@ struct ContentView: View {
 
         do {
             do {
-                try AVAudioSession.sharedInstance().setCategory(
-                    .playback,
-                    mode: .default,
-                    options: []
-                )
+                if pttState == .idle && !isVoiceModeTransitioning {
+                    try AVAudioSession.sharedInstance().setCategory(
+                        .playback,
+                        mode: .default,
+                        options: []
+                    )
+                } else {
+                    try AVAudioSession.sharedInstance().setCategory(
+                        .playAndRecord,
+                        mode: .voiceChat,
+                        options: [.defaultToSpeaker, .allowBluetooth, .allowBluetoothA2DP]
+                    )
+                }
                 try AVAudioSession.sharedInstance().setActive(true, options: [])
             } catch {
                 print("🔇 Voice mode sound session setup failed:", error.localizedDescription)

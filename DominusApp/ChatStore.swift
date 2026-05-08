@@ -147,6 +147,7 @@ final class ChatStore: ObservableObject {
             // When the user navigates away from a chat, give it an LLM title
             // if it doesn't have one yet. Skip on initial assignment (oldValue == nil).
             guard let old = oldValue, old != selectedID else { return }
+            updateEpisodeSummary(for: old)
             scheduleTitleGeneration(for: old)
         }
     }
@@ -242,6 +243,7 @@ final class ChatStore: ObservableObject {
     func deleteConversation(_ convo: Conversation) {
         conversations.removeAll { $0.id == convo.id }
         MemoryRetriever.shared.deleteConversationMemory(conversationID: convo.id)
+        MemoryStore.shared.delete(scope: .longTerm, sourceID: episodeSourceID(for: convo.id))
         if selectedID == convo.id {
             selectedID = conversations.first?.id
         }
@@ -526,7 +528,8 @@ final class ChatStore: ObservableObject {
 
                 if voiceEnabled {
                     ttsBuffer += token
-                    let hitSentenceEnd   = ttsBuffer.last == "." || ttsBuffer.last == "?" || ttsBuffer.last == "!"
+                    let trimmedTTSBuffer = ttsBuffer.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let hitSentenceEnd   = trimmedTTSBuffer.last == "." || trimmedTTSBuffer.last == "?" || trimmedTTSBuffer.last == "!"
                     let hitNewline       = ttsBuffer.contains("\n")
                     let bufferTooLong    = ttsBuffer.count >= 300
 
@@ -569,6 +572,7 @@ final class ChatStore: ObservableObject {
                         assistantText: cleanedAssistant
                     )
                     summarizeOlderMessagesIfNeeded(convoIndex: convoIndex)
+                    updateEpisodeSummary(convoIndex: convoIndex)
                 }
             }
 
@@ -868,6 +872,94 @@ final class ChatStore: ObservableObject {
         }
         .filter { !$0.isEmpty }
         .joined(separator: "\n")
+    }
+
+    func updateCurrentEpisodeSummary() {
+        guard let selectedID else { return }
+        updateEpisodeSummary(for: selectedID)
+    }
+
+    private func updateEpisodeSummary(for conversationID: UUID) {
+        guard let index = conversations.firstIndex(where: { $0.id == conversationID }) else { return }
+        updateEpisodeSummary(convoIndex: index)
+    }
+
+    private func updateEpisodeSummary(convoIndex: Int) {
+        guard conversations.indices.contains(convoIndex) else { return }
+        let conversation = conversations[convoIndex]
+        let summary = episodeSummary(for: conversation)
+        guard !summary.isEmpty else { return }
+        MemoryRetriever.shared.rememberEpisodeSummary(
+            conversationID: conversation.id,
+            summary: summary
+        )
+    }
+
+    private func episodeSourceID(for conversationID: UUID) -> String {
+        "episode:\(conversationID.uuidString)"
+    }
+
+    private func episodeSummary(for conversation: Conversation) -> String {
+        let visibleMessages = conversation.messages
+            .filter { !isMemoryStatusMessage($0.content) }
+        let userMessages = visibleMessages.filter { $0.role == .user }
+        guard userMessages.count >= 2 else { return "" }
+
+        let title = conversation.title == "New Chat" ? "Untitled chat" : conversation.title
+        let topics = episodeKeywords(from: userMessages.map(\.content).joined(separator: " "))
+            .prefix(8)
+            .joined(separator: ", ")
+        let recentExchange = visibleMessages.suffix(8).map { message in
+            let label = message.role == .user ? "Creed" : "Dominus"
+            let clean = message.content
+                .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let capped = clean.count > 180
+                ? String(clean.prefix(180)).trimmingCharacters(in: .whitespacesAndNewlines) + "..."
+                : clean
+            return "\(label): \(capped)"
+        }.joined(separator: " | ")
+
+        let decisionLines = userMessages
+            .map(\.content)
+            .filter { text in
+                let lower = text.lowercased()
+                return lower.contains("let's")
+                    || lower.contains("we should")
+                    || lower.contains("i want")
+                    || lower.contains("i think")
+                    || lower.contains("next")
+                    || lower.contains("works")
+            }
+            .suffix(4)
+            .map { text in
+                text.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            .joined(separator: " ")
+
+        var parts = [
+            "Conversation episode from \"\(title)\".",
+            "Creed and Dominus discussed \(topics.isEmpty ? "the active project and decisions in this chat" : topics).",
+            "Recent context: \(recentExchange)"
+        ]
+        if !decisionLines.isEmpty {
+            parts.append("Notable decisions or direction from Creed: \(decisionLines)")
+        }
+        return parts.joined(separator: " ")
+    }
+
+    private func episodeKeywords(from text: String) -> [String] {
+        let stopWords: Set<String> = [
+            "the","and","that","this","with","from","have","what","when","where",
+            "about","into","onto","then","there","their","would","could","should",
+            "you","creed","dominus","memory","remember","because","thing","things"
+        ]
+        var seen = Set<String>()
+        return text.lowercased()
+            .components(separatedBy: .alphanumerics.inverted)
+            .filter { $0.count > 3 && !stopWords.contains($0) }
+            .filter { seen.insert($0).inserted }
     }
 
     private enum MemoryConfirmationDecision {

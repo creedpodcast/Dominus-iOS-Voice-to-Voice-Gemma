@@ -264,6 +264,14 @@ private struct MemoryRecordRow: View {
                 .font(.callout)
                 .textSelection(.enabled)
 
+            if !metadataSummary.isEmpty {
+                Text(metadataSummary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
+                    .textSelection(.enabled)
+            }
+
             if memory.kind == .memoryCandidate {
                 HStack {
                     Button {
@@ -311,6 +319,22 @@ private struct MemoryRecordRow: View {
         memory.content
             .replacingOccurrences(of: #"(?m)^\s*[-•]\s*"#, with: "", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var metadataSummary: String {
+        let topics = memory.topics.prefix(4).joined(separator: ", ")
+        let entities = memory.entities.prefix(3).joined(separator: ", ")
+        let signals = memory.meaningSignals.prefix(3).joined(separator: ", ")
+        let tone = memory.emotionalToneRaw
+        let importance = String(format: "%.2f", memory.importanceScore)
+        let parts = [
+            topics.isEmpty ? nil : "Topics: \(topics)",
+            entities.isEmpty ? nil : "Entities: \(entities)",
+            signals.isEmpty ? nil : "Signals: \(signals)",
+            tone.map { "Tone: \($0)" },
+            "Importance: \(importance)"
+        ].compactMap { $0 }
+        return parts.joined(separator: "  ")
     }
 }
 

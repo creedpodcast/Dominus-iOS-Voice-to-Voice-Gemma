@@ -97,6 +97,13 @@ final class WhisperManager: ObservableObject {
 
     // MARK: - Recording
 
+    func prewarmVoiceMode() {
+        guard modelReady, !isRecording, !isStartingRecording, !isTranscribing else { return }
+        setupAudioSession()
+        _ = audioEngine.inputNode.inputFormat(forBus: 0)
+        audioEngine.prepare()
+    }
+
     func startRecording() {
         guard !isRecording else { return }
         isStartingRecording = true
@@ -167,8 +174,8 @@ final class WhisperManager: ObservableObject {
 
     private func startLiveTranscriptionTimer() {
         liveTimer?.invalidate()
-        // Wait 2 seconds before the first pass so there's enough audio to transcribe
-        liveTimer = Timer.scheduledTimer(withTimeInterval: 2.5, repeats: true) { [weak self] _ in
+        // Keep the first pass quick so voice mode feels live as soon as the orb opens.
+        liveTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             guard let self else { return }
             Task { @MainActor in
                 await self.runLiveTranscriptionPass()

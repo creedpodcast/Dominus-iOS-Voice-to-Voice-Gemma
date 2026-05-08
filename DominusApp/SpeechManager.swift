@@ -44,6 +44,13 @@ final class SpeechManager: NSObject, ObservableObject, AVSpeechSynthesizerDelega
 
     // MARK: - Public API
 
+    func prepareForVoiceMode() {
+        if preferredVoice == nil {
+            preferredVoice = pickMaleEnglishVoice()
+        }
+        prepareAudioSessionForSpeech()
+    }
+
     func enqueue(_ text: String) {
         let cleaned = clean(text)
         guard hasSpeakableContent(cleaned) else { return }
