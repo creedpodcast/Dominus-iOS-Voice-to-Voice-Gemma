@@ -227,6 +227,34 @@ final class ChatStore: ObservableObject {
         return conversations.first(where: { $0.id == id })
     }
 
+    func contextUsageEstimate(for conversation: Conversation?, draft: String = "") -> Double {
+        guard let conversation else {
+            return targetContextUsage
+        }
+
+        var messages: [LlamaChatMessage] = [
+            .init(role: .system, content: systemPrompt)
+        ]
+        messages += conversation.messages.compactMap { message in
+            guard !isMemoryStatusMessage(message.content) else { return nil }
+            switch message.role {
+            case .user:
+                return .init(role: .user, content: message.content)
+            case .assistant:
+                return .init(role: .assistant, content: message.content)
+            }
+        }
+
+        let trimmedDraft = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedDraft.isEmpty {
+            messages.append(.init(role: .user, content: trimmedDraft))
+        }
+
+        let trimmed = trimLLMHistory(messages)
+        let usage = Double(estimatedTokens(for: trimmed)) / Double(approximateContextTokenLimit)
+        return min(1.0, max(0.0, usage))
+    }
+
     private func indexForSelectedConversation() -> Int? {
         guard let id = selectedID else { return nil }
         return conversations.firstIndex(where: { $0.id == id })

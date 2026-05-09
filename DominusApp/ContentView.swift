@@ -868,16 +868,13 @@ struct ContentView: View {
     }
 
     // MARK: - Context usage (0.0–1.0)
-    // Estimates token usage from history chars + current draft. ~4 chars per token.
+    // Mirrors ChatStore's prompt trimming estimate so the ring reflects the actual
+    // rolling context sent to Gemma instead of the full visible chat.
     private var contextUsage: Double {
-        let maxTokens = 2048
-        let rawPromptMessages = 8
-        let systemOverhead = 450
-
-        let messages = store.selectedConversation()?.messages ?? []
-        let windowChars = messages.suffix(rawPromptMessages).reduce(0) { $0 + $1.content.count }
-        let estimated = systemOverhead + (windowChars + prompt.count) / 4
-        return min(1.0, Double(estimated) / Double(maxTokens))
+        store.contextUsageEstimate(
+            for: store.selectedConversation(),
+            draft: prompt
+        )
     }
 
     private var pendingMemorySuggestionCount: Int {
@@ -951,10 +948,14 @@ struct ContentView: View {
                     VStack(spacing: 12) {
                         let msgs = store.selectedConversation()?.messages ?? []
                         ForEach(msgs) { msg in
+                            let isStreamingAssistant = store.isGenerating
+                                && msg.role == .assistant
+                                && msg.id == msgs.last?.id
                             ChatBubble(
                                 messageID: msg.id,
                                 role: msg.role,
                                 text: msg.content,
+                                isStreaming: isStreamingAssistant,
                                 onAcceptMemory: { store.confirmLatestPendingMemory(accept: true) },
                                 onDismissMemory: { store.confirmLatestPendingMemory(accept: false) },
                                 onRemember: { store.rememberMessage(msg.id) }
@@ -965,14 +966,11 @@ struct ContentView: View {
                     .padding()
                 }
                 .onChange(of: store.selectedConversation()?.messages.count ?? 0) { _ in
-                    if let last = store.selectedConversation()?.messages.last {
-                        withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
-                    }
-                }
-                .onChange(of: store.selectedConversation()?.messages.last?.content) { _ in
-                    guard store.isGenerating else { return }
-                    if let last = store.selectedConversation()?.messages.last {
-                        proxy.scrollTo(last.id, anchor: .bottom)
+                    guard let last = store.selectedConversation()?.messages.last else { return }
+                    if last.role == .assistant {
+                        withAnimation(.easeOut(duration: 0.28)) {
+                            proxy.scrollTo(last.id, anchor: .top)
+                        }
                     }
                 }
 
@@ -1167,13 +1165,151 @@ struct ContextRingView: View {
 
 // MARK: - Chat Bubble
 
-struct ChatBubble: View {
-    let messageID: UUID
-    let role: ChatMessage.Role
+struct CinematicStreamingText: View {
     let text: String
-    var onAcceptMemory: (() -> Void)? = nil
-    var onDismissMemory: (() -> Void)? = nil
-    var onRemember: (() -> Void)? = nil
+    let isStreaming: Bool
+
+    @State private var revealedChunkCount = 0
+    @State private var revealTask: Task<Void, Never>?
+
+    private var chunks: [String] {
+        Self.chunkText(text)
+    }
+
+    var body: some View {
+        Group {
+            if isStreaming {
+                VStack(alignment: .leading, spacing: 5) {
+                    ForEach(Array(chunks.enumerated()), id: \.offset) { index, chunk in
+                        ZStack(alignment: .leading) {
+                            Text(chunk)
+                                .opacity(index < revealedChunkCount ? 0 : 0.18)
+                                .blur(radius: 1.1)
+
+                            Text(chunk)
+                                .opacity(index < revealedChunkCount ? 1 : 0)
+                                .blur(radius: index < revealedChunkCount ? 0 : 0.8)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .animation(.easeOut(duration: 0.2), value: revealedChunkCount)
+                    }
+                }
+                .onAppear { syncReveal(animated: true) }
+                .onChange(of: text) { _ in
+                    syncReveal(animated: true)
+                }
+                .onDisappear {
+                    revealTask?.cancel()
+                    revealTask = nil
+                }
+            } else {
+                Text(text)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .onAppear {
+                        revealTask?.cancel()
+                        revealTask = nil
+                        revealedChunkCount = chunks.count
+                    }
+            }
+        }
+    }
+
+    private func syncReveal(animated: Bool) {
+        let latestChunks = chunks
+        guard isStreaming else {
+            revealedChunkCount = latestChunks.count
+            return
+        }
+
+        guard latestChunks.count > revealedChunkCount else {
+            return
+        }
+
+        revealTask?.cancel()
+        revealTask = Task { @MainActor in
+            var index = revealedChunkCount
+            while index < latestChunks.count, !Task.isCancelled {
+                let delay: UInt64 = animated ? 38_000_000 : 0
+                if delay > 0 {
+                    try? await Task.sleep(nanoseconds: delay)
+                }
+                guard !Task.isCancelled else { return }
+                withAnimation(.easeOut(duration: 0.18)) {
+                    revealedChunkCount = index + 1
+                }
+                index += 1
+            }
+        }
+    }
+
+    private static func chunkText(_ text: String) -> [String] {
+        let clean = text
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return [] }
+
+        var chunks: [String] = []
+        var current = ""
+
+        func flush() {
+            let trimmed = current.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return }
+            chunks.append(trimmed)
+            current = ""
+        }
+
+        let sentences = clean
+            .splitKeepingSentenceTerminators()
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        for sentence in sentences {
+            if !current.isEmpty {
+                current += " "
+            }
+            current += sentence
+
+            let sentenceCount = current.filter { ".!?".contains($0) }.count
+            if sentenceCount >= 2 || current.count >= 420 {
+                flush()
+            }
+        }
+        flush()
+
+        return chunks.isEmpty ? [clean] : chunks
+    }
+}
+
+private extension String {
+    func splitKeepingSentenceTerminators() -> [String] {
+        var parts: [String] = []
+        var current = ""
+
+        for character in self {
+            current.append(character)
+            if ".!?".contains(character) {
+                parts.append(current)
+                current = ""
+            }
+        }
+
+        let remainder = current.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !remainder.isEmpty {
+            parts.append(remainder)
+        }
+
+        return parts
+    }
+}
+
+struct ChatBubble: View {
+        let messageID: UUID
+        let role: ChatMessage.Role
+        let text: String
+        var isStreaming: Bool = false
+        var onAcceptMemory: (() -> Void)? = nil
+        var onDismissMemory: (() -> Void)? = nil
+        var onRemember: (() -> Void)? = nil
 
     @ObservedObject private var speech = SpeechManager.shared
     @State private var copied: Bool = false
@@ -1220,7 +1356,7 @@ struct ChatBubble: View {
     }
 
     private func bubbleView(background: Color, foreground: Color, align: Alignment) -> some View {
-        Text(text)
+        CinematicStreamingText(text: text, isStreaming: isStreaming && role == .assistant && !isMemoryNotice)
             .textSelection(.enabled)
             .padding(.horizontal, 14)
             .padding(.vertical, 10)

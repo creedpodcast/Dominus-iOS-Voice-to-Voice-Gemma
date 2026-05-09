@@ -41,8 +41,9 @@ Talk to an AI that talks back. Tap once to speak, then pause — after real word
 - **Per-message action bar on AI replies** — Copy (clipboard, ✓ flash confirms), Share (system share sheet), and Speaker button under every assistant bubble. Tap the speaker to hear any past response read aloud; tap it again to stop mid-playback. Speaker icon swaps to a stop icon while that specific message is playing so state is always visible.
 - **Selectable bubble text** — long-press any message (user or AI) to select and copy partial text.
 - **Input field auto-clears on send** — text field empties the moment the send button is tapped; no manual deletion required before typing the next message.
-- **Larger action icons and context ring** — per-message action icons at 18 pt and the context usage ring at 40 × 40 pt for readability at any text size.
-- Text chat with Gemma 2B (streaming, token-by-token)
+- **Larger action icons and context ring** — per-message action icons at 18 pt and the context usage ring at 40 × 40 pt for readability at any text size; the ring mirrors the same rolling prompt-trim estimate used before sending context to Gemma.
+- **Cinematic response streaming** — text chat still streams from Gemma in real time, but assistant bubbles reveal response chunks with a soft blurred ghost/fade treatment instead of harsh token-by-token typing.
+- **Stable response scroll behavior** — when a new assistant response starts, chat scrolls to the top of the AI bubble once, then stops following the reveal so the user can scroll freely while text unfolds.
 - **Memory Journal** — one editable long-term memory page where users can view, add, edit, delete, and summarize approved memories without separate memory titles
 - **Memory suggestions** — Dominus can detect possible memories, show Yes/No controls, accept spoken/text confirmation, and show darkened "Added to Memory" / "Forgot Memory" status bubbles in the chat
 - RAG long-term memory (semantic search + keyword fallback) — retrieves from the Memory Journal and current-chat summaries while filtering memory status bubbles out of the LLM prompt
