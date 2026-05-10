@@ -51,7 +51,8 @@ Talk to an AI that talks back. Tap once to speak, then pause — after real word
 - **Multiple memory embeddings** — each memory can carry literal, topical, emotional, preference, and identity/style vectors; retrieval uses the strongest matching meaning angle
 - **Context-aware "remember this" flow** — deictic memory requests ask Gemma to summarize what should be remembered from recent turns, then show the interpreted memory as a Yes/No suggestion before journal storage
 - **Diverse memory recall** — broad questions such as "what do you remember about me?" use category diversity, importance boosts, and recent-recall penalties so Dominus avoids repeating the same facts
-- **Memory retrieval trace** — Memory Journal shows why recent memory candidates were retrieved, including semantic score, matched semantic aspect, keyword score, importance boost, repetition penalty, final score, source, and category
+- **Multi-signal memory retrieval** — scoring blends semantic, keyword, entity, topic, recency, profile, and active-conversation signals so retrieval reflects the user's profile and the live conversation, not just literal phrasing
+- **Memory retrieval trace** — Memory Journal shows why recent memory candidates were retrieved, including semantic score, matched semantic aspect, keyword score, entity/topic/recency/profile/active-conversation boosts, importance boost, repetition penalty, final score, source, and category
 - **AI-managed memory cleanup** — saved memories are first normalized into Creed-focused facts, then Gemma refines messy entries into concise third-person summaries in the background when the app is idle
 - LLM-generated chat titles (after 5 user turns or on chat exit) and absolute-date timestamps in the sidebar
 - User profile with auto-extraction ("my name is X" → stored as fact) **plus an editable Profile sheet** (person.circle button) for manual facts and a free-text "How should Dominus talk to you?" persona prompt
@@ -163,7 +164,8 @@ The same single button controls every step. No hold-to-talk. Auto-send only star
 | Retrieval | Memory Journal entries and current-chat summaries are scored, filtered, and injected only when relevant |
 | Diverse recall | Broad/follow-up memory questions activate exploration mode, balancing semantic relevance with category diversity, importance, and recently-used-memory penalties |
 | Recall history | Recently retrieved memory fingerprints are tracked locally in `UserDefaults` and downranked for a short window so repeated questions can surface different facts |
-| Traceability | Memory Journal includes a retrieval trace with source, category, semantic score, matched semantic aspect, keyword score, importance boost, repetition penalty, and final score |
+| Multi-signal scoring | Final score blends semantic, keyword, entity, topic, recency, profile, and active-conversation signals minus a repetition penalty, so retrieval considers who the user is and what's being discussed right now |
+| Traceability | Memory Journal includes a retrieval trace with source, category, semantic score, matched semantic aspect, keyword score, entity/topic/recency/profile/active-conversation boosts, importance boost, repetition penalty, and final score |
 | Normalization | Common first-person memory phrases are converted into Creed-focused facts before storage; idle Gemma refinement rewrites long or messy memories into compact third-person summaries |
 | File memory groundwork | `MemoryScope.file` is reserved for future chunked file indexing: file → chunks → embeddings → searchable candidates |
 | Raw history | Latest 3-4 turns kept in context — older current-chat turns are compacted into conversation-scoped RAG summaries |
