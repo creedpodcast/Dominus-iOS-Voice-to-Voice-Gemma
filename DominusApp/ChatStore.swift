@@ -500,6 +500,20 @@ final class ChatStore: ObservableObject {
 
             let stream = try await engine.streamChat(llmMessages, temperature: 0.6, seed: 42)
 
+            // Length-match the response to the question. Soft cap that only kicks
+            // in at a sentence boundary, so we never chop a sentence mid-word.
+            let responseCharCap: Int? = {
+                let wordCount = visibleUserText
+                    .split(whereSeparator: { $0.isWhitespace })
+                    .count
+                switch wordCount {
+                case 0...5:   return 200
+                case 6...15:  return 500
+                case 16...40: return 1200
+                default:      return nil
+                }
+            }()
+
             var assistantText = ""
             var ttsBuffer     = ""
             var lastEnqueuedAtCount = 0
@@ -536,6 +550,13 @@ final class ChatStore: ObservableObject {
                         SpeechManager.shared.enqueue(ttsBuffer)
                         lastEnqueuedAtCount = assistantText.count
                         ttsBuffer = ""
+                    }
+                }
+
+                if let cap = responseCharCap, assistantText.count >= cap {
+                    let trimmed = assistantText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if let last = trimmed.last, last == "." || last == "?" || last == "!" || last == "\n" {
+                        break
                     }
                 }
             }
