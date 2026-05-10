@@ -498,7 +498,7 @@ final class ChatStore: ObservableObject {
             let assistantID    = conversations[convoIndex].messages[assistantIndex].id
             let assistantTS    = conversations[convoIndex].messages[assistantIndex].timestamp
 
-            let stream = try await engine.streamChat(llmMessages, temperature: 0.7, seed: 42)
+            let stream = try await engine.streamChat(llmMessages, temperature: 0.6, seed: 42)
 
             var assistantText = ""
             var ttsBuffer     = ""
