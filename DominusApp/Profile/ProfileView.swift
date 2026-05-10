@@ -4,148 +4,238 @@ struct ProfileView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var store = ProfileStore.shared
 
-    // Editing state for adding a new fact
-    @State private var newKey   = ""
-    @State private var newValue = ""
-    @State private var showAddFact = false
-
-    // Local mirror of persona so edits are applied on dismissal
+    @State private var displayNameDraft = ""
+    @State private var appPurposeDraft = ""
     @State private var personaDraft = ""
+    @State private var jobTitleDraft = ""
+    @State private var goalDrafts = Array(repeating: "", count: 3)
+    @State private var behaviorDrafts = Array(repeating: "", count: 3)
 
-    var body: some View {
-        NavigationStack {
-            List {
-                // ── Persona section ────────────────────────────────────────
-                Section {
-                    ZStack(alignment: .topLeading) {
-                        if personaDraft.isEmpty {
-                            Text("e.g. Be concise. Use casual language. Explain things with analogies.")
-                                .foregroundStyle(.secondary)
-                                .font(.callout)
-                                .padding(.top, 8)
-                                .padding(.leading, 4)
-                                .allowsHitTesting(false)
-                        }
-                        TextEditor(text: $personaDraft)
-                            .font(.callout)
-                            .frame(minHeight: 100)
-                            .scrollContentBackground(.hidden)
-                    }
-                } header: {
-                    Label("How should Dominus talk to you?", systemImage: "bubble.left.and.bubble.right")
-                } footer: {
-                    Text("This is injected into every system prompt. Keep it short — it counts against the context window.")
-                        .font(.caption)
-                }
-
-                // ── Known facts section ────────────────────────────────────
-                Section {
-                    if store.facts.isEmpty {
-                        Text("No facts yet. Dominus learns them automatically from conversation, or you can add them below.")
-                            .foregroundStyle(.secondary)
-                            .font(.callout)
-                    } else {
-                        ForEach(store.facts) { fact in
-                            HStack(alignment: .top, spacing: 8) {
-                                Text(fact.key)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    .frame(width: 110, alignment: .leading)
-                                Text(fact.value)
-                                    .font(.callout)
-                            }
-                        }
-                        .onDelete { offsets in
-                            offsets.forEach { store.delete(store.facts[$0]) }
-                        }
-                    }
-                } header: {
-                    HStack {
-                        Label("What Dominus knows about you", systemImage: "person.text.rectangle")
-                        Spacer()
-                        Button {
-                            showAddFact = true
-                        } label: {
-                            Image(systemName: "plus")
-                        }
-                        .font(.callout)
-                    }
-                } footer: {
-                    Text("Swipe left to delete a fact.")
-                        .font(.caption)
-                }
-
-                // ── Danger zone ────────────────────────────────────────────
-                if !store.facts.isEmpty {
-                    Section {
-                        Button(role: .destructive) {
-                            store.deleteAll()
-                        } label: {
-                            Label("Clear all facts", systemImage: "trash")
-                        }
-                    }
-                }
-            }
-            .navigationTitle("Your Profile")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") {
-                        store.persona = personaDraft
-                        dismiss()
-                    }
-                }
-            }
-            .onAppear {
-                personaDraft = store.persona
-            }
-            .sheet(isPresented: $showAddFact) {
-                AddFactSheet(store: store)
-                    .presentationDetents([.medium])
-            }
-        }
-    }
-}
-
-// MARK: - Add Fact Sheet
-
-private struct AddFactSheet: View {
-    @Environment(\.dismiss) private var dismiss
-    var store: ProfileStore
-
-    @State private var key   = ""
-    @State private var value = ""
+    private let nameLimit = 40
+    private let shortLimit = 120
+    private let purposeLimit = 160
+    private let personaLimit = 220
 
     var body: some View {
         NavigationStack {
             Form {
-                Section("Label (e.g. \"name\", \"occupation\")") {
-                    TextField("Label", text: $key)
-                        .autocorrectionDisabled()
+                Section {
+                    LimitedTextField(
+                        title: "Name or preferred name",
+                        text: $displayNameDraft,
+                        limit: nameLimit,
+                        autocapitalization: .words
+                    )
+                } header: {
+                    Label("Name", systemImage: "person")
                 }
-                Section("Value") {
-                    TextField("Value", text: $value)
+
+                Section {
+                    LimitedTextField(
+                        title: "Job title or role",
+                        text: $jobTitleDraft,
+                        limit: shortLimit,
+                        autocapitalization: .sentences
+                    )
+                } header: {
+                    Label("Role or Work", systemImage: "briefcase")
+                }
+
+                Section {
+                    LimitedTextEditor(
+                        text: $appPurposeDraft,
+                        placeholder: "One sentence about why you use Dominus.",
+                        limit: purposeLimit,
+                        minHeight: 76
+                    )
+                } header: {
+                    Label("Why You Use Dominus", systemImage: "target")
+                }
+
+                Section {
+                    LimitedTextEditor(
+                        text: $personaDraft,
+                        placeholder: "One sentence about tone, style, or boundaries.",
+                        limit: personaLimit,
+                        minHeight: 88
+                    )
+                } header: {
+                    Label("How Dominus Should Talk", systemImage: "bubble.left.and.bubble.right")
+                }
+
+                Section {
+                    ForEach(goalDrafts.indices, id: \.self) { index in
+                        LimitedTextField(
+                            title: "Goal \(index + 1)",
+                            text: $goalDrafts[index],
+                            limit: shortLimit,
+                            autocapitalization: .sentences
+                        )
+                    }
+                } header: {
+                    Label("Current Goals", systemImage: "flag")
+                } footer: {
+                    Text("Up to three short goals. Keep each one to a single sentence.")
+                }
+
+                Section {
+                    ForEach(behaviorDrafts.indices, id: \.self) { index in
+                        LimitedTextField(
+                            title: "Behavior \(index + 1)",
+                            text: $behaviorDrafts[index],
+                            limit: shortLimit,
+                            autocapitalization: .sentences
+                        )
+                    }
+                } header: {
+                    Label("Important Behavior", systemImage: "slider.horizontal.3")
+                } footer: {
+                    Text("Use these for stable preferences like directness, brevity, or when Dominus should ask before assuming.")
+                }
+
+                Section {
+                    Label(
+                        "This profile is always added to prompts. Keep it short and do not include secrets, hidden commands, or dangerous instructions.",
+                        systemImage: "exclamationmark.triangle"
+                    )
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+
+                    Label(
+                        "Dominus is a local AI tool. Use it as support, not as a replacement for professional help, judgment, relationships, or real-world safety decisions.",
+                        systemImage: "info.circle"
+                    )
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                } header: {
+                    Text("Important")
+                }
+
+                if hasProfileContent {
+                    Section {
+                        Button(role: .destructive) {
+                            clearDrafts()
+                            store.deleteAll()
+                            store.persona = ""
+                        } label: {
+                            Label("Clear profile", systemImage: "trash")
+                        }
+                    }
                 }
             }
-            .navigationTitle("Add Fact")
+            .navigationTitle("Profile & Preferences")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
-                }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Add") {
-                        let k = key.trimmingCharacters(in: .whitespacesAndNewlines)
-                        let v = value.trimmingCharacters(in: .whitespacesAndNewlines)
-                        if !k.isEmpty && !v.isEmpty {
-                            store.upsert(key: k, value: v)
-                        }
+                    Button("Done") {
+                        save()
                         dismiss()
                     }
-                    .disabled(key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
-                              value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
+            .onAppear(perform: loadDrafts)
         }
+    }
+
+    private var hasProfileContent: Bool {
+        !displayNameDraft.trimmed.isEmpty
+            || !jobTitleDraft.trimmed.isEmpty
+            || !appPurposeDraft.trimmed.isEmpty
+            || !personaDraft.trimmed.isEmpty
+            || goalDrafts.contains { !$0.trimmed.isEmpty }
+            || behaviorDrafts.contains { !$0.trimmed.isEmpty }
+    }
+
+    private func loadDrafts() {
+        displayNameDraft = store.displayName
+        appPurposeDraft = store.appPurpose
+        personaDraft = store.persona
+        jobTitleDraft = store.jobTitle
+        goalDrafts = padded(store.goals, count: 3)
+        behaviorDrafts = padded(store.behaviorNotes, count: 3)
+    }
+
+    private func save() {
+        store.updateDisplayName(limited(displayNameDraft, nameLimit))
+        store.updateJobTitle(limited(jobTitleDraft, shortLimit))
+        store.updateAppPurpose(limited(appPurposeDraft, purposeLimit))
+        store.persona = limited(personaDraft, personaLimit)
+        store.updateGoals(goalDrafts.map { limited($0, shortLimit) })
+        store.updateBehaviorNotes(behaviorDrafts.map { limited($0, shortLimit) })
+    }
+
+    private func clearDrafts() {
+        displayNameDraft = ""
+        appPurposeDraft = ""
+        personaDraft = ""
+        jobTitleDraft = ""
+        goalDrafts = Array(repeating: "", count: 3)
+        behaviorDrafts = Array(repeating: "", count: 3)
+    }
+
+    private func padded(_ values: [String], count: Int) -> [String] {
+        Array((values + Array(repeating: "", count: count)).prefix(count))
+    }
+
+    private func limited(_ text: String, _ limit: Int) -> String {
+        String(text.trimmed.prefix(limit))
+    }
+}
+
+private struct LimitedTextField: View {
+    let title: String
+    @Binding var text: String
+    let limit: Int
+    var autocapitalization: TextInputAutocapitalization = .sentences
+
+    var body: some View {
+        TextField(title, text: $text)
+            .textInputAutocapitalization(autocapitalization)
+            .autocorrectionDisabled()
+            .onChange(of: text) { _ in
+                if text.count > limit {
+                    text = String(text.prefix(limit))
+                }
+            }
+    }
+}
+
+private struct LimitedTextEditor: View {
+    @Binding var text: String
+    let placeholder: String
+    let limit: Int
+    let minHeight: CGFloat
+
+    var body: some View {
+        VStack(alignment: .trailing, spacing: 4) {
+            ZStack(alignment: .topLeading) {
+                if text.isEmpty {
+                    Text(placeholder)
+                        .foregroundStyle(.secondary)
+                        .font(.callout)
+                        .padding(.top, 8)
+                        .padding(.leading, 4)
+                        .allowsHitTesting(false)
+                }
+                TextEditor(text: $text)
+                    .font(.callout)
+                    .frame(minHeight: minHeight)
+                    .scrollContentBackground(.hidden)
+                    .onChange(of: text) { _ in
+                        if text.count > limit {
+                            text = String(text.prefix(limit))
+                        }
+                    }
+            }
+            Text("\(text.count)/\(limit)")
+                .font(.caption2)
+                .foregroundStyle(text.count >= limit ? .orange : .secondary)
+        }
+    }
+}
+
+private extension String {
+    var trimmed: String {
+        trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }

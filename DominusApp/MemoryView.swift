@@ -2,17 +2,19 @@ import SwiftUI
 
 struct MemoryView: View {
     @Environment(\.dismiss) private var dismiss
-    @ObservedObject private var traceStore = MemoryTraceStore.shared
 
     let conversation: Conversation?
     var onRequestLLMRefinement: (MemoryRecord) -> Void = { _ in }
-    var onRequestJournalCleanup: () -> Void = {}
+    var onRequestEditSummary: (String) async -> String? = { _ in nil }
 
-    @State private var pendingSuggestions: [MemoryRecord] = []
     @State private var journalMemories: [MemoryRecord] = []
     @State private var showAddMemory = false
     @State private var editingMemory: MemoryRecord?
     @State private var refreshTask: Task<Void, Never>?
+    @State private var searchText = ""
+    @State private var sortOrder: MemorySortOrder = .newestFirst
+    @State private var useDateFilter = false
+    @State private var selectedDate = Date()
 
     private var conversationID: UUID? {
         conversation?.id
@@ -21,38 +23,33 @@ struct MemoryView: View {
     var body: some View {
         NavigationStack {
             List {
-                if !pendingSuggestions.isEmpty {
-                    Section {
-                        ForEach(pendingSuggestions) { memory in
-                            MemoryRecordRow(
-                                memory: memory,
-                                onAccept: {
-                                    accept(memory)
-                                },
-                                onDelete: {
-                                    forgetEverywhere(memory)
-                                    refresh()
-                                }
-                            )
+                Section {
+                    Picker("Sort", selection: $sortOrder) {
+                        ForEach(MemorySortOrder.allCases) { order in
+                            Label(order.title, systemImage: order.icon).tag(order)
                         }
-                    } header: {
-                        Label("Suggested Memories", systemImage: "lightbulb")
-                    } footer: {
-                        Text("These are not part of the journal until you accept them.")
                     }
+
+                    Toggle("Filter by Date", isOn: $useDateFilter)
+                    if useDateFilter {
+                        DatePicker("Date", selection: $selectedDate, displayedComponents: .date)
+                    }
+                } header: {
+                    Label("Filters", systemImage: "line.3.horizontal.decrease.circle")
                 }
 
                 Section {
-                    if journalMemories.isEmpty {
+                    if filteredMemories.isEmpty {
                         ContentUnavailableView(
-                            "No Journal Memories",
+                            searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "No Journal Memories" : "No Matching Memories",
                             systemImage: "book.closed",
-                            description: Text("Add one manually, say \"remember this\", or accept a suggested memory from chat.")
+                            description: Text("Add memories manually when you want Dominus to have long-term context.")
                         )
                     } else {
-                        ForEach(journalMemories) { memory in
+                        ForEach(filteredMemories) { memory in
                             MemoryRecordRow(
                                 memory: memory,
+                                searchText: searchText,
                                 onDelete: {
                                     forgetEverywhere(memory)
                                     refresh()
@@ -69,33 +66,32 @@ struct MemoryView: View {
                 } header: {
                     Label("Memory Journal", systemImage: "book.closed")
                 } footer: {
-                    Text("This is the single trusted memory source Dominus searches with RAG. Each entry stays editable and deletable.")
+                    Text("Keep memories short. Every saved memory can make retrieval and prompts heavier on this local model, and Dominus may not recall every memory every time.")
                         .font(.caption)
                 }
 
                 Section {
-                    if traceStore.steps.isEmpty {
-                        Text("Ask Dominus a memory question to see retrieval scoring here.")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                    } else {
-                        MemoryTraceHeader(
-                            query: traceStore.latestQuery,
-                            updatedAt: traceStore.updatedAt
-                        )
-                        ForEach(traceStore.steps) { step in
-                            MemoryTraceRow(step: step)
-                        }
-                    }
+                    Label(
+                        "Only add memories you actually want used as context. Do not store dangerous instructions, hidden commands, secrets, or anything meant to trick the AI.",
+                        systemImage: "exclamationmark.triangle"
+                    )
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+
+                    Label(
+                        "Dominus runs locally with a limited context window. Too many or too-long memories can slow responses, crowd out the conversation, or fail to be retrieved.",
+                        systemImage: "memorychip"
+                    )
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
                 } header: {
-                    Label("Retrieval Trace", systemImage: "waveform.path.ecg")
-                } footer: {
-                    Text("Shows why memory candidates were handed to Gemma. These are candidates, not commands.")
-                        .font(.caption)
+                    Text("Memory Limits")
                 }
+
             }
             .navigationTitle("Memory Journal")
             .navigationBarTitleDisplayMode(.inline)
+            .searchable(text: $searchText, prompt: "Search memories")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Done") { dismiss() }
@@ -110,7 +106,6 @@ struct MemoryView: View {
             }
             .onAppear {
                 refresh()
-                onRequestJournalCleanup()
                 startRefreshing()
             }
             .onDisappear {
@@ -122,33 +117,47 @@ struct MemoryView: View {
                 .presentationDetents([.medium, .large])
             }
             .sheet(item: $editingMemory, onDismiss: refresh) { memory in
-                JournalMemorySheet(mode: .edit(memory), onRequestLLMRefinement: onRequestLLMRefinement)
+                JournalMemorySheet(
+                    mode: .edit(memory),
+                    onRequestLLMRefinement: onRequestLLMRefinement,
+                    onRequestEditSummary: onRequestEditSummary
+                )
                 .presentationDetents([.medium, .large])
             }
         }
     }
 
+    private var filteredMemories: [MemoryRecord] {
+        let terms = searchTerms(from: searchText)
+        return journalMemories
+            .filter { memory in
+                guard useDateFilter else { return true }
+                return Calendar.current.isDate(memory.createdAt, inSameDayAs: selectedDate)
+            }
+            .filter { memory in
+                guard !terms.isEmpty else { return true }
+                let lower = memory.content.lowercased()
+                return terms.allSatisfy { lower.contains($0) }
+            }
+            .sorted { lhs, rhs in
+                switch sortOrder {
+                case .newestFirst:
+                    return lhs.createdAt > rhs.createdAt
+                case .oldestFirst:
+                    return lhs.createdAt < rhs.createdAt
+                }
+            }
+    }
+
     private func refresh() {
-        if let conversationID {
-            pendingSuggestions = MemoryStore.shared.fetch(conversationID: conversationID)
-                .filter { $0.kind == .memoryCandidate }
-        } else {
-            pendingSuggestions = []
-        }
         journalMemories = MemoryStore.shared.fetch(scope: .longTerm)
     }
 
     private func deleteJournal(offsets: IndexSet) {
         offsets.forEach { offset in
-            guard journalMemories.indices.contains(offset) else { return }
-            forgetEverywhere(journalMemories[offset])
-        }
-        refresh()
-    }
-
-    private func accept(_ memory: MemoryRecord) {
-        if let saved = MemoryRetriever.shared.acceptCandidate(memory) {
-            onRequestLLMRefinement(saved)
+            let memories = filteredMemories
+            guard memories.indices.contains(offset) else { return }
+            forgetEverywhere(memories[offset])
         }
         refresh()
     }
@@ -166,7 +175,34 @@ struct MemoryView: View {
 
     private func forgetEverywhere(_ memory: MemoryRecord) {
         MemoryStore.shared.deleteMatching(content: memory.content)
-        ProfileStore.shared.deleteFactsMatching(memoryText: memory.content)
+    }
+
+    private func searchTerms(from text: String) -> [String] {
+        text.lowercased()
+            .components(separatedBy: .alphanumerics.inverted)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+}
+
+private enum MemorySortOrder: String, CaseIterable, Identifiable {
+    case newestFirst
+    case oldestFirst
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .newestFirst: return "Newest to Oldest"
+        case .oldestFirst: return "Oldest to Newest"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .newestFirst: return "arrow.down"
+        case .oldestFirst: return "arrow.up"
+        }
     }
 }
 
@@ -244,6 +280,7 @@ private struct MemoryHubRow: View {
 
 private struct MemoryRecordRow: View {
     let memory: MemoryRecord
+    var searchText: String = ""
     var onAccept: (() -> Void)? = nil
     var onDelete: (() -> Void)? = nil
     var onEdit: (() -> Void)? = nil
@@ -255,14 +292,27 @@ private struct MemoryRecordRow: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
-                Text(memory.updatedAt, style: .date)
+                Text(memory.createdAt.formatted(date: .abbreviated, time: .shortened))
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             }
 
-            Text(displayContent)
+            highlightedText(displayContent, query: searchText)
                 .font(.callout)
                 .textSelection(.enabled)
+
+            if MemoryStore.shared.hasPendingAISummary(memory) {
+                Label(
+                    "Dominus is processing this memory request and will summarize it for app efficiency.",
+                    systemImage: "hourglass"
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            } else if MemoryStore.shared.hasBeenRefinedOnce(memory) {
+                Label("AI summary completed.", systemImage: "checkmark.seal")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
 
             if !metadataSummary.isEmpty {
                 Text(metadataSummary)
@@ -289,7 +339,7 @@ private struct MemoryRecordRow: View {
                     .buttonStyle(.bordered)
                 }
                 .font(.caption)
-            } else if onEdit != nil || onDelete != nil {
+            } else if onDelete != nil {
                 HStack {
                     if let onEdit {
                         Button {
@@ -337,50 +387,100 @@ private struct MemoryRecordRow: View {
         ].compactMap { $0 }
         return parts.joined(separator: "  ")
     }
-}
 
-private struct MemoryTraceHeader: View {
-    let query: String
-    let updatedAt: Date?
+    private func highlightedText(_ text: String, query: String) -> Text {
+        let terms = query.lowercased()
+            .components(separatedBy: .alphanumerics.inverted)
+            .filter { !$0.isEmpty }
+        guard !terms.isEmpty else { return Text(text) }
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Latest Query")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-            Text(query.isEmpty ? "No query yet." : query)
-                .font(.callout)
-                .textSelection(.enabled)
-            if let updatedAt {
-                Text(updatedAt, style: .time)
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
+        var attributed = AttributedString(text)
+        let lower = text.lowercased()
+        for term in terms {
+            var searchStart = lower.startIndex
+            while let range = lower.range(of: term, range: searchStart..<lower.endIndex) {
+                if let start = AttributedString.Index(range.lowerBound, within: attributed),
+                   let end = AttributedString.Index(range.upperBound, within: attributed) {
+                    attributed[start..<end].backgroundColor = .yellow.opacity(0.35)
+                    attributed[start..<end].foregroundColor = .primary
+                }
+                searchStart = range.upperBound
             }
         }
-        .padding(.vertical, 4)
+        return Text(attributed)
     }
 }
 
-private struct MemoryTraceRow: View {
-    let step: MemoryTraceStep
+enum UserMemoryFormatter {
+    static func memoryContent(from rawContent: String) -> String {
+        let clean = rawContent
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return clean }
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(step.title)
-                    .font(.subheadline.weight(.semibold))
-                Spacer()
-                Text(step.timestamp, style: .time)
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
+        let summarized = MemorySummaryBuilder.summary(from: clean, maxItems: 3) ?? clean
+        let compact = summarized
+            .components(separatedBy: .newlines)
+            .map {
+                $0.replacingOccurrences(of: #"^\s*[-•]\s*"#, with: "", options: .regularExpression)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
             }
+            .filter { !$0.isEmpty }
+            .joined(separator: "; ")
 
-            Text(step.detail)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .textSelection(.enabled)
+        return describeUserMemory(compact.isEmpty ? clean : compact)
+    }
+
+    private static func describeUserMemory(_ text: String) -> String {
+        let profileName = ProfileStore.shared.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let subject = profileName.isEmpty ? "The user" : profileName
+        var memory = text
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "."))
+
+        let replacements: [(String, String)] = [
+            (#"(?i)^i\s+am\s+"#, "\(subject) is "),
+            (#"(?i)^i'm\s+"#, "\(subject) is "),
+            (#"(?i)^i\s+have\s+"#, "\(subject) has "),
+            (#"(?i)^i\s+like\s+"#, "\(subject) likes "),
+            (#"(?i)^i\s+love\s+"#, "\(subject) loves "),
+            (#"(?i)^i\s+prefer\s+"#, "\(subject) prefers "),
+            (#"(?i)^i\s+want\s+"#, "\(subject) wants "),
+            (#"(?i)^i\s+need\s+"#, "\(subject) needs "),
+            (#"(?i)^my\s+"#, "\(subject)'s "),
+            (#"(?i)^me\s+"#, "\(subject) ")
+        ]
+
+        for (pattern, replacement) in replacements {
+            if memory.range(of: pattern, options: .regularExpression) != nil {
+                memory = memory.replacingOccurrences(
+                    of: pattern,
+                    with: replacement,
+                    options: .regularExpression
+                )
+                return finish(memory)
+            }
         }
-        .padding(.vertical, 4)
+
+        let lower = memory.lowercased()
+        if lower.hasPrefix(subject.lowercased()) || lower.hasPrefix("the user ") {
+            return finish(memory)
+        }
+        return finish("\(subject) said \(lowercaseFirst(memory))")
+    }
+
+    private static func finish(_ text: String) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return trimmed }
+        let punctuated = trimmed.hasSuffix(".") || trimmed.hasSuffix("!") || trimmed.hasSuffix("?")
+            ? trimmed
+            : "\(trimmed)."
+        return String(punctuated.prefix(1)).uppercased() + String(punctuated.dropFirst())
+    }
+
+    private static func lowercaseFirst(_ text: String) -> String {
+        guard let first = text.first else { return text }
+        return first.lowercased() + text.dropFirst()
     }
 }
 
@@ -389,8 +489,13 @@ private struct JournalMemorySheet: View {
 
     let mode: Mode
     var onRequestLLMRefinement: (MemoryRecord) -> Void = { _ in }
+    var onRequestEditSummary: (String) async -> String? = { _ in nil }
 
     @State private var content: String
+    @State private var summaryDraft = ""
+    @State private var isSummarizing = false
+    @State private var hasRequestedEditSummary = false
+    @State private var summaryError: String?
 
     enum Mode {
         case add
@@ -408,10 +513,12 @@ private struct JournalMemorySheet: View {
 
     init(
         mode: Mode,
-        onRequestLLMRefinement: @escaping (MemoryRecord) -> Void = { _ in }
+        onRequestLLMRefinement: @escaping (MemoryRecord) -> Void = { _ in },
+        onRequestEditSummary: @escaping (String) async -> String? = { _ in nil }
     ) {
         self.mode = mode
         self.onRequestLLMRefinement = onRequestLLMRefinement
+        self.onRequestEditSummary = onRequestEditSummary
         switch mode {
         case .add:
             _content = State(initialValue: "")
@@ -426,62 +533,188 @@ private struct JournalMemorySheet: View {
                 Section {
                     TextEditor(text: $content)
                         .frame(minHeight: 180)
-                    Button {
-                        generateSummary()
-                    } label: {
-                        Label("Summarize Memory", systemImage: "wand.and.sparkles")
-                    }
-                    .disabled(content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 } header: {
                     Text("Memory")
                 } footer: {
-                    Text("Dominus searches these journal entries when they are relevant to the latest message.")
+                    Text(footerText)
+                }
+
+                if case .edit = mode {
+                    Section {
+                        if isSummarizing {
+                            HStack {
+                                ProgressView()
+                                Text("Creating AI summary...")
+                                    .foregroundStyle(.secondary)
+                            }
+                        } else if summaryDraft.isEmpty {
+                            Button {
+                                requestEditSummary()
+                            } label: {
+                                Label("Generate Summary", systemImage: "wand.and.sparkles")
+                            }
+                            .disabled(
+                                hasRequestedEditSummary ||
+                                content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            )
+                        } else {
+                            Text(summaryDraft)
+                                .font(.callout)
+                                .textSelection(.enabled)
+
+                            HStack {
+                                Button {
+                                    acceptEditSummary()
+                                } label: {
+                                    Label("Accept Summary", systemImage: "checkmark.circle")
+                                }
+                                .buttonStyle(.borderedProminent)
+
+                                Button {
+                                    regenerateEditSummary()
+                                } label: {
+                                    Label("Regenerate", systemImage: "arrow.clockwise")
+                                }
+                                .buttonStyle(.bordered)
+                            }
+                            .font(.caption)
+                        }
+
+                        if let summaryError {
+                            Text(summaryError)
+                                .font(.caption)
+                                .foregroundStyle(.red)
+                        }
+                    } header: {
+                        Text("AI Edited Version")
+                    } footer: {
+                        Text("Accepting replaces the saved memory above. Regenerate asks AI to rewrite it again before you accept.")
+                    }
                 }
             }
             .navigationTitle(mode.navigationTitle)
             .navigationBarTitleDisplayMode(.inline)
+            .onChange(of: content) { _ in
+                guard case .edit = mode else { return }
+                summaryDraft = ""
+                hasRequestedEditSummary = false
+                summaryError = nil
+            }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Save") {
+                    Button(saveButtonTitle) {
                         save()
                         dismiss()
                     }
-                    .disabled(content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(saveDisabled)
                 }
             }
         }
     }
 
-    private func generateSummary() {
-        guard let summary = MemorySummaryBuilder.summary(from: content, maxItems: 5) else { return }
-        content = summary
+    private var footerText: String {
+        switch mode {
+        case .add:
+            return "Dominus will shorten this automatically and describe it using your profile name when one is set."
+        case .edit:
+            return "Edit the memory, then create one AI summary. Accepting the summary updates the saved memory."
+        }
+    }
+
+    private var saveButtonTitle: String {
+        switch mode {
+        case .add: return "Save"
+        case .edit: return "Close"
+        }
+    }
+
+    private var saveDisabled: Bool {
+        switch mode {
+        case .add:
+            return content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        case .edit:
+            return false
+        }
     }
 
     private func save() {
         let cleanContent = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        let summarizedContent = UserMemoryFormatter.memoryContent(from: cleanContent)
 
         switch mode {
         case .add:
             let saved = MemoryRetriever.shared.rememberLongTerm(
                 kind: .userFact,
                 title: nil,
-                content: cleanContent,
-                categoryKey: MemoryStore.uncategorizedCategoryKey
+                content: summarizedContent,
+                sourceID: "manual:\(UUID().uuidString)",
+                categoryKey: MemoryHubCategory.profile.rawValue
             )
             saved.forEach(onRequestLLMRefinement)
         case .edit(let memory):
-            MemoryStore.shared.update(
-                memory,
-                kind: .userFact,
-                title: nil,
-                content: MemorySummaryBuilder.bulletSummary(from: cleanContent, maxBullets: 3),
-                categoryKey: MemoryStore.uncategorizedCategoryKey
-            )
-            onRequestLLMRefinement(memory)
+            return
         }
+    }
+
+    private func requestEditSummary() {
+        let cleanContent = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanContent.isEmpty, !hasRequestedEditSummary else { return }
+        hasRequestedEditSummary = true
+        isSummarizing = true
+        summaryError = nil
+
+        Task { @MainActor in
+            let summary = await summaryWithTimeout(for: cleanContent)
+            isSummarizing = false
+            if let summary, !summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                summaryDraft = summary
+            } else {
+                hasRequestedEditSummary = false
+                summaryError = "Dominus could not create a summary right now. Try editing again later."
+            }
+        }
+    }
+
+    private func regenerateEditSummary() {
+        summaryDraft = ""
+        hasRequestedEditSummary = false
+        summaryError = nil
+        requestEditSummary()
+    }
+
+    private func summaryWithTimeout(for content: String) async -> String? {
+        await withTaskGroup(of: String?.self, returning: String?.self) { group in
+            group.addTask {
+                await onRequestEditSummary(content)
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: 12_000_000_000)
+                return UserMemoryFormatter.memoryContent(from: content)
+            }
+
+            let result = await group.next() ?? nil
+            group.cancelAll()
+            return result
+        }
+    }
+
+    private func acceptEditSummary() {
+        guard case let .edit(memory) = mode else { return }
+        let cleanSummary = summaryDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanSummary.isEmpty else { return }
+
+        MemoryStore.shared.update(
+            memory,
+            kind: memory.kind,
+            title: nil,
+            content: cleanSummary,
+            categoryKey: memory.categoryRaw
+        )
+        MemoryStore.shared.markRefinedOnce(memory)
+        dismiss()
     }
 }
 
@@ -495,7 +728,6 @@ private struct MemoryHubDetailView: View {
     @State private var sourceMemories: [MemoryRecord] = []
     @State private var hubSummary = ""
     @State private var showAddMemory = false
-    @State private var editingMemory: MemoryRecord?
 
     var body: some View {
         NavigationStack {
@@ -528,9 +760,6 @@ private struct MemoryHubDetailView: View {
                                 onDelete: {
                                     forgetEverywhere(memory)
                                     refresh()
-                                },
-                                onEdit: {
-                                    editingMemory = memory
                                 }
                             )
                         }
@@ -539,9 +768,9 @@ private struct MemoryHubDetailView: View {
                         }
                     }
                 } header: {
-                    Text("Editable Memories")
+                    Text("Memories")
                 } footer: {
-                    Text("Editing these blocks rebuilds the hub automatically.")
+                    Text("Delete a memory and add a new one if it needs to change.")
                 }
             }
             .navigationTitle(category.title)
@@ -571,14 +800,6 @@ private struct MemoryHubDetailView: View {
                 )
                 .presentationDetents([.medium, .large])
             }
-            .sheet(item: $editingMemory, onDismiss: refresh) { memory in
-                EditMemorySheet(
-                    memory: memory,
-                    categories: categories,
-                    onRequestLLMRefinement: onRequestLLMRefinement
-                )
-                    .presentationDetents([.medium, .large])
-            }
         }
     }
 
@@ -599,7 +820,6 @@ private struct MemoryHubDetailView: View {
 
     private func forgetEverywhere(_ memory: MemoryRecord) {
         MemoryStore.shared.deleteMatching(content: memory.content)
-        ProfileStore.shared.deleteFactsMatching(memoryText: memory.content)
     }
 }
 
@@ -692,15 +912,13 @@ private struct AddMemorySheet: View {
                     }
                 }
 
-                Section("Memory") {
+                Section {
                     TextEditor(text: $content)
                         .frame(minHeight: 140)
-                    Button {
-                        generateSummary()
-                    } label: {
-                        Label("Summarize Memory", systemImage: "wand.and.sparkles")
-                    }
-                    .disabled(content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                } header: {
+                    Text("Memory")
+                } footer: {
+                    Text("Dominus will shorten this automatically and describe it using your profile name when one is set.")
                 }
 
                 Section {
@@ -738,6 +956,7 @@ private struct AddMemorySheet: View {
 
     private func addMemory() {
         let cleanContent = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        let summarizedContent = UserMemoryFormatter.memoryContent(from: cleanContent)
 
         switch tab {
         case .hub:
@@ -747,13 +966,14 @@ private struct AddMemorySheet: View {
             MemoryRetriever.shared.rememberConversationNote(
                 conversationID: conversationID,
                 title: nil,
-                content: cleanContent
+                content: summarizedContent
             )
         case .longTerm:
             let saved = MemoryRetriever.shared.rememberLongTerm(
                 kind: longTermKind,
                 title: nil,
-                content: cleanContent,
+                content: summarizedContent,
+                sourceID: "manual:\(UUID().uuidString)",
                 categoryKey: categoryKey
             )
             saved.forEach(onRequestLLMRefinement)
@@ -762,137 +982,9 @@ private struct AddMemorySheet: View {
         savedCount += 1
     }
 
-    private func generateSummary() {
-        guard let summary = MemorySummaryBuilder.summary(from: content, maxItems: 5) else { return }
-        content = summary
-    }
-
     private func resetDraft() {
         content = ""
         categoryKey = presetCategoryKey ?? MemoryStore.uncategorizedCategoryKey
-    }
-}
-
-private struct EditMemorySheet: View {
-    @Environment(\.dismiss) private var dismiss
-
-    let memory: MemoryRecord
-    let categories: [MemoryCategoryInfo]
-    var onRequestLLMRefinement: (MemoryRecord) -> Void
-
-    @State private var content: String
-    @State private var kind: MemoryKind
-    @State private var categoryKey: String
-
-    init(
-        memory: MemoryRecord,
-        categories: [MemoryCategoryInfo],
-        onRequestLLMRefinement: @escaping (MemoryRecord) -> Void = { _ in }
-    ) {
-        self.memory = memory
-        self.categories = categories
-        self.onRequestLLMRefinement = onRequestLLMRefinement
-        _content = State(initialValue: memory.content)
-        _kind = State(initialValue: memory.kind)
-        _categoryKey = State(initialValue: memory.categoryRaw ?? MemoryStore.uncategorizedCategoryKey)
-    }
-
-    var body: some View {
-        NavigationStack {
-            Form {
-                if memory.scope == .longTerm {
-                    Section("Category") {
-                        if memory.scope == .longTerm {
-                            Picker("Category", selection: $kind) {
-                                Text("User Fact").tag(MemoryKind.userFact)
-                                Text("Preference").tag(MemoryKind.preference)
-                                Text("Goal").tag(MemoryKind.goal)
-                                Text("Task Reference").tag(MemoryKind.taskReference)
-                                Text("App Instruction").tag(MemoryKind.appInstruction)
-                            }
-                        }
-
-                        Picker("Hub", selection: $categoryKey) {
-                            ForEach(categories) { category in
-                                Label(category.title, systemImage: category.icon).tag(category.id)
-                            }
-                        }
-                    }
-                }
-
-                Section("Memory") {
-                    TextEditor(text: $content)
-                        .frame(minHeight: 160)
-                    Button {
-                        generateSummary()
-                    } label: {
-                        Label("Summarize Memory", systemImage: "wand.and.sparkles")
-                    }
-                    .disabled(content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }
-            }
-            .navigationTitle("Edit Memory")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Save") {
-                        save()
-                        dismiss()
-                    }
-                    .disabled(content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }
-            }
-        }
-    }
-
-    private func generateSummary() {
-        guard let summary = MemorySummaryBuilder.summary(from: content, maxItems: 5) else { return }
-        content = summary
-    }
-
-    private func save() {
-        let cleanKind = memory.scope == .longTerm ? kind : memory.kind
-
-        if let profileKey = profileKey(from: memory.sourceID) {
-            ProfileStore.shared.upsert(
-                key: profileKey,
-                value: profileValue(from: content, key: profileKey)
-            )
-            return
-        }
-
-        MemoryStore.shared.update(
-            memory,
-            kind: cleanKind,
-            title: nil,
-            content: MemorySummaryBuilder.bulletSummary(from: content, maxBullets: 3),
-            categoryKey: memory.scope != .conversation ? categoryKey : memory.categoryRaw
-        )
-        if memory.scope == .longTerm {
-            onRequestLLMRefinement(memory)
-        }
-    }
-
-    private func profileKey(from sourceID: String?) -> String? {
-        guard let sourceID, sourceID.hasPrefix("profile:") else { return nil }
-        let key = String(sourceID.dropFirst("profile:".count))
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return key.isEmpty ? nil : key
-    }
-
-    private func profileValue(from text: String, key: String) -> String {
-        let trimmed = text
-            .replacingOccurrences(of: "•", with: " ")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let prefix = "User \(key):"
-        if trimmed.lowercased().hasPrefix(prefix.lowercased()) {
-            return String(trimmed.dropFirst(prefix.count))
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-        return trimmed
     }
 }
 

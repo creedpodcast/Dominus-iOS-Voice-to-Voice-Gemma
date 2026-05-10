@@ -177,14 +177,17 @@ final class ChatStore: ObservableObject {
     /// Tracks an in-flight LLM title generation. Cancelled when the user sends a new message
     /// so chat generation always wins over title generation for the single LlamaService instance.
     private var titleTask: Task<Void, Never>?
+    private var conversationMaintenanceTask: Task<Void, Never>?
     /// Background memory refinement also uses the single LlamaService instance, so chat wins.
     private var memoryRefinementTask: Task<Void, Never>?
     private var pendingMemoryRefinements: [MemoryRecord] = []
+    private var isMemoryRefining = false
+    private let maxMemorySummaryChars = 900
 
     private let engine = GemmaEngine()
 
     /// Core identity — kept intentionally short to conserve token budget.
-    private let systemPrompt = "You are Dominus — a friendly but curious AI Assistant. Answer the user's latest message directly. Older chat messages are background context, not a new request. If provided memory directly answers the latest message, use it plainly; otherwise ignore unrelated memory. Do not keep bringing up memory after the user changes topics. Do not add unsolicited greetings, introductions, or preambles, even on the first turn of a new chat."
+    private let systemPrompt = "You are Dominus — a friendly but curious AI Assistant. Answer the user's latest message directly. Stable cross-chat context comes only from the user profile. Retrieved memory is current-chat context only; use it plainly if it directly helps, otherwise ignore it. Do not claim to save long-term memories from chat. Do not keep bringing up memory after the user changes topics. Do not add unsolicited greetings, introductions, or preambles, even on the first turn of a new chat."
     
     /// Keep only the latest few raw turns in the prompt.
     /// Older current-chat context is covered by conversation RAG summaries/exchanges.
@@ -255,6 +258,27 @@ final class ChatStore: ObservableObject {
         return min(1.0, max(0.0, usage))
     }
 
+    private func activeConversationMemoryContext(in conversation: Conversation, maxMessages: Int = 6) -> String {
+        conversation.messages
+            .filter { !isMemoryStatusMessage($0.content) }
+            .suffix(maxMessages)
+            .compactMap { message in
+                let roleLabel: String
+                switch message.role {
+                case .user:
+                    roleLabel = "User"
+                case .assistant:
+                    roleLabel = "Assistant"
+                }
+                let trimmed = message.content
+                    .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty else { return nil }
+                return "\(roleLabel): \(String(trimmed.prefix(240)))"
+            }
+            .joined(separator: "\n")
+    }
+
     private func indexForSelectedConversation() -> Int? {
         guard let id = selectedID else { return nil }
         return conversations.firstIndex(where: { $0.id == id })
@@ -280,45 +304,6 @@ final class ChatStore: ObservableObject {
         } else {
             saveToDisk()
         }
-    }
-
-    func confirmLatestPendingMemory(accept: Bool) {
-        guard let convoIndex = indexForSelectedConversation() else { return }
-        let pending = latestPendingMemoryCandidates(conversationID: conversations[convoIndex].id)
-        guard !pending.isEmpty else { return }
-
-        handlePendingMemoryConfirmation(
-            accept ? .accept : .dismiss,
-            records: pending,
-            convoIndex: convoIndex
-        )
-    }
-
-    func rememberMessage(_ messageID: UUID) {
-        guard let convoIndex = indexForSelectedConversation(),
-              let message = conversations[convoIndex].messages.first(where: { $0.id == messageID })
-        else { return }
-        guard !isMemoryStatusMessage(message.content) else { return }
-
-        let summary = MemorySummaryBuilder.chatBubbleSummary(
-            from: message.content,
-            isUser: message.role == .user,
-            maxBullets: 3
-        )
-        guard !summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-
-        let kind: MemoryKind = message.role == .user ? .userFact : .wikiEntry
-        let memorySource = message.role == .user
-            ? "User: \(message.content)"
-            : summary
-        let savedRecords = MemoryRetriever.shared.rememberLongTerm(
-            kind: kind,
-            title: nil,
-            content: memorySource,
-            categoryKey: MemoryStore.uncategorizedCategoryKey
-        )
-        savedRecords.forEach { scheduleMemoryRefinement(for: $0) }
-        appendMemoryStatus("Added to Memory:\n\(summary)", convoIndex: convoIndex, speak: voiceEnabled)
     }
 
     func renameConversation(_ convoID: UUID, to newTitle: String) {
@@ -352,13 +337,16 @@ final class ChatStore: ObservableObject {
         // unwind so the new chat stream doesn't collide with an in-flight title stream.
         titleTask?.cancel()
         memoryRefinementTask?.cancel()
+        conversationMaintenanceTask?.cancel()
         generationTask?.cancel()
         let prevTitle = titleTask
         let prevMemoryRefinement = memoryRefinementTask
+        let prevMaintenance = conversationMaintenanceTask
         let prevGen = generationTask
         generationTask = Task { @MainActor [weak self] in
             await prevTitle?.value
             await prevMemoryRefinement?.value
+            await prevMaintenance?.value
             await prevGen?.value
             await self?._send(
                 userText,
@@ -409,8 +397,6 @@ final class ChatStore: ObservableObject {
             return
         }
 
-        isGenerating = true
-
         if hasVisibleUserText {
             conversations[convoIndex].messages.append(ChatMessage(role: .user, content: visibleUserText))
         }
@@ -421,20 +407,6 @@ final class ChatStore: ObservableObject {
         saveToDisk()
 
         if hasVisibleUserText,
-           let decision = memoryConfirmationDecision(from: visibleUserText) {
-            let pending = latestPendingMemoryCandidates(conversationID: conversations[convoIndex].id)
-            if !pending.isEmpty {
-                handlePendingMemoryConfirmation(
-                    decision,
-                    records: pending,
-                    convoIndex: convoIndex
-                )
-                isGenerating = false
-                return
-            }
-        }
-
-        if hasVisibleUserText,
            let undoContent = memoryUndoContent(from: visibleUserText, in: conversations[convoIndex]) {
             MemoryStore.shared.deleteMatching(content: undoContent)
             appendMemoryStatus("Forgot Memory:\n\(undoContent)", convoIndex: convoIndex, speak: voiceEnabled)
@@ -442,32 +414,25 @@ final class ChatStore: ObservableObject {
             return
         }
 
-        var capturedMemorySignal: CapturedMemorySignal?
-
-        // ── Auto-extract personal facts from user message ──────────────────
-        if hasVisibleUserText {
-            ProfileStore.shared.extractAndSave(from: visibleUserText)
-            capturedMemorySignal = captureMemorySignals(
-                from: visibleUserText,
-                in: conversations[convoIndex],
-                conversationID: conversations[convoIndex].id
-            )
-        }
+        isGenerating = true
 
         // ── Build LLM context ──────────────────────────────────────────────
         // 1. User profile — always injected first
         let profileBlock = ProfileStore.shared.systemPromptBlock()
 
-        // 2. Retrieve semantically relevant memories from THIS conversation only.
-        // Cross-conversation retrieval is intentionally disabled — see MemoryRetriever.
+        // 2. Retrieve older current-chat context only when the latest message asks for recall.
         let recentAssistantText = conversations[convoIndex].messages.reversed()
             .first(where: { $0.role == .assistant && !isMemoryStatusMessage($0.content) })?
             .content
-        let memoryContext = hasVisibleUserText
+        let activeConversationContext = activeConversationMemoryContext(in: conversations[convoIndex])
+        let shouldRetrieveCurrentChat = hasVisibleUserText && shouldUseCurrentChatRecall(for: visibleUserText)
+        let memoryContext = shouldRetrieveCurrentChat
             ? MemoryRetriever.shared.retrieve(
                 query: visibleUserText,
                 conversationID: conversations[convoIndex].id,
                 recentAssistantText: recentAssistantText,
+                profileContext: profileBlock,
+                activeConversationContext: activeConversationContext,
                 topK: 5
             )
             : ""
@@ -479,9 +444,6 @@ final class ChatStore: ObservableObject {
         }
         if !memoryContext.isEmpty {
             fullSystemPrompt += "\n\n\(memoryContext)"
-        }
-        if case let .contextRequest(contextPacket) = capturedMemorySignal {
-            fullSystemPrompt += "\n\n\(memoryContextResolutionPromptBlock(contextPacket))"
         }
         let recentAmbientContext = recentAmbientEventsPromptBlock(for: conversations[convoIndex])
         if !recentAmbientContext.isEmpty {
@@ -529,14 +491,14 @@ final class ChatStore: ObservableObject {
         }
 
         do {
-            let stream = try await engine.streamChat(llmMessages, temperature: 0.7, seed: 42)
-
-            let placeholder = ChatMessage(role: .assistant, content: "")
+            let placeholder = ChatMessage(role: .assistant, content: "Thinking...")
             conversations[convoIndex].messages.append(placeholder)
 
             let assistantIndex = conversations[convoIndex].messages.count - 1
             let assistantID    = conversations[convoIndex].messages[assistantIndex].id
             let assistantTS    = conversations[convoIndex].messages[assistantIndex].timestamp
+
+            let stream = try await engine.streamChat(llmMessages, temperature: 0.7, seed: 42)
 
             var assistantText = ""
             var ttsBuffer     = ""
@@ -602,43 +564,15 @@ final class ChatStore: ObservableObject {
                         userText: visibleUserText,
                         assistantText: cleanedAssistant
                     )
-                    summarizeOlderMessagesIfNeeded(convoIndex: convoIndex)
-                    updateEpisodeSummary(convoIndex: convoIndex)
+                    scheduleConversationMaintenance(for: conversations[convoIndex].id)
                 }
             }
 
-            if case let .contextRequest(contextPacket) = capturedMemorySignal {
-                let proposedMemory = memoryCandidateFromAssistantAcknowledgement(
-                    cleanedAssistant,
-                    fallbackContext: contextPacket
-                )
-                let records = MemoryRetriever.shared.rememberContextCandidate(
-                    conversationID: conversations[convoIndex].id,
-                    title: "Dominus proposed memory summary",
-                    content: proposedMemory
-                )
-                if !records.isEmpty {
-                    let preview = records.map(\.content).joined(separator: "\n")
-                    appendMemoryStatus(
-                        "Memory Suggestion:\nAdded Memory Preview:\n\(preview)\nSay yes to add this to Memory Journal, or no to dismiss.",
-                        convoIndex: convoIndex,
-                        speak: false
-                    )
-                }
-            } else if case let .candidates(records) = capturedMemorySignal {
-                let preview = records.map(\.content).joined(separator: "\n")
-                appendMemoryStatus(
-                    "Memory Suggestion:\nAdded Memory Preview:\n\(preview)\nSay yes to add this to Memory Journal, or no to dismiss.",
-                    convoIndex: convoIndex,
-                    speak: false
-                )
-            }
-
-            // ── Schedule LLM title generation after the 5th user turn ──
+            // ── Schedule LLM title generation after the 8th user turn ──
             // Earlier turns rely on the exit triggers (chat-switch, app-background)
             // to produce a title for short-lived chats.
             let userTurns = conversations[convoIndex].messages.filter { $0.role == .user }.count
-            if hasVisibleUserText && userTurns >= 5 {
+            if hasVisibleUserText && userTurns >= 8 {
                 scheduleTitleGeneration(for: conversations[convoIndex].id)
             }
 
@@ -648,13 +582,15 @@ final class ChatStore: ObservableObject {
             if Task.isCancelled || error is CancellationError {
                 // User interrupted — keep partial response, remove empty placeholder
                 if let idx = conversations[convoIndex].messages.indices.last,
-                   conversations[convoIndex].messages[idx].content.isEmpty {
+                   conversations[convoIndex].messages[idx].content.isEmpty ||
+                    conversations[convoIndex].messages[idx].content == "Thinking..." {
                     conversations[convoIndex].messages.removeLast()
                 }
                 SpeechManager.shared.stopAndClear()
             } else {
                 if let idx = conversations[convoIndex].messages.indices.last,
-                   conversations[convoIndex].messages[idx].content.isEmpty {
+                   conversations[convoIndex].messages[idx].content.isEmpty ||
+                    conversations[convoIndex].messages[idx].content == "Thinking..." {
                     conversations[convoIndex].messages.removeLast()
                 }
                 SpeechManager.shared.stopAndClear()
@@ -906,6 +842,19 @@ final class ChatStore: ObservableObject {
         saveToDisk()
     }
 
+    private func scheduleConversationMaintenance(for conversationID: UUID) {
+        conversationMaintenanceTask?.cancel()
+        conversationMaintenanceTask = Task { @MainActor [weak self] in
+            defer { self?.conversationMaintenanceTask = nil }
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            guard let self else { return }
+            guard !self.isGenerating, !self.isMemoryRefining else { return }
+            guard let index = self.conversations.firstIndex(where: { $0.id == conversationID }) else { return }
+            self.summarizeOlderMessagesIfNeeded(convoIndex: index)
+            self.updateEpisodeSummary(convoIndex: index)
+        }
+    }
+
     private func compactSummary(for messages: [ChatMessage]) -> String {
         messages.map { message in
             guard message.role == .user else { return "" }
@@ -1011,95 +960,6 @@ final class ChatStore: ObservableObject {
             .filter { seen.insert($0).inserted }
     }
 
-    private enum MemoryConfirmationDecision {
-        case accept
-        case dismiss
-    }
-
-    private enum CapturedMemorySignal {
-        case candidates([MemoryRecord])
-        case contextRequest(String)
-    }
-
-    private func captureMemorySignals(from userText: String, in conversation: Conversation, conversationID: UUID) -> CapturedMemorySignal? {
-        if let explicitMemory = explicitRememberContent(from: userText, in: conversation) {
-            if isRecentContextMemoryPacket(explicitMemory) {
-                return .contextRequest(explicitMemory)
-            }
-            let records = MemoryRetriever.shared.rememberCandidates(
-                conversationID: conversationID,
-                title: "User asked Dominus to remember",
-                content: explicitMemory
-            )
-            return records.isEmpty ? nil : .candidates(records)
-        }
-
-        guard let candidate = memoryCandidateContent(from: userText) else { return nil }
-        let records = MemoryRetriever.shared.rememberCandidates(
-            conversationID: conversationID,
-            title: "Possible long-term memory",
-            content: candidate
-        )
-        return records.isEmpty ? nil : .candidates(records)
-    }
-
-    private func latestPendingMemoryCandidates(conversationID: UUID) -> [MemoryRecord] {
-        let candidates = MemoryStore.shared.fetch(conversationID: conversationID)
-            .filter { $0.kind == .memoryCandidate }
-            .sorted { $0.updatedAt > $1.updatedAt }
-        guard let latest = candidates.first else { return [] }
-        guard let sourceID = latest.sourceID, !sourceID.isEmpty else { return [latest] }
-        return candidates
-            .filter { $0.sourceID == sourceID }
-            .sorted { $0.createdAt < $1.createdAt }
-    }
-
-    private func memoryConfirmationDecision(from text: String) -> MemoryConfirmationDecision? {
-        let normalized = text
-            .lowercased()
-            .replacingOccurrences(of: "[^a-z\\s']", with: " ", options: .regularExpression)
-            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !normalized.isEmpty else { return nil }
-
-        let words = normalized.split(separator: " ")
-        let shortReply = words.count <= 8
-
-        let exactAccept = ["yes", "yeah", "yep", "sure", "okay", "ok", "yes please"]
-        let exactDismiss = ["no", "nah", "nope", "no thanks", "never mind", "nevermind"]
-        let acceptCommands = [
-            "please do", "do it", "remember it", "remember that",
-            "add it", "add that", "save it", "save that", "add to memory"
-        ]
-        let dismissCommands = [
-            "don't", "do not", "forget it", "forget that", "delete it",
-            "delete that", "dismiss it", "dismiss that"
-        ]
-
-        if exactDismiss.contains(normalized)
-            || dismissCommands.contains(where: { shortReply && normalized.contains($0) }) {
-            return .dismiss
-        }
-        if exactAccept.contains(normalized)
-            || acceptCommands.contains(where: { shortReply && normalized.contains($0) }) {
-            return .accept
-        }
-        return nil
-    }
-
-    private func handlePendingMemoryConfirmation(_ decision: MemoryConfirmationDecision, records: [MemoryRecord], convoIndex: Int) {
-        switch decision {
-        case .accept:
-            let content = records.map(\.content).joined(separator: "\n")
-            records.compactMap { MemoryRetriever.shared.acceptCandidate($0) }
-                .forEach { scheduleMemoryRefinement(for: $0) }
-            appendMemoryStatus("Added to Memory:\n\(content)", convoIndex: convoIndex, speak: voiceEnabled)
-        case .dismiss:
-            records.forEach { MemoryStore.shared.delete($0) }
-            appendMemoryStatus("Memory suggestion dismissed.", convoIndex: convoIndex, speak: voiceEnabled)
-        }
-    }
-
     private func appendMemoryStatus(_ content: String, convoIndex: Int, speak: Bool) {
         conversations[convoIndex].messages.append(ChatMessage(role: .assistant, content: content))
         conversations[convoIndex].updatedAt = Date()
@@ -1110,13 +970,14 @@ final class ChatStore: ObservableObject {
                 content
                     .replacingOccurrences(of: "Memory Suggestion:", with: "Memory suggestion.")
                     .replacingOccurrences(of: "Added to Memory:", with: "Added to memory.")
+                    .replacingOccurrences(of: "Added to Memory", with: "Added to memory.")
                     .replacingOccurrences(of: "Forgot Memory:", with: "Forgot memory.")
             )
         }
     }
 
     private func isMemoryStatusMessage(_ text: String) -> Bool {
-        text.hasPrefix("Added to Memory:")
+        text.hasPrefix("Added to Memory")
             || text.hasPrefix("Memory Suggestion:")
             || text.hasPrefix("Memory suggestion dismissed")
             || text.hasPrefix("Forgot Memory:")
@@ -1141,9 +1002,10 @@ final class ChatStore: ObservableObject {
         }
 
         for message in conversation.messages.reversed() {
-            guard message.content.hasPrefix("Added to Memory:") else { continue }
+            guard message.content.hasPrefix("Added to Memory") else { continue }
             let content = message.content
                 .replacingOccurrences(of: "Added to Memory:", with: "")
+                .replacingOccurrences(of: "Added to Memory", with: "")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             if !content.isEmpty {
                 return content
@@ -1153,240 +1015,43 @@ final class ChatStore: ObservableObject {
         return nil
     }
 
-    private func explicitRememberContent(from text: String, in conversation: Conversation) -> String? {
-        let directPatterns = [
-            #"(?i)\bremember(?: this| that)?:?\s+(.+)"#,
-            #"(?i)\bremember for later:?\s+(.+)"#,
-            #"(?i)\badd this to (?:your )?memory:?\s+(.+)"#,
-            #"(?i)\bi want you to remember(?: this| that)?:?\s+(.+)"#,
-            #"(?i)\bi want (?:the\s+)?ai to remember(?: this| that)?:?\s+(.+)"#,
-            #"(?i)\bi want dominus to remember(?: this| that)?:?\s+(.+)"#
-        ]
-        if let direct = firstRegexCapture(in: text, patterns: directPatterns) {
-            if isDeicticMemoryReference(direct) {
-                return recentMemoryContext(in: conversation, hint: direct)
-            }
-            return direct
-        }
-
-        let contextReferencePatterns = [
-            #"(?i)\bremember\s+(?:this|that|it)\b\s*[.!?]?$"#,
-            #"(?i)\bi want you to remember\s+(?:this|that|it)\b\s*[.!?]?$"#,
-            #"(?i)\bi want (?:the\s+)?ai to remember\s+(?:this|that|it)\b\s*[.!?]?$"#,
-            #"(?i)\bi want dominus to remember\s+(?:this|that|it)\b\s*[.!?]?$"#,
-            #"(?i)\badd\s+(?:this|that|it)\s+to\s+(?:your\s+)?memory\b\s*[.!?]?$"#
-        ]
-        if matchesAnyRegex(text, patterns: contextReferencePatterns) {
-            return recentMemoryContext(in: conversation, hint: text)
-        }
-
-        return nil
-    }
-
-    private func recentMemoryContext(in conversation: Conversation, hint: String? = nil, maxMessages: Int = 10) -> String? {
-        let relevantMessages = conversation.messages
-            .dropLast()
-            .reversed()
-            .filter { $0.role == .user && !isMemoryStatusMessage($0.content) }
-            .prefix(maxMessages)
-            .reversed()
-
-        let lines = relevantMessages.compactMap { message -> String? in
-            let content = message.content
-                .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            guard content.count >= 8 else { return nil }
-            guard !matchesAnyRegex(content, patterns: [
-                #"(?i)\bremember\s+(?:this|that|it)\b"#,
-                #"(?i)\bi want you to remember\s+(?:this|that|it)\b"#,
-                #"(?i)\bi want (?:the\s+)?ai to remember\s+(?:this|that|it)\b"#,
-                #"(?i)\bi want dominus to remember\s+(?:this|that|it)\b"#,
-                #"(?i)\badd\s+(?:this|that|it)\s+to\s+(?:your\s+)?memory\b"#
-            ]) else { return nil }
-
-            let capped = content.count > 260
-                ? String(content.prefix(260)).trimmingCharacters(in: .whitespacesAndNewlines) + "..."
-                : content
-            return "User: \(capped)"
-        }
-
-        guard !lines.isEmpty else {
-            return previousMeaningfulMessage(in: conversation)
-        }
-
-        let hintLine = memoryReferenceHintLine(from: hint)
-        return (["Recent conversation to remember:", hintLine] + lines)
-            .compactMap { $0 }
-            .joined(separator: "\n")
-    }
-
-    private func isRecentContextMemoryPacket(_ text: String) -> Bool {
-        text.hasPrefix("Recent conversation to remember:")
-    }
-
-    private func memoryContextResolutionPromptBlock(_ contextPacket: String) -> String {
-        """
-        The user is asking Dominus to remember "this", "that", or "it" from recent conversation.
-
-        Recent context candidate:
-        \(contextPacket)
-
-        In your reply:
-        - Briefly confirm that you understand.
-        - Include one concise sentence beginning with "I should remember that".
-        - That sentence must describe what Creed wants remembered, not the word "this".
-        - Base it only on the recent context candidate.
-        - Do not say the memory has already been permanently saved; Creed still needs to approve the Memory Suggestion.
-        """
-    }
-
-    private func memoryCandidateFromAssistantAcknowledgement(_ assistantText: String, fallbackContext: String) -> String {
-        let cleaned = assistantText
-            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-
-        if let sentence = firstMemorySummarySentence(in: cleaned) {
-            return normalizeAssistantMemorySummary(sentence)
-        }
-
-        return fallbackContext
-    }
-
-    private func firstMemorySummarySentence(in text: String) -> String? {
-        let nsText = text as NSString
-        let pattern = #"(?i)\bI should remember that\s+[^.!?\n]{8,320}[.!?]?"#
-        guard let regex = try? NSRegularExpression(pattern: pattern),
-              let match = regex.firstMatch(in: text, range: NSRange(location: 0, length: nsText.length)),
-              let range = Range(match.range, in: text)
-        else { return nil }
-        return String(text[range]).trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private func normalizeAssistantMemorySummary(_ sentence: String) -> String {
-        var memory = sentence
-            .replacingOccurrences(
-                of: #"(?i)^I should remember that\s+"#,
-                with: "",
-                options: .regularExpression
-            )
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .trimmingCharacters(in: CharacterSet(charactersIn: ".!?"))
-
-        memory = memory.replacingOccurrences(
-            of: #"(?i)^you(?:'re| are| were)?\s+"#,
-            with: "Creed is ",
-            options: .regularExpression
-        )
-        memory = memory.replacingOccurrences(
-            of: #"(?i)^your\s+"#,
-            with: "Creed's ",
-            options: .regularExpression
-        )
-
-        if memory.range(of: #"(?i)\b(creed|user)\b"#, options: .regularExpression) == nil {
-            memory = "Creed wants Dominus to remember that \(memory)"
-        }
-        return String(memory.prefix(1)).uppercased() + String(memory.dropFirst())
-    }
-
-    private func memoryCandidateContent(from text: String) -> String? {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.count >= 12, trimmed.count <= 500 else { return nil }
-
-        let patterns = [
-            #"(?i)\bmy\s+[^.!?\n]{2,80}\s+is\s+[^.!?\n]{2,220}"#,
-            #"(?i)\bi(?:'m| am)\s+writing\s+[^.!?\n]{2,260}"#,
-            #"(?i)\bi\s+(?:wrote|written)\s+[^.!?\n]{2,260}"#,
-            #"(?i)\bi\s+(?:wrote|am writing|am working on|created|am creating)\s+(?:a\s+)?book\s+(?:called|named|titled)\s+[^.!?\n]{2,220}"#,
-            #"(?i)\bi(?:'m| am)\s+working on\s+[^.!?\n]{2,260}"#,
-            #"(?i)\b(?:the\s+)?book\s+(?:i(?:'m| am)?\s+writing\s+)?(?:is\s+)?(?:called|named|titled)\s+[^.!?\n]{2,220}"#,
-            #"(?i)\bmy\s+book\s+(?:is\s+)?(?:called|named|titled)\s+[^.!?\n]{2,220}"#,
-            #"(?i)\bmy goal is\s+[^.!?\n]{2,260}"#,
-            #"(?i)\bi want to\s+[^.!?\n]{2,260}"#,
-            #"(?i)\bi prefer\s+[^.!?\n]{2,260}"#,
-            #"(?i)\bi like\s+[^.!?\n]{2,220}"#,
-            #"(?i)\bi love\s+[^.!?\n]{2,220}"#
-        ]
-
-        for pattern in patterns {
-            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
-            let nsText = trimmed as NSString
-            let range = NSRange(location: 0, length: nsText.length)
-            guard let match = regex.firstMatch(in: trimmed, range: range),
-                  let swiftRange = Range(match.range, in: trimmed) else { continue }
-            return String(trimmed[swiftRange])
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-
-        return nil
-    }
-
-    private func matchesAnyRegex(_ text: String, patterns: [String]) -> Bool {
-        let nsText = text as NSString
-        let fullRange = NSRange(location: 0, length: nsText.length)
-        return patterns.contains { pattern in
-            guard let regex = try? NSRegularExpression(pattern: pattern) else { return false }
-            return regex.firstMatch(in: text, range: fullRange) != nil
-        }
-    }
-
-    private func isDeicticMemoryReference(_ text: String) -> Bool {
+    private func shouldUseCurrentChatRecall(for text: String) -> Bool {
         let normalized = text
             .lowercased()
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .trimmingCharacters(in: CharacterSet(charactersIn: ".!?"))
-        if ["this", "that", "it"].contains(normalized) { return true }
-        return normalized.range(
-            of: #"^(this|that|it)\b(?:\s+(?:conversation|topic|book|idea|thing|part|detail|point|about\b.*))?$"#,
-            options: .regularExpression
-        ) != nil
-    }
-
-    private func memoryReferenceHintLine(from hint: String?) -> String? {
-        guard let hint else { return nil }
-        let normalized = hint
+            .replacingOccurrences(of: "[^a-z0-9\\s']", with: " ", options: .regularExpression)
             .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !normalized.isEmpty,
-              !["this", "that", "it", "this.", "that.", "it."].contains(normalized.lowercased())
-        else { return nil }
-        return "Reference request: \(normalized)"
-    }
+        guard !normalized.isEmpty else { return false }
 
-    private func previousMeaningfulMessage(in conversation: Conversation) -> String? {
-        let candidates = conversation.messages.dropLast().reversed().filter { $0.role == .user }
-        for message in candidates {
-            let content = message.content
-                .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            guard content.count >= 8 else { continue }
-            guard !matchesAnyRegex(content, patterns: [
-                #"(?i)\bremember\s+(?:this|that|it)\b"#,
-                #"(?i)\bi want you to remember\s+(?:this|that|it)\b"#
-            ]) else { continue }
-            return content
-        }
-        return nil
-    }
+        let recallPhrases = [
+            "earlier",
+            "before",
+            "previous",
+            "previously",
+            "last time",
+            "a while ago",
+            "what did i say",
+            "what did we say",
+            "what were we talking",
+            "what was i saying",
+            "what was the thing",
+            "that idea",
+            "that point",
+            "that part",
+            "the thing i said",
+            "the thing we discussed",
+            "continue from",
+            "pick up where",
+            "go back to",
+            "recall",
+            "remember when",
+            "in this chat",
+            "this conversation",
+            "summarize this chat",
+            "summarize our conversation"
+        ]
 
-    private func firstRegexCapture(in text: String, patterns: [String]) -> String? {
-        let nsText = text as NSString
-        let fullRange = NSRange(location: 0, length: nsText.length)
-
-        for pattern in patterns {
-            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
-            guard let match = regex.firstMatch(in: text, range: fullRange),
-                  match.numberOfRanges > 1 else { continue }
-            let captureRange = match.range(at: 1)
-            guard captureRange.location != NSNotFound else { continue }
-            let captured = nsText.substring(with: captureRange)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            if !captured.isEmpty {
-                return captured
-            }
-        }
-
-        return nil
+        return recallPhrases.contains { normalized.contains($0) }
     }
 
     /// Auto-title a new conversation from the first user message.
@@ -1426,14 +1091,70 @@ final class ChatStore: ObservableObject {
             .forEach { scheduleMemoryRefinement(for: $0) }
     }
 
+    func generateMemoryEditSummary(_ draft: String) async -> String? {
+        guard !isGenerating, !isMemoryRefining else { return nil }
+        let cleanDraft = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanDraft.isEmpty else { return nil }
+        loadModelIfNeeded()
+        let modelReady = await waitForModelReady(timeoutSeconds: 8)
+        guard modelReady else {
+            return UserMemoryFormatter.memoryContent(from: cleanDraft)
+        }
+
+        let profileName = ProfileStore.shared.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let userName = profileName.isEmpty ? "the user" : profileName
+        let summarySystem = """
+        Rewrite a user-edited memory into 1 to 3 complete short memory sentences about \(userName).
+
+        Rules:
+        - Preserve only facts from the user's edit.
+        - Write direct memory notes, such as "\(userName) said..." or "\(userName) prefers..."
+        - Do not mention the assistant by name.
+        - Do not add labels, bullets, quotes, or explanations.
+        """
+
+        isMemoryRefining = true
+        defer { isMemoryRefining = false }
+
+        do {
+            let raw = try await engine.generateOnce(
+                [
+                    .init(role: .system, content: summarySystem),
+                    .init(role: .user, content: "Edited memory:\n\(cleanDraft)"),
+                ],
+                temperature: 0.25,
+                seed: 13,
+                maxChars: maxMemorySummaryChars
+            )
+            return cleanMemoryRefinementResponse(raw)
+        } catch {
+            return nil
+        }
+    }
+
+    private func waitForModelReady(timeoutSeconds: Double) async -> Bool {
+        if isLoaded { return true }
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        while Date() < deadline {
+            if isLoaded { return true }
+            if !isLoading {
+                loadModelIfNeeded()
+            }
+            try? await Task.sleep(nanoseconds: 150_000_000)
+        }
+        return isLoaded
+    }
+
     private func scheduleMemoryRefinement(for record: MemoryRecord) {
         guard record.scope == .longTerm else { return }
         guard record.kind != .memoryCandidate else { return }
+        guard !MemoryStore.shared.hasBeenRefinedOnce(record) else { return }
         pendingMemoryRefinements.append(record)
         startMemoryRefinementWorkerIfNeeded()
     }
 
     private func memoryNeedsRefinement(_ record: MemoryRecord) -> Bool {
+        guard !MemoryStore.shared.hasBeenRefinedOnce(record) else { return false }
         let content = record.content.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !content.isEmpty else { return false }
         let lower = content.lowercased()
@@ -1453,7 +1174,11 @@ final class ChatStore: ObservableObject {
 
             while !Task.isCancelled {
                 guard let self else { return }
-                if self.isGenerating || SpeechManager.shared.isSpeaking {
+                if self.isGenerating
+                    || self.isLoading
+                    || self.isMemoryRefining
+                    || SpeechManager.shared.isSpeaking
+                    || SpeechRecognitionManager.shared.isListening {
                     try? await Task.sleep(nanoseconds: 1_000_000_000)
                     continue
                 }
@@ -1469,9 +1194,12 @@ final class ChatStore: ObservableObject {
     }
 
     private func _refineMemoryWithLLM(_ record: MemoryRecord) async {
-        guard !isGenerating else { return }
+        guard !isGenerating, !isMemoryRefining else { return }
         loadModelIfNeeded()
-        guard isLoaded else { return }
+        guard isLoaded else {
+            pendingMemoryRefinements.insert(record, at: 0)
+            return
+        }
         guard record.scope == .longTerm, record.kind != .memoryCandidate else { return }
 
         let memoryDescription = record.content
@@ -1479,12 +1207,17 @@ final class ChatStore: ObservableObject {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !memoryDescription.isEmpty else { return }
 
+        let profileName = ProfileStore.shared.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let userName = profileName.isEmpty ? "the user" : profileName
         let memorySystem = """
-        You clean up local AI memory records. Output only one concise third-person memory summary about Creed.
+        You clean up local AI memory requests. Output only a few short memory sentences about \(userName).
 
         Rules:
         - Base the summary only on the memory description.
-        - Describe Creed, the user, in third person.
+        - Identify the main things \(userName) wanted remembered.
+        - Write as direct memory notes, such as "\(userName) said..." or "\(userName) prefers..."
+        - Do not describe the request itself or mention the assistant by name.
+        - Use 1 to 3 complete short sentences.
         - Do not add facts that are not in the memory description.
         - Do not use labels like Title, Summary, User Fact, or Memory.
         - Do not mention these rules.
@@ -1494,8 +1227,8 @@ final class ChatStore: ObservableObject {
         \(memoryDescription)
         """
 
-        isGenerating = true
-        defer { isGenerating = false }
+        isMemoryRefining = true
+        defer { isMemoryRefining = false }
 
         do {
             try Task.checkCancellation()
@@ -1506,7 +1239,7 @@ final class ChatStore: ObservableObject {
                 ],
                 temperature: 0.25,
                 seed: 11,
-                maxChars: 360
+                maxChars: maxMemorySummaryChars
             )
             try Task.checkCancellation()
             guard let refined = cleanMemoryRefinementResponse(raw) else { return }
@@ -1517,6 +1250,7 @@ final class ChatStore: ObservableObject {
                 content: refined,
                 categoryKey: record.categoryRaw
             )
+            MemoryStore.shared.markRefinedOnce(record)
         } catch {
             // Chat and voice generation are higher priority; cancelled refinements can retry later.
         }
@@ -1528,24 +1262,38 @@ final class ChatStore: ObservableObject {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleaned.isEmpty else { return nil }
 
-        if let firstLine = cleaned.split(whereSeparator: { $0.isNewline })
-            .map(String.init)
-            .first(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
-            cleaned = firstLine
-        }
-
         var summary = cleaned
             .replacingOccurrences(of: #"(?i)^(title|summary|user fact|memory)\s*:\s*"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"(?m)^\s*[-•]\s*"#, with: "", options: .regularExpression)
             .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let wrappers: Set<Character> = ["\"", "'", "`", "*"]
         while let first = summary.first, wrappers.contains(first) { summary.removeFirst() }
         while let last = summary.last, wrappers.contains(last) { summary.removeLast() }
         summary = summary.trimmingCharacters(in: .whitespacesAndNewlines)
-        if summary.count > 240 {
-            summary = String(summary.prefix(240)).trimmingCharacters(in: .whitespaces) + "..."
-        }
+        summary = completeMemorySentences(from: summary, maxSentences: 3)
         return summary.isEmpty ? nil : summary
+    }
+
+    private func completeMemorySentences(from text: String, maxSentences: Int) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return trimmed }
+
+        let pattern = #"[^.!?]+[.!?]"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return trimmed }
+        let nsText = trimmed as NSString
+        let matches = regex.matches(in: trimmed, range: NSRange(location: 0, length: nsText.length))
+
+        let sentences = matches.prefix(maxSentences).compactMap { match -> String? in
+            guard let range = Range(match.range, in: trimmed) else { return nil }
+            return String(trimmed[range]).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        if !sentences.isEmpty {
+            return sentences.joined(separator: " ")
+        }
+
+        return trimmed
     }
 
     /// Schedule an LLM title generation for the given conversation. Idempotent — bails immediately
@@ -1565,7 +1313,7 @@ final class ChatStore: ObservableObject {
 
     private func _generateLLMTitle(convoID: UUID) async {
         // Don't fight the chat stream for the LlamaService instance.
-        guard !isGenerating else { return }
+        guard !isGenerating, !isMemoryRefining else { return }
         guard let idx = conversations.firstIndex(where: { $0.id == convoID }) else { return }
         let convo = conversations[idx]
         guard convo.titleIsAuto, !convo.hasGeneratedTitle else { return }
@@ -1589,9 +1337,6 @@ final class ChatStore: ObservableObject {
 
         Title:
         """
-
-        isGenerating = true
-        defer { isGenerating = false }
 
         do {
             try Task.checkCancellation()

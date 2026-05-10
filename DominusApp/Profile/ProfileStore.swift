@@ -1,8 +1,8 @@
 import Foundation
 import SwiftData
 
-/// Stores and retrieves persistent facts about the user.
-/// Facts are injected into every system prompt so Dominus always knows who it's talking to.
+/// Stores and retrieves the small user-controlled profile block.
+/// The profile is intentionally limited so it stays useful without crowding the local context window.
 @MainActor
 @Observable
 final class ProfileStore {
@@ -21,6 +21,32 @@ final class ProfileStore {
         get { UserDefaults.standard.string(forKey: "dominus_persona") ?? "" }
         set { UserDefaults.standard.set(newValue, forKey: "dominus_persona") }
     }
+
+    var displayName: String {
+        value(for: Self.displayNameKey)
+    }
+
+    var appPurpose: String {
+        value(for: Self.appPurposeKey)
+    }
+
+    var jobTitle: String {
+        value(for: Self.jobTitleKey)
+    }
+
+    var goals: [String] {
+        Self.goalKeys.map(value(for:))
+    }
+
+    var behaviorNotes: [String] {
+        Self.behaviorKeys.map(value(for:))
+    }
+
+    private static let displayNameKey = "name"
+    private static let appPurposeKey = "app purpose"
+    private static let jobTitleKey = "role or work"
+    private static let goalKeys = ["goal 1", "goal 2", "goal 3"]
+    private static let behaviorKeys = ["behavior 1", "behavior 2", "behavior 3"]
 
     init() {
         do {
@@ -57,46 +83,39 @@ final class ProfileStore {
         }
         try? context.save()
         loadFacts()
-        MemoryRetriever.shared.rememberLongTerm(
-            kind: memoryKind(for: trimmedKey),
-            title: trimmedKey,
-            content: "User \(trimmedKey): \(trimmedValue)",
-            sourceID: "profile:\(trimmedKey)"
-        )
         print("👤 Profile upserted: \(trimmedKey) = \(trimmedValue)")
+    }
+
+    func updateDisplayName(_ value: String) {
+        updateProfileField(key: Self.displayNameKey, value: value)
+    }
+
+    func updateAppPurpose(_ value: String) {
+        updateProfileField(key: Self.appPurposeKey, value: value)
+    }
+
+    func updateJobTitle(_ value: String) {
+        updateProfileField(key: Self.jobTitleKey, value: value)
+    }
+
+    func updateGoals(_ values: [String]) {
+        updateListFields(keys: Self.goalKeys, values: values)
+    }
+
+    func updateBehaviorNotes(_ values: [String]) {
+        updateListFields(keys: Self.behaviorKeys, values: values)
     }
 
     // MARK: - Delete
 
     func delete(_ fact: ProfileFact) {
-        MemoryStore.shared.delete(scope: .longTerm, sourceID: "profile:\(fact.key)")
         context.delete(fact)
         try? context.save()
         loadFacts()
     }
 
     func deleteAll() {
-        facts.forEach {
-            MemoryStore.shared.delete(scope: .longTerm, sourceID: "profile:\($0.key)")
-        }
         facts.forEach { context.delete($0) }
-        try? context.save()
-        loadFacts()
-    }
-
-    func deleteFactsMatching(memoryText: String) {
-        let normalizedMemory = normalized(memoryText)
-        let matches = facts.filter { fact in
-            let normalizedValue = normalized(fact.value)
-            guard !normalizedValue.isEmpty else { return false }
-            return normalizedMemory.contains(normalizedValue)
-        }
-
-        guard !matches.isEmpty else { return }
-        matches.forEach { fact in
-            MemoryStore.shared.delete(scope: .longTerm, sourceID: "profile:\(fact.key)")
-            context.delete(fact)
-        }
         try? context.save()
         loadFacts()
     }
@@ -108,12 +127,12 @@ final class ProfileStore {
     func systemPromptBlock() -> String {
         var parts: [String] = []
 
-        if !facts.isEmpty {
-            let lines = facts.map { "- \($0.key): \($0.value)" }.joined(separator: "\n")
+        let profileLines = structuredProfileLines()
+        if !profileLines.isEmpty {
             parts.append("""
-            What you know about the user:
-            \(lines)
-            Use these facts only when they are relevant to the user's current message.
+            User profile:
+            \(profileLines.joined(separator: "\n"))
+            Use this profile as stable user context. Keep it secondary to the user's latest message.
             """)
         }
 
@@ -125,68 +144,49 @@ final class ProfileStore {
         return parts.joined(separator: "\n\n")
     }
 
-    // MARK: - Auto-extract facts from conversation
+    private func structuredProfileLines() -> [String] {
+        var lines: [String] = []
+        if !displayName.isEmpty { lines.append("- preferred name: \(displayName)") }
+        if !jobTitle.isEmpty { lines.append("- role/work: \(jobTitle)") }
+        if !appPurpose.isEmpty { lines.append("- why they use Dominus: \(appPurpose)") }
 
-    /// Scans a user message for personal facts and saves them automatically.
-    /// Patterns detected: "my name is X", "I am X years old", "I live in X",
-    /// "my favorite X is Y", "I work as X", "I am from X"
-    func extractAndSave(from userText: String) {
-        let text = userText.lowercased()
+        let cleanGoals = goals.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        if !cleanGoals.isEmpty {
+            lines.append("- current goals: \(cleanGoals.joined(separator: "; "))")
+        }
 
-        let patterns: [(pattern: String, key: String)] = [
-            ("my name is ",          "name"),
-            ("i'm called ",          "name"),
-            ("call me ",             "name"),
-            ("i am (\\d+) years old","age"),
-            ("i'm (\\d+) years old", "age"),
-            ("i live in ",           "location"),
-            ("i'm from ",            "origin"),
-            ("i am from ",           "origin"),
-            ("i work as ",           "occupation"),
-            ("i work in ",           "industry"),
-            ("i'm a ",               "role"),
-            ("i am a ",              "role"),
-            ("my favorite color is ","favorite color"),
-            ("my favorite food is ", "favorite food"),
-            ("my favorite music is ","favorite music"),
-            ("i love ",              "interest"),
-            ("i enjoy ",             "interest"),
-            ("i hate ",              "dislike"),
-            ("i speak ",             "language"),
-        ]
+        let cleanBehavior = behaviorNotes.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        if !cleanBehavior.isEmpty {
+            lines.append("- behavior preferences: \(cleanBehavior.joined(separator: "; "))")
+        }
 
-        for (pattern, key) in patterns {
-            if let range = text.range(of: pattern) {
-                // Extract the value — everything after the pattern up to punctuation
-                let after = String(text[range.upperBound...])
-                let value = after
-                    .components(separatedBy: CharacterSet(charactersIn: ".!?,\n"))
-                    .first?
-                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return lines
+    }
 
-                if !value.isEmpty && value.split(separator: " ").count <= 8 {
-                    // Capitalise properly
-                    let formatted = value.prefix(1).uppercased() + value.dropFirst()
-                    upsert(key: key, value: formatted)
-                }
+    private static let allowedProfileKeys: Set<String> = Set([
+        displayNameKey,
+        appPurposeKey,
+        jobTitleKey
+    ] + goalKeys + behaviorKeys)
+
+    private func value(for key: String) -> String {
+        facts.first { $0.key == key }?.value ?? ""
+    }
+
+    private func updateProfileField(key: String, value: String) {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            if let existing = facts.first(where: { $0.key == key }) {
+                delete(existing)
             }
+        } else {
+            upsert(key: key, value: trimmed)
         }
     }
 
-    private func memoryKind(for key: String) -> MemoryKind {
-        if key.contains("favorite") || key == "interest" || key == "dislike" {
-            return .preference
+    private func updateListFields(keys: [String], values: [String]) {
+        for (index, key) in keys.enumerated() {
+            updateProfileField(key: key, value: values.indices.contains(index) ? values[index] : "")
         }
-        if key == "goal" {
-            return .goal
-        }
-        return .userFact
-    }
-
-    private func normalized(_ text: String) -> String {
-        text.lowercased()
-            .replacingOccurrences(of: "•", with: " ")
-            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }

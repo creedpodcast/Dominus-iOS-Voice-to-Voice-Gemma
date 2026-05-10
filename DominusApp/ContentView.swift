@@ -51,7 +51,6 @@ struct ContentView: View {
 
     // Profile sheet
     @State private var showProfileSheet = false
-    @State private var showMemorySheet = false
     @State private var showAudioSettingsSheet = false
 
     // Push-to-talk state
@@ -247,14 +246,6 @@ struct ContentView: View {
         // TTS audio pipeline initialising (first-call warm-up or per-message replay)
         if speechMgr.isStartingPlayback {
             return ("speaker.wave.2", "Starting audio\u{2026}")
-        }
-        // AI is generating but TTS hasn't started yet — the "thinking" gap
-        if store.isGenerating && !speechMgr.isSpeaking && pttState == .aiTalking {
-            return ("brain", "Thinking\u{2026}")
-        }
-        // Text mode: model is generating a reply
-        if store.isGenerating && pttState == .idle {
-            return ("cpu", "Generating\u{2026}")
         }
         return nil
     }
@@ -765,11 +756,6 @@ struct ContentView: View {
                         Image(systemName: "person.circle")
                     }
                     Button {
-                        showMemorySheet = true
-                    } label: {
-                        Image(systemName: "brain.head.profile")
-                    }
-                    Button {
                         showAudioSettingsSheet = true
                     } label: {
                         Image(systemName: "slider.horizontal.3")
@@ -786,13 +772,6 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showProfileSheet) {
             ProfileView()
-        }
-        .sheet(isPresented: $showMemorySheet) {
-            MemoryView(
-                conversation: store.selectedConversation(),
-                onRequestLLMRefinement: { store.refineMemoryWithLLM($0) },
-                onRequestJournalCleanup: { store.refineUnsummarizedMemoriesWithLLM() }
-            )
         }
         .sheet(isPresented: $showAudioSettingsSheet) {
             AudioSettingsView()
@@ -877,13 +856,6 @@ struct ContentView: View {
         )
     }
 
-    private var pendingMemorySuggestionCount: Int {
-        guard let id = store.selectedID else { return 0 }
-        return MemoryStore.shared.fetch(conversationID: id).filter {
-            $0.kind == .memoryCandidate
-        }.count
-    }
-
     // MARK: - Detail header
 
     private var detailHeader: some View {
@@ -909,29 +881,6 @@ struct ContentView: View {
                 .accessibilityLabel(store.voiceEnabled ? "Mute spoken replies" : "Speak replies aloud")
             }
 
-            Button {
-                showMemorySheet = true
-            } label: {
-                ZStack(alignment: .topTrailing) {
-                    Image(systemName: "doc.text.magnifyingglass")
-                        .font(.system(size: 16, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 34, height: 34)
-                        .contentShape(Rectangle())
-
-                    if pendingMemorySuggestionCount > 0 {
-                        Text("\(min(pendingMemorySuggestionCount, 9))")
-                            .font(.system(size: 9, weight: .bold))
-                            .foregroundStyle(.white)
-                            .frame(width: 15, height: 15)
-                            .background(Color.orange, in: Circle())
-                            .offset(x: 1, y: -1)
-                    }
-                }
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Open Memory Journal")
-
             ContextRingView(usage: contextUsage)
         }
         .padding(.horizontal)
@@ -955,10 +904,7 @@ struct ContentView: View {
                                 messageID: msg.id,
                                 role: msg.role,
                                 text: msg.content,
-                                isStreaming: isStreamingAssistant,
-                                onAcceptMemory: { store.confirmLatestPendingMemory(accept: true) },
-                                onDismissMemory: { store.confirmLatestPendingMemory(accept: false) },
-                                onRemember: { store.rememberMessage(msg.id) }
+                                isStreaming: isStreamingAssistant
                             )
                                 .id(msg.id)
                         }
@@ -974,7 +920,7 @@ struct ContentView: View {
                     }
                 }
 
-                // Status pill — floats at top of chat area whenever something is loading
+                // Status pill — floats at top of chat area for audio/transcription only.
                 VStack {
                     if let status = activeStatus {
                         StatusPillView(icon: status.icon, message: status.message)
@@ -1307,27 +1253,24 @@ struct ChatBubble: View {
         let role: ChatMessage.Role
         let text: String
         var isStreaming: Bool = false
-        var onAcceptMemory: (() -> Void)? = nil
-        var onDismissMemory: (() -> Void)? = nil
-        var onRemember: (() -> Void)? = nil
 
     @ObservedObject private var speech = SpeechManager.shared
     @State private var copied: Bool = false
-    @State private var remembered: Bool = false
+    @State private var thinkingPulse: Bool = false
 
     private var isPlayingThis: Bool {
         speech.nowPlayingMessageID == messageID
     }
 
     private var isMemoryNotice: Bool {
-        text.hasPrefix("Added to Memory:")
+        text.hasPrefix("Added to Memory")
             || text.hasPrefix("Memory Suggestion:")
             || text.hasPrefix("Memory suggestion dismissed")
             || text.hasPrefix("Forgot Memory:")
     }
 
-    private var isMemorySuggestion: Bool {
-        text.hasPrefix("Memory Suggestion:")
+    private var isThinkingPlaceholder: Bool {
+        role == .assistant && text == "Thinking..."
     }
 
     var body: some View {
@@ -1335,22 +1278,26 @@ struct ChatBubble: View {
             if role == .assistant {
                 VStack(alignment: .leading, spacing: 4) {
                     bubbleView(
-                        background: isMemoryNotice ? Color(.systemGray4) : Color(.systemGray5),
-                        foreground: isMemoryNotice ? Color(.secondaryLabel) : .primary,
+                        background: isMemoryNotice ? Color(.systemGray3) : Color(.systemGray5),
+                        foreground: isMemoryNotice || isThinkingPlaceholder ? Color(.secondaryLabel) : .primary,
                         align: .leading
                     )
-                    if isMemorySuggestion {
-                        memorySuggestionActions
+                    if !isMemoryNotice && !isThinkingPlaceholder {
+                        assistantActions
                     }
-                    assistantActions
                 }
                 Spacer(minLength: 48)
             } else {
                 Spacer(minLength: 48)
                 VStack(alignment: .trailing, spacing: 4) {
                     bubbleView(background: .blue, foreground: .white, align: .trailing)
-                    userActions
                 }
+            }
+        }
+        .onAppear {
+            guard isThinkingPlaceholder else { return }
+            withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
+                thinkingPulse = true
             }
         }
     }
@@ -1360,47 +1307,15 @@ struct ChatBubble: View {
             .textSelection(.enabled)
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
-            .background(background)
+            .background(isMemoryNotice || isThinkingPlaceholder ? Color.clear : background)
             .foregroundColor(foreground)
-            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .opacity(isThinkingPlaceholder ? (thinkingPulse ? 0.35 : 0.75) : 1)
+            .clipShape(RoundedRectangle(cornerRadius: isMemoryNotice || isThinkingPlaceholder ? 0 : 18, style: .continuous))
             .frame(maxWidth: UIScreen.main.bounds.width * 0.72, alignment: align)
-    }
-
-    private var memorySuggestionActions: some View {
-        HStack(spacing: 8) {
-            Button {
-                onAcceptMemory?()
-            } label: {
-                Label("Yes", systemImage: "checkmark.circle.fill")
-                    .font(.system(size: 13, weight: .semibold))
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-            }
-            .buttonStyle(.plain)
-            .background(Color.green.opacity(0.16), in: Capsule())
-            .foregroundStyle(.green)
-            .accessibilityLabel("Add suggestion to memory")
-
-            Button {
-                onDismissMemory?()
-            } label: {
-                Label("No", systemImage: "xmark.circle.fill")
-                    .font(.system(size: 13, weight: .semibold))
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-            }
-            .buttonStyle(.plain)
-            .background(Color.red.opacity(0.14), in: Capsule())
-            .foregroundStyle(.red)
-            .accessibilityLabel("Dismiss memory suggestion")
-        }
-        .padding(.leading, 6)
     }
 
     private var assistantActions: some View {
         HStack(spacing: 22) {
-            rememberButton
-
             Button {
                 UIPasteboard.general.string = text
                 withAnimation { copied = true }
@@ -1444,29 +1359,5 @@ struct ChatBubble: View {
         }
         .foregroundStyle(.secondary)
         .padding(.leading, 6)
-    }
-
-    private var userActions: some View {
-        HStack(spacing: 14) {
-            rememberButton
-        }
-        .foregroundStyle(.secondary)
-        .padding(.trailing, 6)
-    }
-
-    private var rememberButton: some View {
-        Button {
-            onRemember?()
-            withAnimation { remembered = true }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) {
-                withAnimation { remembered = false }
-            }
-        } label: {
-            Image(systemName: remembered ? "checkmark.circle.fill" : "bookmark")
-                .font(.system(size: 18))
-        }
-        .buttonStyle(.plain)
-        .disabled(isMemoryNotice)
-        .accessibilityLabel("Remember message")
     }
 }

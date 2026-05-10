@@ -105,14 +105,14 @@ final class GemmaEngine: ObservableObject {
         _ messages: [LlamaChatMessage],
         temperature: Float = 0.4,
         seed: UInt32 = 7,
-        maxChars: Int = 200
+        maxChars: Int? = 200
     ) async throws -> String {
         let stream = try await streamChat(messages, temperature: temperature, seed: seed)
         var result = ""
         for try await token in stream {
             try Task.checkCancellation()
             result += token
-            if result.count >= maxChars { break }
+            if let maxChars, result.count >= maxChars { break }
         }
         return result
     }

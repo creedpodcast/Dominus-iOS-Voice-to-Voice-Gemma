@@ -525,6 +525,8 @@ final class MemoryStore {
 
     static let shared = MemoryStore()
     static let uncategorizedCategoryKey = MemoryHubCategory.general.rawValue
+    static let refinedOnceSourceMarker = "refined-once"
+    static let pendingAISummarySourceMarker = "pending-ai-summary"
 
     private let container: ModelContainer
     private var context: ModelContext { container.mainContext }
@@ -826,6 +828,41 @@ final class MemoryStore {
         }
     }
 
+    func markRefinedOnce(_ record: MemoryRecord) {
+        var markers = sourceMarkers(for: record)
+        if markers.contains(Self.refinedOnceSourceMarker) {
+            return
+        }
+        markers.remove(Self.pendingAISummarySourceMarker)
+        markers.insert(Self.refinedOnceSourceMarker)
+        record.sourceID = markers.joined(separator: "|")
+        try? context.save()
+    }
+
+    func hasBeenRefinedOnce(_ record: MemoryRecord) -> Bool {
+        sourceMarkers(for: record).contains(Self.refinedOnceSourceMarker)
+    }
+
+    func markPendingAISummary(_ record: MemoryRecord) {
+        var markers = sourceMarkers(for: record)
+        markers.insert(Self.pendingAISummarySourceMarker)
+        record.sourceID = markers.joined(separator: "|")
+        try? context.save()
+    }
+
+    func hasPendingAISummary(_ record: MemoryRecord) -> Bool {
+        sourceMarkers(for: record).contains(Self.pendingAISummarySourceMarker)
+    }
+
+    private func sourceMarkers(for record: MemoryRecord) -> Set<String> {
+        Set(
+            (record.sourceID ?? "")
+                .components(separatedBy: "|")
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+        )
+    }
+
     private func updateHubEmbedding(
         categoryKey: String,
         summary: String,
@@ -897,7 +934,11 @@ final class MemoryStore {
     }
 
     func delete(scope: MemoryScope, sourceID: String) {
-        let records = fetch(scope: scope).filter { $0.sourceID == sourceID }
+        let records = fetch(scope: scope).filter {
+            $0.sourceID == sourceID
+                || $0.sourceID?.hasPrefix("\(sourceID)|") == true
+                || $0.sourceID?.components(separatedBy: "|").contains(sourceID) == true
+        }
         records.forEach { context.delete($0) }
         try? context.save()
         rebuildHub()
