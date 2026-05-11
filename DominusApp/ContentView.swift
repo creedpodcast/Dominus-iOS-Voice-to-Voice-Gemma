@@ -81,6 +81,12 @@ struct ContentView: View {
     @State private var voiceModeSoundPlayer: AVAudioPlayer?
     @State private var isVoiceModeTransitioning = false
     @State private var hasPlayedAppLoadedSound = false
+    /// True once the silence filler ("you still there?") has fired this session.
+    /// Prevents it from rescheduling after the AI response and looping.
+    @State private var silenceFillerHasPlayed = false
+    /// True once the absolute exit timer has been started this session.
+    /// Prevents beginListening() re-entries from resetting the deadline.
+    @State private var voiceModeExitScheduled = false
 
     private let voiceAutoSendDelay: TimeInterval = 2.0
     private let voiceActivityGraceDelay: TimeInterval = 0.8
@@ -330,6 +336,7 @@ struct ContentView: View {
         resetVoiceAutoSendState()
         cancelListeningSilenceFiller()
         cancelVoiceModeAutoExit()
+        silenceFillerHasPlayed = false   // reset for next voice session
         stopVolumeMonitoring()
         isInterruptRestartPending = false
         stopPulse()
@@ -435,6 +442,9 @@ struct ContentView: View {
     }
 
     private func scheduleListeningSilenceFiller() {
+        // Only fire once per voice session — after it plays we don't reschedule,
+        // so the exit timer can run to completion without looping.
+        guard !silenceFillerHasPlayed else { return }
         listeningSilenceFillerTask?.cancel()
         listeningSilenceFillerTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: UInt64(listeningSilenceFillerDelay * 1_000_000_000))
@@ -455,6 +465,7 @@ struct ContentView: View {
     }
 
     private func playListeningSilenceFiller() {
+        silenceFillerHasPlayed = true   // prevent this from ever looping
         cancelListeningSilenceFiller()
         resetVoiceAutoSendState()
         stopPulse()
@@ -465,17 +476,15 @@ struct ContentView: View {
     }
 
     private func scheduleVoiceModeAutoExit() {
+        // Absolute deadline — only start once per session. Re-entries from aiTalking
+        // must not reset this or the exit loops forever behind "are you still there?" replies.
+        guard !voiceModeExitScheduled else { return }
+        voiceModeExitScheduled = true
         voiceModeAutoExitTask?.cancel()
         let delay = audioSettings.voiceModeInactivityTimeout
         voiceModeAutoExitTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-            guard !Task.isCancelled,
-                  pttState == .listening,
-                  !store.isGenerating,
-                  !SpeechManager.shared.isSpeaking,
-                  WhisperManager.visibleTranscript(from: whisper.liveTranscript).isEmpty,
-                  latestVisibleVoiceTranscript.isEmpty
-            else { return }
+            guard !Task.isCancelled else { return }
             await playVoiceModeSound(named: "DeactivateVoicetoVoice")
             returnToIdle()
         }
@@ -484,6 +493,7 @@ struct ContentView: View {
     private func cancelVoiceModeAutoExit() {
         voiceModeAutoExitTask?.cancel()
         voiceModeAutoExitTask = nil
+        voiceModeExitScheduled = false
     }
 
     private func resetVoiceAutoSendState() {
