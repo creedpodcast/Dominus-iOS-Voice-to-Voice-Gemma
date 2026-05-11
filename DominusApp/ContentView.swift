@@ -81,7 +81,7 @@ struct ContentView: View {
     @State private var isVoiceModeTransitioning = false
     @State private var hasPlayedAppLoadedSound = false
 
-    private let voiceAutoSendDelay: TimeInterval = 2.5
+    private let voiceAutoSendDelay: TimeInterval = 2.0
     private let voiceActivityGraceDelay: TimeInterval = 0.8
     private let listeningSilenceFillerDelay: TimeInterval = 20
     private let listeningSilenceFillers = [
@@ -407,37 +407,19 @@ struct ContentView: View {
     }
 
     private func scheduleVoiceAutoSend() {
-        let transcriptSnapshot  = latestVisibleVoiceTranscript
-        let transcriptUpdatedAt = latestVisibleVoiceTranscriptUpdatedAt ?? Date()
+        let transcriptSnapshot = latestVisibleVoiceTranscript
         voiceAutoSendTask?.cancel()
         voiceAutoSendTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: UInt64(voiceAutoSendDelay * 1_000_000_000))
             guard !Task.isCancelled,
                   pttState == .listening,
-                  // Mute is intentional — a stable transcript should still auto-send
-                  // so the user doesn't have to tap after killing background noise.
                   !transcriptSnapshot.isEmpty
             else { return }
 
-            // Transcript grew during the wait — user is still speaking, wait again.
+            // If the transcript is still growing, the user is still speaking — wait again.
+            // Otherwise send unconditionally: mute state, ambient noise, and audio
+            // activity are irrelevant once the transcript has been stable for 2 seconds.
             if latestVisibleVoiceTranscript != transcriptSnapshot {
-                scheduleVoiceAutoSend()
-                return
-            }
-
-            // Transcript was refreshed very recently — give it one more cycle.
-            if Date().timeIntervalSince(transcriptUpdatedAt) < voiceAutoSendDelay {
-                scheduleVoiceAutoSend()
-                return
-            }
-
-            // Audio activity grace period — but only if the transcript is young.
-            // If the transcript has been stable for ≥ 3.5s we send regardless of
-            // ambient noise so a noisy room never traps the user in a loop.
-            let transcriptAge = Date().timeIntervalSince(transcriptUpdatedAt)
-            if let lastVoiceActivityAt,
-               Date().timeIntervalSince(lastVoiceActivityAt) < voiceActivityGraceDelay,
-               transcriptAge < (voiceAutoSendDelay + 1.0) {
                 scheduleVoiceAutoSend()
                 return
             }
