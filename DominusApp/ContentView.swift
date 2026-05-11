@@ -741,7 +741,7 @@ struct ContentView: View {
 
     private var pttColor: Color {
         switch pttState {
-        case .idle:      return .blue
+        case .idle:      return .gray
         case .listening: return .green
         case .aiTalking: return .red
         }
