@@ -1208,7 +1208,7 @@ struct ContextInspectorSheet: View {
                                 Text(turn.role)
                                     .font(.caption)
                                     .fontWeight(.semibold)
-                                    .foregroundStyle(turn.role == "You" ? .accentColor : .secondary)
+                                    .foregroundStyle(turn.role == "You" ? Color.accentColor : Color.secondary)
                                 Spacer()
                                 tokenBadge(turn.tokens, color: .primary.opacity(0.5))
                             }
