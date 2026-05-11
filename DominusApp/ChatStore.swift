@@ -529,7 +529,7 @@ final class ChatStore: ObservableObject {
 
                 assistantText += token
 
-                let displayText = cleanLlamaArtifacts(assistantText)
+                let displayText = stripRoboticOpener(cleanLlamaArtifacts(assistantText))
                 conversations[convoIndex].messages[assistantIndex] = ChatMessage(
                     id: assistantID,
                     role: .assistant,
@@ -550,6 +550,9 @@ final class ChatStore: ObservableObject {
                         if !realSpeechHasStarted {
                             ThinkingFillerManager.shared.prepareForRealAnswer()
                             realSpeechHasStarted = true
+                            // Strip robotic openers from the very first TTS chunk so
+                            // "Sure! Here's what I found." is spoken as "Here's what I found."
+                            ttsBuffer = stripRoboticOpener(ttsBuffer)
                         }
                         SpeechManager.shared.enqueue(ttsBuffer)
                         lastEnqueuedAtCount = assistantText.count
@@ -815,6 +818,23 @@ final class ChatStore: ObservableObject {
             result = result.replacingOccurrences(of: artifact, with: "")
         }
         return result.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Strip filler openers ("Sure!", "Certainly,", "Of course!" etc.) from the very
+    /// start of a response. Only fires when the opener is followed by more content so
+    /// a one-word acknowledgement ("Sure.") that IS the full answer is left intact.
+    private func stripRoboticOpener(_ text: String) -> String {
+        let pattern = #"^(?i)(Sure|Certainly|Of course|Absolutely|Definitely|No problem|Great)[!,.]?\s+"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return text }
+        let range = NSRange(text.startIndex..., in: text)
+        if let match = regex.firstMatch(in: text, range: range) {
+            let matchRange = Range(match.range, in: text)!
+            let remainder = String(text[matchRange.upperBound...])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            // Only strip if there's still a real response left after the opener.
+            return remainder.isEmpty ? text : remainder
+        }
+        return text
     }
 
     /// Keep system message + recent raw turns. If the prompt estimate still rises
