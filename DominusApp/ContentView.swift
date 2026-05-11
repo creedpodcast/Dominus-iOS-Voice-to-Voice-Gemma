@@ -743,7 +743,7 @@ struct ContentView: View {
         switch pttState {
         case .idle:      return .blue
         case .listening: return .green
-        case .aiTalking: return .secondary
+        case .aiTalking: return .red
         }
     }
 
