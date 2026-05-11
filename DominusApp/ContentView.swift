@@ -407,29 +407,37 @@ struct ContentView: View {
     }
 
     private func scheduleVoiceAutoSend() {
-        let transcriptSnapshot = latestVisibleVoiceTranscript
+        let transcriptSnapshot  = latestVisibleVoiceTranscript
         let transcriptUpdatedAt = latestVisibleVoiceTranscriptUpdatedAt ?? Date()
         voiceAutoSendTask?.cancel()
         voiceAutoSendTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: UInt64(voiceAutoSendDelay * 1_000_000_000))
             guard !Task.isCancelled,
                   pttState == .listening,
-                  !whisper.isMicMuted,
+                  // Mute is intentional — a stable transcript should still auto-send
+                  // so the user doesn't have to tap after killing background noise.
                   !transcriptSnapshot.isEmpty
             else { return }
 
+            // Transcript grew during the wait — user is still speaking, wait again.
             if latestVisibleVoiceTranscript != transcriptSnapshot {
                 scheduleVoiceAutoSend()
                 return
             }
 
+            // Transcript was refreshed very recently — give it one more cycle.
             if Date().timeIntervalSince(transcriptUpdatedAt) < voiceAutoSendDelay {
                 scheduleVoiceAutoSend()
                 return
             }
 
+            // Audio activity grace period — but only if the transcript is young.
+            // If the transcript has been stable for ≥ 3.5s we send regardless of
+            // ambient noise so a noisy room never traps the user in a loop.
+            let transcriptAge = Date().timeIntervalSince(transcriptUpdatedAt)
             if let lastVoiceActivityAt,
-               Date().timeIntervalSince(lastVoiceActivityAt) < voiceActivityGraceDelay {
+               Date().timeIntervalSince(lastVoiceActivityAt) < voiceActivityGraceDelay,
+               transcriptAge < (voiceAutoSendDelay + 1.0) {
                 scheduleVoiceAutoSend()
                 return
             }
