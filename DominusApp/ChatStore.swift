@@ -478,6 +478,7 @@ final class ChatStore: ObservableObject {
                 content: ambientOnlyUserPrompt(for: eligibleAmbientCues, duration: ambientDuration)
             ))
         }
+        llmMessages = filterNoiseTurns(llmMessages)
         llmMessages = trimLLMHistory(llmMessages)
 
         let shouldUseThinkingFiller = voiceEnabled && includeAmbientCues
@@ -853,6 +854,57 @@ final class ChatStore: ObservableObject {
         }
 
         return trimmed
+    }
+
+    /// Drop low-signal user turns ("ok", "yeah", "thanks" etc.) and their paired
+    /// assistant responses from the LLM history before it's sent to the model.
+    /// Never drops the most recent 2 full turns — recency always wins.
+    /// The chat UI is unaffected; this only filters what the model sees.
+    private func filterNoiseTurns(_ llm: [LlamaChatMessage]) -> [LlamaChatMessage] {
+        guard llm.count > 1 else { return llm }
+        let system = llm[0]
+        var turns = Array(llm.dropFirst())
+
+        // Always preserve the last 4 messages (2 full user+assistant pairs).
+        let alwaysKeep = min(4, turns.count)
+        let candidateCount = turns.count - alwaysKeep
+        guard candidateCount > 0 else { return llm }
+
+        var result: [LlamaChatMessage] = []
+        var i = 0
+        while i < candidateCount {
+            let msg = turns[i]
+            if msg.role == .user, isNoiseTurn(msg.content) {
+                i += 1 // skip user noise turn
+                if i < candidateCount, turns[i].role == .assistant {
+                    i += 1 // skip the paired assistant response too
+                }
+            } else {
+                result.append(msg)
+                i += 1
+            }
+        }
+        result += turns.suffix(alwaysKeep)
+        return [system] + result
+    }
+
+    /// Returns true when the user turn is pure conversational filler with no
+    /// substantive content for the model to reason about.
+    private func isNoiseTurn(_ text: String) -> Bool {
+        let normalized = text
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: "[^a-z ]", with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespaces)
+        let noiseSet: Set<String> = [
+            "ok", "okay", "k", "yeah", "yep", "yup", "nope",
+            "thanks", "thank you", "thx", "ty",
+            "cool", "nice", "great", "got it", "got it thanks",
+            "sure", "right", "alright", "sounds good",
+            "hm", "hmm", "lol", "haha",
+            "ok thanks", "okay thanks", "yeah thanks",
+        ]
+        return noiseSet.contains(normalized)
     }
 
     private func estimatedTokens(for messages: [LlamaChatMessage]) -> Int {
