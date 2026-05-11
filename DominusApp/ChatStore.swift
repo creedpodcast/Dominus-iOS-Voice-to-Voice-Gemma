@@ -190,6 +190,31 @@ final class ChatStore: ObservableObject {
     /// itself while letting ContentView gate the loading screen on warmup.
     func prewarmEngine() async { await engine.prewarm() }
 
+    // MARK: - Context inspector snapshot
+
+    /// A read-only snapshot of the last assembled LLM context, captured every
+    /// turn. Used by the tappable context ring inspector sheet in ContentView.
+    struct ContextSnapshot {
+        struct Turn: Identifiable {
+            let id = UUID()
+            let role: String
+            let content: String
+            var tokens: Int { max(1, content.count / 4) }
+        }
+        var systemPrompt: String = ""
+        var profile: String      = ""
+        var memory: String       = ""
+        var turns: [Turn]        = []
+
+        var systemTokens: Int { max(1, systemPrompt.count / 4) }
+        var profileTokens: Int  { max(1, profile.count / 4) }
+        var memoryTokens: Int   { max(1, memory.count / 4) }
+        var turnsTokens: Int    { turns.reduce(0) { $0 + $1.tokens } }
+        var totalTokens: Int    { systemTokens + profileTokens + memoryTokens + turnsTokens }
+    }
+
+    @Published var lastContextSnapshot: ContextSnapshot = ContextSnapshot()
+
     /// Core identity — kept intentionally short to conserve token budget.
     private let systemPrompt = "You are Dominus, a direct and human AI assistant. Answer the user's latest message — nothing more. If you don't know something or weren't told it, say so plainly; do not guess or invent details. Match your length to the question: short questions get short answers, long questions get longer ones. No greetings, no preambles, no filler openers like \"Sure\" or \"Of course.\" Profile facts describe the user across chats; retrieved memory is current-chat only — use either only when it directly helps, otherwise ignore."
     
@@ -480,6 +505,17 @@ final class ChatStore: ObservableObject {
         }
         llmMessages = filterNoiseTurns(llmMessages)
         llmMessages = trimLLMHistory(llmMessages)
+
+        // Snapshot the assembled context for the inspector sheet (tappable ring).
+        lastContextSnapshot = ContextSnapshot(
+            systemPrompt: systemPrompt,
+            profile:      profileBlock,
+            memory:       memoryContext,
+            turns:        llmMessages.dropFirst().map {
+                ContextSnapshot.Turn(role: $0.role == .user ? "You" : "Dominus",
+                                     content: $0.content)
+            }
+        )
 
         let shouldUseThinkingFiller = voiceEnabled && includeAmbientCues
         if voiceEnabled {

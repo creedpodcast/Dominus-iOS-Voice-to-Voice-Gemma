@@ -43,6 +43,7 @@ struct ContentView: View {
     /// Whisper transcription graph) has been pre-warmed. Splash stays up until then so
     /// "ready" actually means ready — no first-turn stalls, no manual-tap-to-send race.
     @State private var isWarmedUp: Bool = false
+    @State private var showContextInspector: Bool = false
 
     // Rename sheet state
     @State private var showingRenameAlert = false
@@ -894,7 +895,15 @@ struct ContentView: View {
                 .accessibilityLabel(store.voiceEnabled ? "Mute spoken replies" : "Speak replies aloud")
             }
 
-            ContextRingView(usage: contextUsage)
+            Button { showContextInspector = true } label: {
+                ContextRingView(usage: contextUsage)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Inspect context window")
+            .sheet(isPresented: $showContextInspector) {
+                ContextInspectorSheet(snapshot: store.lastContextSnapshot,
+                                      usage: contextUsage)
+            }
         }
         .padding(.horizontal)
         .padding(.top, 10)
@@ -1119,6 +1128,134 @@ struct ContextRingView: View {
                 .foregroundStyle(.secondary)
         }
         .frame(width: 40, height: 40)
+    }
+}
+
+// MARK: - Context Inspector Sheet
+
+struct ContextInspectorSheet: View {
+    let snapshot: ChatStore.ContextSnapshot
+    let usage: Double
+
+    private var ringColor: Color {
+        switch usage {
+        case ..<0.45: return .green
+        case ..<0.70: return .yellow
+        default:      return .red
+        }
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                // ── Header: total tokens ──────────────────────────────────
+                Section {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Context Window")
+                                .font(.headline)
+                            Text("\(snapshot.totalTokens) estimated tokens")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        ZStack {
+                            Circle()
+                                .stroke(Color(.systemGray5), lineWidth: 5)
+                            Circle()
+                                .trim(from: 0, to: usage)
+                                .stroke(ringColor,
+                                        style: StrokeStyle(lineWidth: 5, lineCap: .round))
+                                .rotationEffect(.degrees(-90))
+                            Text("\(Int(usage * 100))%")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                        }
+                        .frame(width: 48, height: 48)
+                    }
+                    .padding(.vertical, 4)
+                }
+
+                // ── System prompt ─────────────────────────────────────────
+                inspectorSection(
+                    title: "System Prompt",
+                    tokens: snapshot.systemTokens,
+                    color: .blue,
+                    content: snapshot.systemPrompt.isEmpty ? "(empty)" : snapshot.systemPrompt
+                )
+
+                // ── User profile ──────────────────────────────────────────
+                inspectorSection(
+                    title: "User Profile",
+                    tokens: snapshot.profileTokens,
+                    color: .purple,
+                    content: snapshot.profile.isEmpty ? "(not injected this turn)" : snapshot.profile
+                )
+
+                // ── Memory context ────────────────────────────────────────
+                inspectorSection(
+                    title: "Retrieved Memory",
+                    tokens: snapshot.memoryTokens,
+                    color: .orange,
+                    content: snapshot.memory.isEmpty ? "(no relevant memory this turn)" : snapshot.memory
+                )
+
+                // ── Conversation turns ────────────────────────────────────
+                Section {
+                    ForEach(snapshot.turns) { turn in
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Text(turn.role)
+                                    .font(.caption)
+                                    .fontWeight(.semibold)
+                                    .foregroundStyle(turn.role == "You" ? .accentColor : .secondary)
+                                Spacer()
+                                tokenBadge(turn.tokens, color: .primary.opacity(0.5))
+                            }
+                            Text(turn.content)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(4)
+                        }
+                        .padding(.vertical, 2)
+                    }
+                } header: {
+                    HStack {
+                        Text("Conversation Turns (\(snapshot.turns.count))")
+                        Spacer()
+                        tokenBadge(snapshot.turnsTokens, color: .green)
+                    }
+                }
+            }
+            .listStyle(.insetGrouped)
+            .navigationTitle("Context Inspector")
+            .navigationBarTitleDisplayMode(.inline)
+        }
+    }
+
+    @ViewBuilder
+    private func inspectorSection(title: String, tokens: Int, color: Color, content: String) -> some View {
+        Section {
+            Text(content)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        } header: {
+            HStack {
+                Text(title)
+                Spacer()
+                tokenBadge(tokens, color: color)
+            }
+        }
+    }
+
+    private func tokenBadge(_ count: Int, color: Color) -> some View {
+        Text("~\(count) tok")
+            .font(.caption2)
+            .fontWeight(.semibold)
+            .foregroundStyle(color)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(color.opacity(0.12), in: Capsule())
     }
 }
 
