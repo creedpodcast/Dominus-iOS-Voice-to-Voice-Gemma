@@ -701,17 +701,17 @@ struct ContentView: View {
 
     private var pttIcon: String {
         switch pttState {
-        case .idle:      return "mic"
+        case .idle:      return "waveform"
         case .listening: return "waveform"
-        case .aiTalking: return "mic.fill"
+        case .aiTalking: return "waveform"
         }
     }
 
     private var pttColor: Color {
         switch pttState {
         case .idle:      return .blue
-        case .listening: return .red
-        case .aiTalking: return .green
+        case .listening: return .green
+        case .aiTalking: return .secondary
         }
     }
 
@@ -1000,21 +1000,10 @@ struct ContentView: View {
                 Button {
                     handlePTTTap()
                 } label: {
-                    ZStack {
-                        // Animated pulse ring — only visible while recording
-                        Circle()
-                            .stroke(Color.red, lineWidth: 2.5)
-                            .frame(width: 48, height: 48)
-                            .scaleEffect(pulseScale)
-                            .opacity(pttState == .listening ? pulseOpacity : 0)
-
-                        // Core icon
-                        Image(systemName: pttIcon)
-                            .font(.system(size: 22, weight: .medium))
-                            .foregroundColor(pttColor)
-                            .frame(width: 36, height: 36)
-                    }
-                    .frame(width: 52, height: 52)
+                    Image(systemName: pttIcon)
+                        .font(.system(size: 22, weight: .medium))
+                        .foregroundColor(pttColor)
+                        .frame(width: 52, height: 52)
                 }
                 .disabled(store.isLoading || !store.isLoaded || !whisper.modelReady)
                 // ────────────────────────────────────────────────────────────
