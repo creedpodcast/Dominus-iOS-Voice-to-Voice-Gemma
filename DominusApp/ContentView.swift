@@ -84,9 +84,12 @@ struct ContentView: View {
     /// True once the silence filler ("you still there?") has fired this session.
     /// Prevents it from rescheduling after the AI response and looping.
     @State private var silenceFillerHasPlayed = false
-    /// True once the absolute exit timer has been started this session.
-    /// Prevents beginListening() re-entries from resetting the deadline.
+    /// True once the idle-exit monitor has been started this session.
+    /// Prevents beginListening() re-entries from spawning duplicate monitors.
     @State private var voiceModeExitScheduled = false
+    /// Accumulated seconds of true silence (neither user nor AI talking).
+    /// Resets to 0 whenever activity resumes.
+    @State private var voiceIdleSeconds: TimeInterval = 0
 
     private let voiceAutoSendDelay: TimeInterval = 2.0
     private let voiceActivityGraceDelay: TimeInterval = 0.8
@@ -336,7 +339,8 @@ struct ContentView: View {
         resetVoiceAutoSendState()
         cancelListeningSilenceFiller()
         cancelVoiceModeAutoExit()
-        silenceFillerHasPlayed = false   // reset for next voice session
+        silenceFillerHasPlayed = false    // reset for next voice session
+        voiceIdleSeconds = 0
         stopVolumeMonitoring()
         isInterruptRestartPending = false
         stopPulse()
@@ -476,17 +480,34 @@ struct ContentView: View {
     }
 
     private func scheduleVoiceModeAutoExit() {
-        // Absolute deadline — only start once per session. Re-entries from aiTalking
-        // must not reset this or the exit loops forever behind "are you still there?" replies.
+        // Only start one monitor per voice session.
         guard !voiceModeExitScheduled else { return }
         voiceModeExitScheduled = true
+        voiceIdleSeconds = 0
         voiceModeAutoExitTask?.cancel()
-        let delay = audioSettings.voiceModeInactivityTimeout
+
         voiceModeAutoExitTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-            guard !Task.isCancelled else { return }
-            await playVoiceModeSound(named: "DeactivateVoicetoVoice")
-            returnToIdle()
+            while !Task.isCancelled, pttState != .idle {
+                try? await Task.sleep(nanoseconds: 1_000_000_000) // tick every second
+                guard !Task.isCancelled, pttState != .idle else { return }
+
+                let userTalking = store.isGenerating == false &&
+                    (!latestVisibleVoiceTranscript.isEmpty ||
+                     (whisper.isRecording && (whisper.audioLevel > 0.02)))
+                let aiTalking = SpeechManager.shared.isSpeaking || store.isGenerating
+
+                if userTalking || aiTalking {
+                    // Activity detected — reset the idle counter
+                    voiceIdleSeconds = 0
+                } else {
+                    voiceIdleSeconds += 1
+                    if voiceIdleSeconds >= audioSettings.voiceModeInactivityTimeout {
+                        await playVoiceModeSound(named: "DeactivateVoicetoVoice")
+                        returnToIdle()
+                        return
+                    }
+                }
+            }
         }
     }
 
@@ -494,6 +515,7 @@ struct ContentView: View {
         voiceModeAutoExitTask?.cancel()
         voiceModeAutoExitTask = nil
         voiceModeExitScheduled = false
+        voiceIdleSeconds = 0
     }
 
     private func resetVoiceAutoSendState() {
