@@ -186,6 +186,10 @@ final class ChatStore: ObservableObject {
 
     private let engine = GemmaEngine()
 
+    /// Passthrough for one-time inference warmup at launch. Hides the engine
+    /// itself while letting ContentView gate the loading screen on warmup.
+    func prewarmEngine() async { await engine.prewarm() }
+
     /// Core identity — kept intentionally short to conserve token budget.
     private let systemPrompt = "You are Dominus, a direct and human AI assistant. Answer the user's latest message — nothing more. If you don't know something or weren't told it, say so plainly; do not guess or invent details. Match your length to the question: short questions get short answers, long questions get longer ones. No greetings, no preambles, no filler openers like \"Sure\" or \"Of course.\" Profile facts describe the user across chats; retrieved memory is current-chat only — use either only when it directly helps, otherwise ignore."
     

@@ -104,6 +104,20 @@ final class WhisperManager: ObservableObject {
         audioEngine.prepare()
     }
 
+    /// Runs the WhisperKit transcription graph once against a buffer of silence so
+    /// the user's first real recording doesn't pay the cold compile cost. Result
+    /// is discarded. Safe to call once after `loadModel()` completes.
+    func prewarmTranscription() async {
+        guard modelReady, let whisper = whisperKit else { return }
+        // 0.5s of silence at 16 kHz — Whisper's native input rate.
+        let silentSamples = [Float](repeating: 0, count: 8_000)
+        do {
+            _ = try await whisper.transcribe(audioArray: silentSamples)
+        } catch {
+            print("⚠️ Whisper prewarm failed:", error.localizedDescription)
+        }
+    }
+
     func startRecording() {
         guard !isRecording else { return }
         isStartingRecording = true

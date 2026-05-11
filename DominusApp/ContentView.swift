@@ -39,6 +39,10 @@ struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
 
     @State private var prompt: String = ""
+    /// Flips true only after every cold component (LLM inference graph, TTS voice file,
+    /// Whisper transcription graph) has been pre-warmed. Splash stays up until then so
+    /// "ready" actually means ready — no first-turn stalls, no manual-tap-to-send race.
+    @State private var isWarmedUp: Bool = false
 
     // Rename sheet state
     @State private var showingRenameAlert = false
@@ -89,7 +93,7 @@ struct ContentView: View {
         "No rush. Just Chilling."]
 
     private var isFullyLoaded: Bool {
-        store.isLoaded && whisper.modelReady
+        store.isLoaded && whisper.modelReady && isWarmedUp
     }
 
     var body: some View {
@@ -148,6 +152,7 @@ struct ContentView: View {
             store.loadModelIfNeeded()
             setupVoiceCallbacks()
             await whisper.loadModel()
+            await warmUpEverything()
             if isFullyLoaded {
                 prepareVoiceStackForFastEntry()
             }
@@ -161,6 +166,10 @@ struct ContentView: View {
                 store.loadModelIfNeeded()
                 Task {
                     await whisper.loadModel()
+                    // Light re-warm — covers the case where iOS suspended us long
+                    // enough that the audio session or voice file went cold.
+                    SpeechManager.shared.prewarmVoice()
+                    whisper.prewarmVoiceMode()
                     if isFullyLoaded {
                         prepareVoiceStackForFastEntry()
                     }
@@ -286,6 +295,20 @@ struct ContentView: View {
         guard pttState == .idle, !whisper.isRecording, !store.isGenerating else { return }
         whisper.prewarmVoiceMode()
         SpeechManager.shared.prepareForVoiceMode()
+    }
+
+    /// Run every "first use" cost behind the loading screen so when the splash
+    /// hides, the app is genuinely ready: no text-input stall, no manual-tap-to-send
+    /// on the first voice session, no first-TTS delay. Runs the three independent
+    /// warmups in parallel.
+    private func warmUpEverything() async {
+        guard !isWarmedUp else { return }
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { await store.prewarmEngine() }
+            group.addTask { await whisper.prewarmTranscription() }
+            group.addTask { @MainActor in SpeechManager.shared.prewarmVoice() }
+        }
+        isWarmedUp = true
     }
 
     private func beginListening() {

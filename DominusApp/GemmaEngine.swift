@@ -65,6 +65,39 @@ final class GemmaEngine: ObservableObject {
         }
     }
 
+    /// Run a tiny throwaway generation so the very first user-facing turn doesn't
+    /// pay the cold inference cost (graph JIT, KV cache init, accelerator warmup).
+    /// Safe to call once after the model finishes loading.
+    func prewarm() async {
+        loadModelIfNeeded()
+        // Wait briefly for the load Task to flip isLoaded — it dispatches into its own Task.
+        for _ in 0..<200 {
+            if isLoaded { break }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        guard isLoaded, let llama else { return }
+        do {
+            loadStatus = "Warming up…"
+            let messages: [LlamaChatMessage] = [
+                .init(role: .system, content: "ok"),
+                .init(role: .user,   content: "ok")
+            ]
+            let stream = try await llama.streamCompletion(
+                of: messages,
+                samplingConfig: .init(temperature: 0.0, seed: 1)
+            )
+            var burned = 0
+            for try await _ in stream {
+                burned += 1
+                if burned >= 2 { break }
+            }
+            loadStatus = "Ready."
+        } catch {
+            // Warmup failures are non-fatal — the real first turn will just pay the cost.
+            print("⚠️ Gemma prewarm failed:", error.localizedDescription)
+        }
+    }
+
     func resetModel() {
         stopStagedProgress()
         llama = nil

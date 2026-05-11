@@ -51,6 +51,32 @@ final class SpeechManager: NSObject, ObservableObject, AVSpeechSynthesizerDelega
         prepareAudioSessionForSpeech()
     }
 
+    /// Pre-load the AVSpeechSynthesizer voice file at app launch so the very first
+    /// real `speak()` call doesn't pay the cold voice-load delay. Plays an inaudible
+    /// utterance at volume 0 through a side-channel synthesizer so our main delegate
+    /// bookkeeping and `onAllSpeechFinished` callback are untouched.
+    func prewarmVoice() {
+        if preferredVoice == nil {
+            preferredVoice = pickMaleEnglishVoice()
+        }
+        prepareAudioSessionForSpeech()
+
+        let warmupSynth = AVSpeechSynthesizer()
+        let utt = AVSpeechUtterance(string: " ")
+        utt.rate   = AVSpeechUtteranceDefaultSpeechRate
+        utt.volume = 0
+        utt.voice  = preferredVoice ?? AVSpeechSynthesisVoice(language: "en-US")
+        utt.preUtteranceDelay  = 0
+        utt.postUtteranceDelay = 0
+        warmupSynth.speak(utt)
+        // Hold a strong reference until the utterance drains. Two seconds is well
+        // beyond the time a single space takes to synthesize even on a cold pipeline.
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            _ = warmupSynth   // keep alive until here
+        }
+    }
+
     func enqueue(_ text: String) {
         let cleaned = clean(text)
         guard hasSpeakableContent(cleaned) else { return }
