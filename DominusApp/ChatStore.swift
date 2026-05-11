@@ -539,7 +539,7 @@ final class ChatStore: ObservableObject {
             let assistantID    = conversations[convoIndex].messages[assistantIndex].id
             let assistantTS    = conversations[convoIndex].messages[assistantIndex].timestamp
 
-            let stream = try await engine.streamChat(llmMessages, temperature: 0.6, seed: 42)
+            let stream = try await engine.streamChat(llmMessages, temperature: 0.7, seed: 42)
 
             // Length-match the response to the question. Soft cap that only kicks
             // in at a sentence boundary, so we never chop a sentence mid-word.
