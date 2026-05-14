@@ -185,6 +185,9 @@ final class ChatStore: ObservableObject {
     /// Tracks an in-flight LLM title generation. Cancelled when the user sends a new message
     /// so chat generation always wins over title generation for the single LlamaService instance.
     private var titleTask: Task<Void, Never>?
+    /// One-slot cache for speculative RAG retrieval kicked off while the user types.
+    /// Consumed and cleared in `_send()` when the query matches exactly.
+    private var cachedSpeculativeMemory: (query: String, context: String)?
     private var conversationMaintenanceTask: Task<Void, Never>?
     /// Background memory refinement also uses the single LlamaService instance, so chat wins.
     private var memoryRefinementTask: Task<Void, Never>?
@@ -365,6 +368,35 @@ final class ChatStore: ObservableObject {
     }
 
     /// Non-async entry point — cancels any in-progress generation instantly, then starts fresh.
+    /// Pre-fetch RAG memories while the user is composing a message so `_send()`
+    /// can skip retrieval entirely on a cache hit. Called from ContentView with a
+    /// 300 ms debounce on every keystroke. No-op when the model is busy.
+    func speculativeRetrieve(for query: String) {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !isGenerating else { return }
+        guard let convoIndex = indexForSelectedConversation() else { return }
+        guard shouldUseCurrentChatRecall(for: trimmed) else {
+            cachedSpeculativeMemory = nil
+            return
+        }
+        let convoID            = conversations[convoIndex].id
+        let recentAssistantTxt = conversations[convoIndex].messages.reversed()
+            .first(where: { $0.role == .assistant && !isMemoryStatusMessage($0.content) })?
+            .content
+        let profileBlock       = ProfileStore.shared.systemPromptBlock()
+        let activeChatCtx      = activeConversationMemoryContext(in: conversations[convoIndex])
+
+        let context = MemoryRetriever.shared.retrieve(
+            query: trimmed,
+            conversationID: convoID,
+            recentAssistantText: recentAssistantTxt,
+            profileContext: profileBlock,
+            activeConversationContext: activeChatCtx,
+            topK: 5
+        )
+        cachedSpeculativeMemory = (query: trimmed, context: context)
+    }
+
     func send(
         _ userText: String,
         includeAmbientCues: Bool = false,
@@ -463,8 +495,16 @@ final class ChatStore: ObservableObject {
             .content
         let activeConversationContext = activeConversationMemoryContext(in: conversations[convoIndex])
         let shouldRetrieveCurrentChat = hasVisibleUserText && shouldUseCurrentChatRecall(for: visibleUserText)
-        let memoryContext = shouldRetrieveCurrentChat
-            ? MemoryRetriever.shared.retrieve(
+        // Use speculative retrieval result if the query matches exactly; otherwise
+        // fall back to a fresh retrieve call. Cache is cleared after each send.
+        let memoryContext: String
+        if shouldRetrieveCurrentChat,
+           let cached = cachedSpeculativeMemory,
+           cached.query == visibleUserText {
+            memoryContext = cached.context
+            cachedSpeculativeMemory = nil
+        } else if shouldRetrieveCurrentChat {
+            memoryContext = MemoryRetriever.shared.retrieve(
                 query: visibleUserText,
                 conversationID: conversations[convoIndex].id,
                 recentAssistantText: recentAssistantText,
@@ -472,7 +512,11 @@ final class ChatStore: ObservableObject {
                 activeConversationContext: activeConversationContext,
                 topK: 5
             )
-            : ""
+            cachedSpeculativeMemory = nil
+        } else {
+            memoryContext = ""
+            cachedSpeculativeMemory = nil
+        }
 
         // 3. Compose full system prompt
         var fullSystemPrompt = systemPrompt
@@ -577,8 +621,12 @@ final class ChatStore: ObservableObject {
             // of every single one. TTS sentence detection still runs per-token.
             // At ~20 tok/s this gives ~3 UI updates/s — smooth to the eye, and the
             // main thread stays free for typing, scrolling, and button taps.
+            // Exception: the very first token always flushes immediately so the
+            // response feels instant.
             var uiTokenCount = 0
             let uiTokenBatch = 6
+            var hasShownFirstToken = false
+            let generationStartedAt = Date()
 
             for try await token in stream {
                 // Exit immediately if a new message was sent
@@ -587,7 +635,25 @@ final class ChatStore: ObservableObject {
                 assistantText += token
                 uiTokenCount  += 1
 
-                if uiTokenCount >= uiTokenBatch {
+                if !hasShownFirstToken {
+                    hasShownFirstToken = true
+                    // B: if the first token arrives quickly the thinking filler hasn't
+                    // finished yet — cancel it before it starts talking over the answer.
+                    let ttft = Date().timeIntervalSince(generationStartedAt)
+                    if ttft < 1.5 {
+                        ThinkingFillerManager.shared.cancelScheduling()
+                    }
+                    // A: always show the first token immediately so the response
+                    // feels instant rather than waiting for a full batch to accumulate.
+                    let displayText = stripRoboticOpener(cleanLlamaArtifacts(assistantText))
+                    conversations[convoIndex].messages[assistantIndex] = ChatMessage(
+                        id: assistantID,
+                        role: .assistant,
+                        content: displayText,
+                        timestamp: assistantTS
+                    )
+                    uiTokenCount = 0
+                } else if uiTokenCount >= uiTokenBatch {
                     let displayText = stripRoboticOpener(cleanLlamaArtifacts(assistantText))
                     conversations[convoIndex].messages[assistantIndex] = ChatMessage(
                         id: assistantID,

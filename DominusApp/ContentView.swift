@@ -40,6 +40,8 @@ struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
 
     @State private var prompt: String = ""
+    /// Debounced task that pre-fetches RAG memories while the user is typing.
+    @State private var speculativeRetrievalTask: Task<Void, Never>?
     /// Flips true only after every cold component (LLM inference graph, TTS voice file,
     /// Whisper transcription graph) has been pre-warmed. Splash stays up until then so
     /// "ready" actually means ready — no first-turn stalls, no manual-tap-to-send race.
@@ -92,7 +94,7 @@ struct ContentView: View {
     /// Resets to 0 whenever activity resumes.
     @State private var voiceIdleSeconds: TimeInterval = 0
 
-    private let voiceAutoSendDelay: TimeInterval = 2.0
+    private let voiceAutoSendDelay: TimeInterval = 1.5
     private let voiceActivityGraceDelay: TimeInterval = 0.8
     private let listeningSilenceFillerDelay: TimeInterval = 20
     private let listeningSilenceFillers = [
@@ -216,6 +218,18 @@ struct ContentView: View {
         .onChange(of: audioSettings.voiceModeInactivityTimeout) { _ in
             guard pttState == .listening else { return }
             scheduleVoiceModeAutoExit()
+        }
+        .onChange(of: prompt) { newText in
+            // Speculative RAG: after 300 ms of typing inactivity, pre-fetch memories
+            // so _send() can skip retrieval and start generating immediately.
+            speculativeRetrievalTask?.cancel()
+            let trimmed = newText.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.count >= 4, pttState == .idle, !store.isGenerating else { return }
+            speculativeRetrievalTask = Task {
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                guard !Task.isCancelled else { return }
+                store.speculativeRetrieve(for: trimmed)
+            }
         }
         // Rename alert
         .alert("Rename Chat", isPresented: $showingRenameAlert) {
