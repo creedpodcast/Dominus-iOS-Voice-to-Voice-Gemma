@@ -6,7 +6,7 @@ Dominus is a fully local, privacy-first AI assistant for iPhone. No internet con
 
 ## What It Does
 
-Talk to an AI that talks back. Tap once to speak, then pause — after real words are transcribed and the mic has been quiet for 2.5 seconds, Dominus sends the message automatically and responds with text and voice simultaneously. Tap at any point while the AI is speaking to cut it off and speak again. Fully on-device, fully private.
+Talk to an AI that talks back. Tap once to speak, then pause — after real words are transcribed and the transcript has been stable for 2 seconds, Dominus sends the message automatically and responds with text and voice simultaneously. Tap at any point while the AI is speaking to cut it off and speak again. Fully on-device, fully private.
 
 ---
 
@@ -14,12 +14,20 @@ Talk to an AI that talks back. Tap once to speak, then pause — after real word
 
 ### Working
 - **Push-to-talk (PTT) voice-to-voice conversation**
-  - Tap mic → speak → pause until the mic is quiet for 2.5 seconds → AI responds with text + voice
-  - Tap again while listening to manually send before the timer finishes
+  - Tap mic → speak → transcript stable for 2 seconds → AI responds with text + voice
+  - Mute button and ambient noise do not block auto-send — only transcript stability matters
+  - Tap again while listening to manually send before the timer fires
   - Tap during AI response → interrupts voice and generation, waits briefly for audio to drain, then starts listening again
   - Full-screen black voice surface hides the chat title, chat log, transcript field, and input bar while the orb is active
-  - Animated pulse ring while recording; processing states still appear as status pills on the black voice screen
+  - Orb color reflects state: gray when idle, green while user speaks, red while AI speaks
+  - Processing states appear as status pills on the black voice screen
   - TTS auto-enables during voice turns, restores your previous setting after
+- **Grounded, human-feel responses**
+  - System prompt instructs Dominus to answer only what was asked, admit uncertainty rather than guess, and match response length to question length
+  - Short questions get short answers; longer questions get appropriately longer ones
+  - Robotic openers ("Sure!", "Certainly!", "Of course!") are stripped automatically before text is displayed or spoken
+  - Noise turns ("ok", "yeah", "uh huh") are filtered out of LLM history before inference so they don't inflate context or shift tone
+- **Pipeline pre-warming at launch** — all four cold-start costs (LLM inference graph, audio session, STT recognizer, TTS voice file) are paid behind the loading screen in parallel; the app becomes interactive only when every component is ready
 - **Full-screen loading splash on launch** — blocks interaction until both Gemma and Whisper are fully ready; shows live progress bars per component
 - **Startup ready sound** — plays a bundled local sound effect once the loading screen finishes and both models are ready
 - **Audio settings** — sidebar audio controls let the user adjust and test startup, voice-mode activation, voice-mode deactivation, AI voice-response volume, and voice-mode inactivity timeout independently
@@ -27,7 +35,6 @@ Talk to an AI that talks back. Tap once to speak, then pause — after real word
 - **WhisperKit on-device STT** — accurate Whisper-based transcription with live preview while recording
 - **Hidden ambient cue awareness** — Whisper non-speech markers such as `[coughing]`, `(keyboard typing)`, `[silence]`, and `[laughter]` are removed from the visible transcript/chat while still being tracked privately per conversation. Dominus can acknowledge them naturally with a 12-turn cooldown, answer later if asked what it heard, and check in after roughly one minute of silence.
 - **Stable live voice transcript** — live preview keeps the best partial transcript during a recording, so a brief pause to think no longer erases previously transcribed words.
-- **Audio-gated voice auto-send** — voice mode waits for actual visible words, tracks mic activity while the user speaks, and sends automatically only after the mic has been quiet for 2.5 seconds.
 - **Voice punctuation cleanup** — dictated words such as "period", "comma", and "question mark" are converted into punctuation pauses before voice text is sent or spoken aloud.
 - **Male TTS voice** — prefers Evan (Enhanced), falls back to Reed, Nathan, Tom, etc.
 - **Loud, clear voice output** — `.videoChat` audio session mode removes the automatic-gain-control ceiling that `.voiceChat` imposes; device volume rocker now controls the full range
@@ -36,14 +43,17 @@ Talk to an AI that talks back. Tap once to speak, then pause — after real word
 - **Half-duplex voice with no echo** — orb stays green until *every* queued TTS sentence has fully drained from the speaker (350 ms hardware grace included), then flips to listening — the mic never picks up the AI's tail
 - **Sentence-complete TTS chunking** — sentences fire to TTS the instant their punctuation lands, never mid-sentence; only true runaways (>300 chars) ever get cut
 - **Voice thinking fillers** — while Gemma is preparing a voice response, Dominus can speak short local filler phrases such as quick greetings, light thinking sounds, or deeper-thinking phrases without adding them to the LLM prompt or chat log
-- **Listening-silence check-ins** — if voice mode hears no visible transcript for about 20 seconds, Dominus gently checks in and then returns to listening
+- **Smart voice idle timer** — inactivity only counts during true silence; the timer resets to zero while the user is speaking or while the AI is speaking, so neither side triggers an early exit
+- **Voice inactivity check-in (once per session)** — if no user speech is detected for the configured timeout, Dominus speaks a single check-in ("Are you still there?") and then exits voice mode; the check-in never loops
 - **Voice-mode entry/exit cues** — local sounds play during voice-mode entry and exit without blocking the first recording; voice mode exits after the selected listening-only inactivity timeout without renewed user activity
 - **Per-message action bar on AI replies** — Copy (clipboard, ✓ flash confirms), Share (system share sheet), and Speaker button under every assistant bubble. Tap the speaker to hear any past response read aloud; tap it again to stop mid-playback. Speaker icon swaps to a stop icon while that specific message is playing so state is always visible.
+- **Tappable context ring → inspector** — tap the context usage ring in the chat header to open a sheet showing every section of the assembled LLM context (system prompt, profile, rolling summary, memories, raw turns) with token counts; helps verify what Dominus actually sees each turn
 - **Selectable bubble text** — long-press any message (user or AI) to select and copy partial text.
 - **Input field auto-clears on send** — text field empties the moment the send button is tapped; no manual deletion required before typing the next message.
 - **Larger action icons and context ring** — per-message action icons at 18 pt and the context usage ring at 40 × 40 pt for readability at any text size; the ring mirrors the same rolling prompt-trim estimate used before sending context to Gemma.
 - **Cinematic response streaming** — text chat still streams from Gemma in real time, but assistant bubbles reveal response chunks with a soft blurred ghost/fade treatment instead of harsh token-by-token typing.
 - **Stable response scroll behavior** — when a new assistant response starts, chat scrolls to the top of the AI bubble once, then stops following the reveal so the user can scroll freely while text unfolds.
+- **Conversation compaction** — turns that age out of the 10-turn raw context window are summarised by a side-channel LLM call (temperature 0.3, max 400 chars). The rolling summary is appended to every system prompt so prior context is always reachable without burning the main token budget. Compaction runs only when the model is idle, never during active generation.
 - **Memory Journal** — one editable long-term memory page where users can view, add, edit, delete, and summarize approved memories without separate memory titles
 - **Memory suggestions** — Dominus can detect possible memories, show Yes/No controls, accept spoken/text confirmation, and show darkened "Added to Memory" / "Forgot Memory" status bubbles in the chat
 - RAG long-term memory (semantic search + keyword fallback) — retrieves from the Memory Journal and current-chat summaries while filtering memory status bubbles out of the LLM prompt
@@ -83,7 +93,7 @@ A full-screen splash covers the app until both models are ready:
 | `cpu.fill` · Language Model | Gemma 2B Q4_K_M loading into memory via llama.cpp |
 | `waveform` · Voice Recognition | WhisperKit base-English model loading (~145 MB) |
 
-Both bars animate a left-to-right fill with a live percentage. The app becomes interactive only when both hit 100%.
+Both bars animate a left-to-right fill with a live percentage. The app becomes interactive only when both hit 100% **and** all four pipeline components (LLM inference graph, audio session, STT recognizer, TTS voice) have been pre-warmed in parallel.
 
 ### During Use
 A small floating pill appears at the top of the screen whenever the app is processing:
@@ -92,9 +102,9 @@ A small floating pill appears at the top of the screen whenever the app is proce
 |---|---|
 | User tapped send in voice mode | `waveform` · Transcribing your speech… |
 | AI generating, TTS not started yet | `brain` · Thinking… |
+| AI generating in text mode | `cpu` · Generating… |
 
 Voice mode may also speak a short local thinking filler while Gemma prepares the real response. These fillers are generated by Swift orchestration only; they are not part of the LLM prompt and are not saved into the chat log.
-| AI generating in text mode | `cpu` · Generating… |
 
 The pill slides in from the top and disappears automatically when the operation completes.
 
@@ -106,18 +116,18 @@ If the app is foregrounded after a long background session and either model need
 ## How Voice Works (PTT Flow)
 
 ```
-[idle]
-  ↓ tap mic
-[listening]  — full-screen black voice surface + waveform icon (red) + animated pulse ring
-  ↓ 2.5 seconds of mic quiet after visible words, or tap again to send manually
+[idle]  — waveform icon (gray)
+  ↓ tap
+[listening]  — full-screen black voice surface + waveform icon (green)
+  ↓ transcript stable for 2 seconds (unconditional), or tap again to send manually
 [transcribing] — "Transcribing your speech…" pill appears
   ↓ Whisper done
-[AI talking] — "Thinking…" pill → then mic.fill icon (green) as TTS begins
+[AI talking] — "Thinking…" pill → waveform icon (red) as TTS begins
   ↓ AI finishes naturally
-[listening]
+[listening]  — waveform icon (green)
 ```
 
-The same single button controls every step. No hold-to-talk. Auto-send only starts after visible words have been transcribed, so silence or hidden ambient cues alone do not send a user message. Empty recordings keep the user in voice mode and restart listening instead of returning to text mode.
+The same single button controls every step. No hold-to-talk. Auto-send fires after 2 seconds of transcript stability — mute state and ambient noise do not affect the timer. Empty recordings restart listening instead of returning to text mode.
 
 ---
 
@@ -131,6 +141,15 @@ The same single button controls every step. No hold-to-talk. Auto-send only star
 | Context window | 2048 tokens |
 | Batch size | 512 |
 | GPU acceleration | Metal (on-device) |
+| Temperature | 0.7 (main chat) · 0.3–0.4 (side-channel: titles, summaries) |
+
+### Response quality
+| Behaviour | Details |
+|---|---|
+| Grounded system prompt | Dominus answers only what was asked; admits uncertainty rather than guessing; matches length to the question |
+| Length cap | Response length is bounded by the user's input word count: ≤5 words → 200 chars, 6-15 → 500, 16-40 → 1200, >40 → uncapped |
+| Robotic opener strip | Opening phrases like "Sure!", "Certainly!", "Of course!" are removed before text is shown or spoken |
+| Noise turn filter | Low-signal turns ("ok", "yeah", "uh huh") are dropped from LLM history before inference |
 
 ### Voice
 | Component | Details |
@@ -139,12 +158,12 @@ The same single button controls every step. No hold-to-talk. Auto-send only star
 | Hidden ambient cues | Bracketed or parenthesized non-speech markers are stripped from visible text, stored as per-chat ambient events, and injected only as hidden context when relevant |
 | Text-to-Speech | `AVSpeechSynthesizer.speak()` + delegate (Apple Neural Engine, fully local) |
 | TTS voice | Evan Enhanced (male, en-US) — falls back to best available |
-| Input mode | Push-to-talk start with audio-gated auto-send after 2.5 seconds of mic quiet and visible words |
-| Voice UI | Full-screen black orb surface while voice mode is active; chat title/log/input are hidden until voice mode exits |
+| Input mode | Push-to-talk with auto-send after 2 seconds of transcript stability (mute/noise do not block) |
+| Voice UI | Full-screen black orb surface while voice mode is active; orb is gray (idle), green (user speaking), red (AI speaking) |
 | Thinking fillers | Local `ThinkingFillerManager` chooses restrained voice-only filler phrases based on greetings, short prompts, complex prompts, follow-ups, and long delays |
-| Listening silence | If no visible transcript appears for about 20 seconds, Dominus stops the empty recording, speaks a short check-in, then returns to listening |
-| Auto-exit | Voice mode exits automatically after the selected listening-only inactivity timeout, from 30 seconds to 15 minutes, and plays the deactivation cue. AI generation and spoken responses do not count as user inactivity |
-| Silence handling | Ambient-only silence is stored silently unless the recording lasts about 60 seconds, then Dominus may briefly check in |
+| Smart idle timer | 1-second ticker that only advances during true silence; resets to zero while the user or AI is speaking |
+| Inactivity check-in | One check-in fires per voice session after the configured silence timeout; after speaking it, voice mode exits — no loop |
+| Auto-exit | Voice mode exits automatically after the configured inactivity timeout plays the deactivation cue |
 | Interrupt | Button tap stops generation + TTS immediately, then restarts STT after a short audio-drain grace period |
 | Audio session | `AVAudioSession` `.videoChat` / `.voiceChat` voice routing with `.allowBluetooth`, `.allowBluetoothA2DP`, and `.defaultToSpeaker` so AirPods, Bluetooth headsets, wired headphones, and speaker routes work without per-device code |
 | Bluetooth input stability | Mic taps use the active hardware input format and resample dynamically, preventing headset sample-rate changes (16-24 kHz vs 48 kHz) from crashing recording |
@@ -152,6 +171,15 @@ The same single button controls every step. No hold-to-talk. Auto-send only star
 | Headphone safety | TTS volume is route-aware: user-controlled AI voice volume still keeps a lower app-level cap for headphones/Bluetooth, plus persistent high/low system-volume warnings during voice mode |
 | Half-duplex gating | `outstandingUtterances` counter tracks every queued sentence; mic engine stays off until counter hits zero + 350 ms hardware drain |
 | Streaming TTS | Spoken sentence-by-sentence as tokens arrive — `preUtteranceDelay`/`postUtteranceDelay` set to 0 so Apple cross-fades sentences with no gap |
+
+### Context management
+| Component | Details |
+|---|---|
+| Rolling window | Latest 10 turns (20 messages) kept as raw history in every prompt |
+| Conversation compaction | Turns that age out of the 10-turn window are summarised by a side-channel LLM call (temperature 0.3, max 400 chars); summary is injected into the system prompt as "Earlier in this conversation:" so prior context is always reachable without burning token budget |
+| Compaction timing | Runs only when the model is idle (not generating); append-only so older summaries are never discarded |
+| Dual storage | Compacted summaries are also written to RAG so retrieval can surface them when relevant |
+| Context inspector | Tap the context ring in the chat header to see every assembled section (system prompt, profile, rolling summary, memories, raw turns) with token counts |
 
 ### Memory Journal + RAG
 | Component | Details |
@@ -168,7 +196,6 @@ The same single button controls every step. No hold-to-talk. Auto-send only star
 | Traceability | Memory Journal includes a retrieval trace with source, category, semantic score, matched semantic aspect, keyword score, entity/topic/recency/profile/active-conversation boosts, importance boost, repetition penalty, and final score |
 | Normalization | Common first-person memory phrases are converted into Creed-focused facts before storage; idle Gemma refinement rewrites long or messy memories into compact third-person summaries |
 | File memory groundwork | `MemoryScope.file` is reserved for future chunked file indexing: file → chunks → embeddings → searchable candidates |
-| Raw history | Latest 3-4 turns kept in context — older current-chat turns are compacted into conversation-scoped RAG summaries |
 
 ### User Profile
 | Component | Details |
@@ -229,4 +256,4 @@ DominusApp/
 
 - **Context window** — 2048 tokens can overflow when system prompt + profile + memories + history are large. Fix: increase to 4096.
 - **STT 1-minute OS limit** — Apple's `SFSpeechRecognizer` (used for VAD only) auto-cancels after ~60 seconds. Does not affect WhisperKit transcription.
-- **Live transcript delay** — WhisperKit live preview runs every 2.5 seconds; first preview requires at least 0.5s of audio. Final transcript on send is always complete.
+- **Live transcript delay** — WhisperKit live preview runs every second; first preview requires at least 0.5s of audio. Final transcript on send is always complete.

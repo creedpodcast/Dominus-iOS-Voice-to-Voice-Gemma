@@ -47,11 +47,10 @@ final class ThinkingFillerManager {
     ]
 
     private let quickFillers = [
-        "Yeah...",
         "Got it...",
-        "Alright, so...",
+        "Alright so...",
         "Okay...",
-        "Right, so...",
+        "Right so...",
         "Makes sense..."
     ]
 
@@ -63,7 +62,7 @@ final class ThinkingFillerManager {
     ]
 
     private let stallingFillers = [
-        "Hmm... give me a moment...",
+        "Give me a moment...",
         "Alright... thinking...",
         "Let me sit with that for a second...",
         "Okay... just a second...",

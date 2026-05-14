@@ -39,6 +39,11 @@ struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
 
     @State private var prompt: String = ""
+    /// Flips true only after every cold component (LLM inference graph, TTS voice file,
+    /// Whisper transcription graph) has been pre-warmed. Splash stays up until then so
+    /// "ready" actually means ready — no first-turn stalls, no manual-tap-to-send race.
+    @State private var isWarmedUp: Bool = false
+    @State private var showContextInspector: Bool = false
 
     // Rename sheet state
     @State private var showingRenameAlert = false
@@ -76,8 +81,17 @@ struct ContentView: View {
     @State private var voiceModeSoundPlayer: AVAudioPlayer?
     @State private var isVoiceModeTransitioning = false
     @State private var hasPlayedAppLoadedSound = false
+    /// True once the silence filler ("you still there?") has fired this session.
+    /// Prevents it from rescheduling after the AI response and looping.
+    @State private var silenceFillerHasPlayed = false
+    /// True once the idle-exit monitor has been started this session.
+    /// Prevents beginListening() re-entries from spawning duplicate monitors.
+    @State private var voiceModeExitScheduled = false
+    /// Accumulated seconds of true silence (neither user nor AI talking).
+    /// Resets to 0 whenever activity resumes.
+    @State private var voiceIdleSeconds: TimeInterval = 0
 
-    private let voiceAutoSendDelay: TimeInterval = 2.5
+    private let voiceAutoSendDelay: TimeInterval = 2.0
     private let voiceActivityGraceDelay: TimeInterval = 0.8
     private let listeningSilenceFillerDelay: TimeInterval = 20
     private let listeningSilenceFillers = [
@@ -89,7 +103,7 @@ struct ContentView: View {
         "No rush. Just Chilling."]
 
     private var isFullyLoaded: Bool {
-        store.isLoaded && whisper.modelReady
+        store.isLoaded && whisper.modelReady && isWarmedUp
     }
 
     var body: some View {
@@ -148,6 +162,7 @@ struct ContentView: View {
             store.loadModelIfNeeded()
             setupVoiceCallbacks()
             await whisper.loadModel()
+            await warmUpEverything()
             if isFullyLoaded {
                 prepareVoiceStackForFastEntry()
             }
@@ -161,6 +176,10 @@ struct ContentView: View {
                 store.loadModelIfNeeded()
                 Task {
                     await whisper.loadModel()
+                    // Light re-warm — covers the case where iOS suspended us long
+                    // enough that the audio session or voice file went cold.
+                    SpeechManager.shared.prewarmVoice()
+                    whisper.prewarmVoiceMode()
                     if isFullyLoaded {
                         prepareVoiceStackForFastEntry()
                     }
@@ -288,6 +307,20 @@ struct ContentView: View {
         SpeechManager.shared.prepareForVoiceMode()
     }
 
+    /// Run every "first use" cost behind the loading screen so when the splash
+    /// hides, the app is genuinely ready: no text-input stall, no manual-tap-to-send
+    /// on the first voice session, no first-TTS delay. Runs the three independent
+    /// warmups in parallel.
+    private func warmUpEverything() async {
+        guard !isWarmedUp else { return }
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { await store.prewarmEngine() }
+            group.addTask { await whisper.prewarmTranscription() }
+            group.addTask { @MainActor in SpeechManager.shared.prewarmVoice() }
+        }
+        isWarmedUp = true
+    }
+
     private func beginListening() {
         resetVoiceAutoSendState()
         isInterruptRestartPending = false
@@ -306,6 +339,8 @@ struct ContentView: View {
         resetVoiceAutoSendState()
         cancelListeningSilenceFiller()
         cancelVoiceModeAutoExit()
+        silenceFillerHasPlayed = false    // reset for next voice session
+        voiceIdleSeconds = 0
         stopVolumeMonitoring()
         isInterruptRestartPending = false
         stopPulse()
@@ -385,28 +420,18 @@ struct ContentView: View {
 
     private func scheduleVoiceAutoSend() {
         let transcriptSnapshot = latestVisibleVoiceTranscript
-        let transcriptUpdatedAt = latestVisibleVoiceTranscriptUpdatedAt ?? Date()
         voiceAutoSendTask?.cancel()
         voiceAutoSendTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: UInt64(voiceAutoSendDelay * 1_000_000_000))
             guard !Task.isCancelled,
                   pttState == .listening,
-                  !whisper.isMicMuted,
                   !transcriptSnapshot.isEmpty
             else { return }
 
+            // If the transcript is still growing, the user is still speaking — wait again.
+            // Otherwise send unconditionally: mute state, ambient noise, and audio
+            // activity are irrelevant once the transcript has been stable for 2 seconds.
             if latestVisibleVoiceTranscript != transcriptSnapshot {
-                scheduleVoiceAutoSend()
-                return
-            }
-
-            if Date().timeIntervalSince(transcriptUpdatedAt) < voiceAutoSendDelay {
-                scheduleVoiceAutoSend()
-                return
-            }
-
-            if let lastVoiceActivityAt,
-               Date().timeIntervalSince(lastVoiceActivityAt) < voiceActivityGraceDelay {
                 scheduleVoiceAutoSend()
                 return
             }
@@ -421,6 +446,9 @@ struct ContentView: View {
     }
 
     private func scheduleListeningSilenceFiller() {
+        // Only fire once per voice session — after it plays we don't reschedule,
+        // so the exit timer can run to completion without looping.
+        guard !silenceFillerHasPlayed else { return }
         listeningSilenceFillerTask?.cancel()
         listeningSilenceFillerTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: UInt64(listeningSilenceFillerDelay * 1_000_000_000))
@@ -441,6 +469,7 @@ struct ContentView: View {
     }
 
     private func playListeningSilenceFiller() {
+        silenceFillerHasPlayed = true   // prevent this from ever looping
         cancelListeningSilenceFiller()
         resetVoiceAutoSendState()
         stopPulse()
@@ -451,25 +480,42 @@ struct ContentView: View {
     }
 
     private func scheduleVoiceModeAutoExit() {
+        // Only start one monitor per voice session.
+        guard !voiceModeExitScheduled else { return }
+        voiceModeExitScheduled = true
+        voiceIdleSeconds = 0
         voiceModeAutoExitTask?.cancel()
-        let delay = audioSettings.voiceModeInactivityTimeout
+
         voiceModeAutoExitTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-            guard !Task.isCancelled,
-                  pttState == .listening,
-                  !store.isGenerating,
-                  !SpeechManager.shared.isSpeaking,
-                  WhisperManager.visibleTranscript(from: whisper.liveTranscript).isEmpty,
-                  latestVisibleVoiceTranscript.isEmpty
-            else { return }
-            await playVoiceModeSound(named: "DeactivateVoicetoVoice")
-            returnToIdle()
+            while !Task.isCancelled, pttState != .idle {
+                try? await Task.sleep(nanoseconds: 1_000_000_000) // tick every second
+                guard !Task.isCancelled, pttState != .idle else { return }
+
+                let userTalking = store.isGenerating == false &&
+                    (!latestVisibleVoiceTranscript.isEmpty ||
+                     (whisper.isRecording && (whisper.audioLevel > 0.02)))
+                let aiTalking = SpeechManager.shared.isSpeaking || store.isGenerating
+
+                if userTalking || aiTalking {
+                    // Activity detected — reset the idle counter
+                    voiceIdleSeconds = 0
+                } else {
+                    voiceIdleSeconds += 1
+                    if voiceIdleSeconds >= audioSettings.voiceModeInactivityTimeout {
+                        await playVoiceModeSound(named: "DeactivateVoicetoVoice")
+                        returnToIdle()
+                        return
+                    }
+                }
+            }
         }
     }
 
     private func cancelVoiceModeAutoExit() {
         voiceModeAutoExitTask?.cancel()
         voiceModeAutoExitTask = nil
+        voiceModeExitScheduled = false
+        voiceIdleSeconds = 0
     }
 
     private func resetVoiceAutoSendState() {
@@ -687,17 +733,17 @@ struct ContentView: View {
 
     private var pttIcon: String {
         switch pttState {
-        case .idle:      return "mic"
+        case .idle:      return "waveform"
         case .listening: return "waveform"
-        case .aiTalking: return "mic.fill"
+        case .aiTalking: return "waveform"
         }
     }
 
     private var pttColor: Color {
         switch pttState {
-        case .idle:      return .blue
-        case .listening: return .red
-        case .aiTalking: return .green
+        case .idle:      return .gray
+        case .listening: return .green
+        case .aiTalking: return .red
         }
     }
 
@@ -881,7 +927,15 @@ struct ContentView: View {
                 .accessibilityLabel(store.voiceEnabled ? "Mute spoken replies" : "Speak replies aloud")
             }
 
-            ContextRingView(usage: contextUsage)
+            Button { showContextInspector = true } label: {
+                ContextRingView(usage: contextUsage)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Inspect context window")
+            .sheet(isPresented: $showContextInspector) {
+                ContextInspectorSheet(snapshot: store.lastContextSnapshot,
+                                      usage: contextUsage)
+            }
         }
         .padding(.horizontal)
         .padding(.top, 10)
@@ -978,21 +1032,10 @@ struct ContentView: View {
                 Button {
                     handlePTTTap()
                 } label: {
-                    ZStack {
-                        // Animated pulse ring — only visible while recording
-                        Circle()
-                            .stroke(Color.red, lineWidth: 2.5)
-                            .frame(width: 48, height: 48)
-                            .scaleEffect(pulseScale)
-                            .opacity(pttState == .listening ? pulseOpacity : 0)
-
-                        // Core icon
-                        Image(systemName: pttIcon)
-                            .font(.system(size: 22, weight: .medium))
-                            .foregroundColor(pttColor)
-                            .frame(width: 36, height: 36)
-                    }
-                    .frame(width: 52, height: 52)
+                    Image(systemName: pttIcon)
+                        .font(.system(size: 22, weight: .medium))
+                        .foregroundColor(pttColor)
+                        .frame(width: 52, height: 52)
                 }
                 .disabled(store.isLoading || !store.isLoaded || !whisper.modelReady)
                 // ────────────────────────────────────────────────────────────
@@ -1106,6 +1149,134 @@ struct ContextRingView: View {
                 .foregroundStyle(.secondary)
         }
         .frame(width: 40, height: 40)
+    }
+}
+
+// MARK: - Context Inspector Sheet
+
+struct ContextInspectorSheet: View {
+    let snapshot: ChatStore.ContextSnapshot
+    let usage: Double
+
+    private var ringColor: Color {
+        switch usage {
+        case ..<0.45: return .green
+        case ..<0.70: return .yellow
+        default:      return .red
+        }
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                // ── Header: total tokens ──────────────────────────────────
+                Section {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Context Window")
+                                .font(.headline)
+                            Text("\(snapshot.totalTokens) estimated tokens")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        ZStack {
+                            Circle()
+                                .stroke(Color(.systemGray5), lineWidth: 5)
+                            Circle()
+                                .trim(from: 0, to: usage)
+                                .stroke(ringColor,
+                                        style: StrokeStyle(lineWidth: 5, lineCap: .round))
+                                .rotationEffect(.degrees(-90))
+                            Text("\(Int(usage * 100))%")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                        }
+                        .frame(width: 48, height: 48)
+                    }
+                    .padding(.vertical, 4)
+                }
+
+                // ── System prompt ─────────────────────────────────────────
+                inspectorSection(
+                    title: "System Prompt",
+                    tokens: snapshot.systemTokens,
+                    color: .blue,
+                    content: snapshot.systemPrompt.isEmpty ? "(empty)" : snapshot.systemPrompt
+                )
+
+                // ── User profile ──────────────────────────────────────────
+                inspectorSection(
+                    title: "User Profile",
+                    tokens: snapshot.profileTokens,
+                    color: .purple,
+                    content: snapshot.profile.isEmpty ? "(not injected this turn)" : snapshot.profile
+                )
+
+                // ── Memory context ────────────────────────────────────────
+                inspectorSection(
+                    title: "Retrieved Memory",
+                    tokens: snapshot.memoryTokens,
+                    color: .orange,
+                    content: snapshot.memory.isEmpty ? "(no relevant memory this turn)" : snapshot.memory
+                )
+
+                // ── Conversation turns ────────────────────────────────────
+                Section {
+                    ForEach(snapshot.turns) { turn in
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Text(turn.role)
+                                    .font(.caption)
+                                    .fontWeight(.semibold)
+                                    .foregroundStyle(turn.role == "You" ? Color.accentColor : Color.secondary)
+                                Spacer()
+                                tokenBadge(turn.tokens, color: .primary.opacity(0.5))
+                            }
+                            Text(turn.content)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(4)
+                        }
+                        .padding(.vertical, 2)
+                    }
+                } header: {
+                    HStack {
+                        Text("Conversation Turns (\(snapshot.turns.count))")
+                        Spacer()
+                        tokenBadge(snapshot.turnsTokens, color: .green)
+                    }
+                }
+            }
+            .listStyle(.insetGrouped)
+            .navigationTitle("Context Inspector")
+            .navigationBarTitleDisplayMode(.inline)
+        }
+    }
+
+    @ViewBuilder
+    private func inspectorSection(title: String, tokens: Int, color: Color, content: String) -> some View {
+        Section {
+            Text(content)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        } header: {
+            HStack {
+                Text(title)
+                Spacer()
+                tokenBadge(tokens, color: color)
+            }
+        }
+    }
+
+    private func tokenBadge(_ count: Int, color: Color) -> some View {
+        Text("~\(count) tok")
+            .font(.caption2)
+            .fontWeight(.semibold)
+            .foregroundStyle(color)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(color.opacity(0.12), in: Capsule())
     }
 }
 

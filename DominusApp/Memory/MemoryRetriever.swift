@@ -14,8 +14,8 @@ final class MemoryRetriever {
 
     private let store    = MemoryStore.shared
     private let embedder = MemoryEmbedder.shared
-    private let minimumSemanticScore: Float = 0.15
-    private let minimumConversationSemanticScore: Float = 0.22
+    private let minimumSemanticScore: Float = 0.18
+    private let minimumConversationSemanticScore: Float = 0.25
     private let minimumContextSemanticScore: Float = 0.30
     private let minimumHubSemanticScore: Float = 0.32
     private let broadRecallLimit = 16

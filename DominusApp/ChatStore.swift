@@ -21,6 +21,10 @@ struct Conversation: Identifiable, Codable, Equatable {
     var ambientEvents: [AmbientEvent]
     /// Number of oldest messages already converted into short-term RAG summaries.
     var summarizedMessageCount: Int
+    /// Rolling LLM-generated summary of messages that have aged out of the raw
+    /// context window. Injected directly into every system prompt so older context
+    /// is always available without burning raw-turn token budget.
+    var rollingSummary: String
 
     init(
         id: UUID = UUID(),
@@ -32,7 +36,8 @@ struct Conversation: Identifiable, Codable, Equatable {
         hasGeneratedTitle: Bool = false,
         ambientCueLastAcknowledgedTurn: [String: Int] = [:],
         ambientEvents: [AmbientEvent] = [],
-        summarizedMessageCount: Int = 0
+        summarizedMessageCount: Int = 0,
+        rollingSummary: String = ""
     ) {
         self.id = id
         self.title = title
@@ -44,6 +49,7 @@ struct Conversation: Identifiable, Codable, Equatable {
         self.ambientCueLastAcknowledgedTurn = ambientCueLastAcknowledgedTurn
         self.ambientEvents = ambientEvents
         self.summarizedMessageCount = summarizedMessageCount
+        self.rollingSummary = rollingSummary
     }
 
     enum CodingKeys: String, CodingKey {
@@ -52,6 +58,7 @@ struct Conversation: Identifiable, Codable, Equatable {
         case ambientCueLastAcknowledgedTurn
         case ambientEvents
         case summarizedMessageCount
+        case rollingSummary
     }
 
     // Custom decoder for backward compatibility with chats saved before these fields existed.
@@ -71,6 +78,7 @@ struct Conversation: Identifiable, Codable, Equatable {
         ) ?? [:]
         ambientEvents = try c.decodeIfPresent([AmbientEvent].self, forKey: .ambientEvents) ?? []
         summarizedMessageCount = try c.decodeIfPresent(Int.self, forKey: .summarizedMessageCount) ?? 0
+        rollingSummary = try c.decodeIfPresent(String.self, forKey: .rollingSummary) ?? ""
     }
 }
 
@@ -186,8 +194,37 @@ final class ChatStore: ObservableObject {
 
     private let engine = GemmaEngine()
 
+    /// Passthrough for one-time inference warmup at launch. Hides the engine
+    /// itself while letting ContentView gate the loading screen on warmup.
+    func prewarmEngine() async { await engine.prewarm() }
+
+    // MARK: - Context inspector snapshot
+
+    /// A read-only snapshot of the last assembled LLM context, captured every
+    /// turn. Used by the tappable context ring inspector sheet in ContentView.
+    struct ContextSnapshot {
+        struct Turn: Identifiable {
+            let id = UUID()
+            let role: String
+            let content: String
+            var tokens: Int { max(1, content.count / 4) }
+        }
+        var systemPrompt: String = ""
+        var profile: String      = ""
+        var memory: String       = ""
+        var turns: [Turn]        = []
+
+        var systemTokens: Int { max(1, systemPrompt.count / 4) }
+        var profileTokens: Int  { max(1, profile.count / 4) }
+        var memoryTokens: Int   { max(1, memory.count / 4) }
+        var turnsTokens: Int    { turns.reduce(0) { $0 + $1.tokens } }
+        var totalTokens: Int    { systemTokens + profileTokens + memoryTokens + turnsTokens }
+    }
+
+    @Published var lastContextSnapshot: ContextSnapshot = ContextSnapshot()
+
     /// Core identity — kept intentionally short to conserve token budget.
-    private let systemPrompt = "You are Dominus — a friendly but curious AI Assistant. Answer the user's latest message directly. Stable cross-chat context comes only from the user profile. Retrieved memory is current-chat context only; use it plainly if it directly helps, otherwise ignore it. Do not claim to save long-term memories from chat. Do not keep bringing up memory after the user changes topics. Do not add unsolicited greetings, introductions, or preambles, even on the first turn of a new chat."
+    private let systemPrompt = "You are Dominus, a direct and human AI assistant. Answer the user's latest message — nothing more. If you don't know something or weren't told it, say so plainly; do not guess or invent details. Match your length to the question: short questions get short answers, long questions get longer ones. No greetings, no preambles, no filler openers like \"Sure\" or \"Of course.\" Profile facts describe the user across chats; retrieved memory is current-chat only — use either only when it directly helps, otherwise ignore."
     
     /// Keep only the latest few raw turns in the prompt.
     /// Older current-chat context is covered by conversation RAG summaries/exchanges.
@@ -442,6 +479,12 @@ final class ChatStore: ObservableObject {
         if !profileBlock.isEmpty {
             fullSystemPrompt += "\n\n\(profileBlock)"
         }
+        // Rolling summary — older turns compressed by the LLM and injected directly
+        // so prior context is always available without spending raw-turn token budget.
+        let rollingSummary = conversations[convoIndex].rollingSummary
+        if !rollingSummary.isEmpty {
+            fullSystemPrompt += "\n\nEarlier in this conversation:\n\(rollingSummary)"
+        }
         if !memoryContext.isEmpty {
             fullSystemPrompt += "\n\n\(memoryContext)"
         }
@@ -474,7 +517,19 @@ final class ChatStore: ObservableObject {
                 content: ambientOnlyUserPrompt(for: eligibleAmbientCues, duration: ambientDuration)
             ))
         }
+        llmMessages = filterNoiseTurns(llmMessages)
         llmMessages = trimLLMHistory(llmMessages)
+
+        // Snapshot the assembled context for the inspector sheet (tappable ring).
+        lastContextSnapshot = ContextSnapshot(
+            systemPrompt: systemPrompt,
+            profile:      profileBlock,
+            memory:       memoryContext,
+            turns:        llmMessages.dropFirst().map {
+                ContextSnapshot.Turn(role: $0.role == .user ? "You" : "Dominus",
+                                     content: $0.content)
+            }
+        )
 
         let shouldUseThinkingFiller = voiceEnabled && includeAmbientCues
         if voiceEnabled {
@@ -500,6 +555,20 @@ final class ChatStore: ObservableObject {
 
             let stream = try await engine.streamChat(llmMessages, temperature: 0.7, seed: 42)
 
+            // Length-match the response to the question. Soft cap that only kicks
+            // in at a sentence boundary, so we never chop a sentence mid-word.
+            let responseCharCap: Int? = {
+                let wordCount = visibleUserText
+                    .split(whereSeparator: { $0.isWhitespace })
+                    .count
+                switch wordCount {
+                case 0...5:   return 200
+                case 6...15:  return 500
+                case 16...40: return 1200
+                default:      return nil
+                }
+            }()
+
             var assistantText = ""
             var ttsBuffer     = ""
             var lastEnqueuedAtCount = 0
@@ -511,7 +580,7 @@ final class ChatStore: ObservableObject {
 
                 assistantText += token
 
-                let displayText = cleanLlamaArtifacts(assistantText)
+                let displayText = stripRoboticOpener(cleanLlamaArtifacts(assistantText))
                 conversations[convoIndex].messages[assistantIndex] = ChatMessage(
                     id: assistantID,
                     role: .assistant,
@@ -532,10 +601,20 @@ final class ChatStore: ObservableObject {
                         if !realSpeechHasStarted {
                             ThinkingFillerManager.shared.prepareForRealAnswer()
                             realSpeechHasStarted = true
+                            // Strip robotic openers from the very first TTS chunk so
+                            // "Sure! Here's what I found." is spoken as "Here's what I found."
+                            ttsBuffer = stripRoboticOpener(ttsBuffer)
                         }
                         SpeechManager.shared.enqueue(ttsBuffer)
                         lastEnqueuedAtCount = assistantText.count
                         ttsBuffer = ""
+                    }
+                }
+
+                if let cap = responseCharCap, assistantText.count >= cap {
+                    let trimmed = assistantText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if let last = trimmed.last, last == "." || last == "?" || last == "!" || last == "\n" {
+                        break
                     }
                 }
             }
@@ -792,6 +871,23 @@ final class ChatStore: ObservableObject {
         return result.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// Strip filler openers ("Sure!", "Certainly,", "Of course!" etc.) from the very
+    /// start of a response. Only fires when the opener is followed by more content so
+    /// a one-word acknowledgement ("Sure.") that IS the full answer is left intact.
+    private func stripRoboticOpener(_ text: String) -> String {
+        let pattern = #"^(?i)(Sure|Certainly|Of course|Absolutely|Definitely|No problem|Great)[!,.]?\s+"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return text }
+        let range = NSRange(text.startIndex..., in: text)
+        if let match = regex.firstMatch(in: text, range: range) {
+            let matchRange = Range(match.range, in: text)!
+            let remainder = String(text[matchRange.upperBound...])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            // Only strip if there's still a real response left after the opener.
+            return remainder.isEmpty ? text : remainder
+        }
+        return text
+    }
+
     /// Keep system message + recent raw turns. If the prompt estimate still rises
     /// past the 45% target, drop older raw turns down to the minimum recent window.
     private func trimLLMHistory(_ llm: [LlamaChatMessage]) -> [LlamaChatMessage] {
@@ -808,6 +904,57 @@ final class ChatStore: ObservableObject {
         }
 
         return trimmed
+    }
+
+    /// Drop low-signal user turns ("ok", "yeah", "thanks" etc.) and their paired
+    /// assistant responses from the LLM history before it's sent to the model.
+    /// Never drops the most recent 2 full turns — recency always wins.
+    /// The chat UI is unaffected; this only filters what the model sees.
+    private func filterNoiseTurns(_ llm: [LlamaChatMessage]) -> [LlamaChatMessage] {
+        guard llm.count > 1 else { return llm }
+        let system = llm[0]
+        var turns = Array(llm.dropFirst())
+
+        // Always preserve the last 4 messages (2 full user+assistant pairs).
+        let alwaysKeep = min(4, turns.count)
+        let candidateCount = turns.count - alwaysKeep
+        guard candidateCount > 0 else { return llm }
+
+        var result: [LlamaChatMessage] = []
+        var i = 0
+        while i < candidateCount {
+            let msg = turns[i]
+            if msg.role == .user, isNoiseTurn(msg.content) {
+                i += 1 // skip user noise turn
+                if i < candidateCount, turns[i].role == .assistant {
+                    i += 1 // skip the paired assistant response too
+                }
+            } else {
+                result.append(msg)
+                i += 1
+            }
+        }
+        result += turns.suffix(alwaysKeep)
+        return [system] + result
+    }
+
+    /// Returns true when the user turn is pure conversational filler with no
+    /// substantive content for the model to reason about.
+    private func isNoiseTurn(_ text: String) -> Bool {
+        let normalized = text
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: "[^a-z ]", with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespaces)
+        let noiseSet: Set<String> = [
+            "ok", "okay", "k", "yeah", "yep", "yup", "nope",
+            "thanks", "thank you", "thx", "ty",
+            "cool", "nice", "great", "got it", "got it thanks",
+            "sure", "right", "alright", "sounds good",
+            "hm", "hmm", "lol", "haha",
+            "ok thanks", "okay thanks", "yeah thanks",
+        ]
+        return noiseSet.contains(normalized)
     }
 
     private func estimatedTokens(for messages: [LlamaChatMessage]) -> Int {
@@ -829,17 +976,66 @@ final class ChatStore: ObservableObject {
         guard cutoff - alreadySummarized >= 4 else { return }
 
         let slice = Array(messages[alreadySummarized..<cutoff])
-        let summary = compactSummary(for: slice)
-        guard !summary.isEmpty else { return }
-
+        let convoID = conversations[convoIndex].id
         let sourceID = "\(alreadySummarized)-\(cutoff)"
-        MemoryRetriever.shared.rememberSummary(
-            conversationID: conversations[convoIndex].id,
-            summary: summary,
-            sourceID: sourceID
-        )
-        conversations[convoIndex].summarizedMessageCount = cutoff
-        saveToDisk()
+
+        Task { @MainActor [weak self] in
+            guard let self, !self.isGenerating else { return }
+            guard let newSummary = await self.generateRollingSummary(for: slice) else { return }
+            guard let idx = self.conversations.firstIndex(where: { $0.id == convoID }) else { return }
+
+            // Append-only: layer new summary onto existing one so older context
+            // is preserved without reprocessing the full history.
+            let existing = self.conversations[idx].rollingSummary
+            self.conversations[idx].rollingSummary = existing.isEmpty
+                ? newSummary
+                : "\(existing)\n\(newSummary)"
+            self.conversations[idx].summarizedMessageCount = cutoff
+
+            // Also store in RAG so retrieval can surface it when relevant.
+            MemoryRetriever.shared.rememberSummary(
+                conversationID: convoID,
+                summary: newSummary,
+                sourceID: sourceID
+            )
+            self.saveToDisk()
+        }
+    }
+
+    /// Ask the model to produce a concise 2-3 sentence summary of a message slice.
+    /// Runs as a side-channel generation — never blocks the main chat path.
+    private func generateRollingSummary(for messages: [ChatMessage]) async -> String? {
+        guard !messages.isEmpty else { return nil }
+
+        let transcript = messages
+            .filter { !isMemoryStatusMessage($0.content) }
+            .map { m in
+                let label = m.role == .user ? "User" : "Dominus"
+                let text = m.content
+                    .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                let capped = text.count > 300
+                    ? String(text.prefix(300)) + "..."
+                    : text
+                return "\(label): \(capped)"
+            }
+            .joined(separator: "\n")
+
+        guard !transcript.isEmpty else { return nil }
+
+        let prompt: [LlamaChatMessage] = [
+            .init(role: .system, content: "You write concise conversation summaries. Output 2-3 plain sentences only. No preamble, no bullet points, no headers. Focus on what the user said and what was decided or explained."),
+            .init(role: .user, content: "Summarize this conversation excerpt:\n\n\(transcript)")
+        ]
+
+        do {
+            let raw = try await engine.generateOnce(prompt, temperature: 0.3, maxChars: 400)
+            let cleaned = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            return cleaned.isEmpty ? nil : cleaned
+        } catch {
+            print("⚠️ Rolling summary generation failed:", error.localizedDescription)
+            return nil
+        }
     }
 
     private func scheduleConversationMaintenance(for conversationID: UUID) {
