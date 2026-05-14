@@ -48,16 +48,15 @@ final class ThinkingFillerManager {
 
     private let quickFillers = [
         "Got it...",
-        "Alright so...",
+        "Alright...",
         "Okay...",
-        "Right so...",
+        "Right...",
         "Makes sense..."
     ]
 
     private let conversationalFillers = [
-        "Honestly...",
-        "Actually...",
-        "Now that I think about it...",
+        "Let me ponder this one",
+        "Okay, just a second",
         "Here's the thing..."
     ]
 

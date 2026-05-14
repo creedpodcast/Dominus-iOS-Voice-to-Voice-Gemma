@@ -11,6 +11,7 @@ final class AudioSettingsStore: ObservableObject {
         static let voiceModeDeactivationVolume = "audio.voiceModeDeactivationVolume"
         static let aiVoiceResponseVolume = "audio.aiVoiceResponseVolume"
         static let voiceModeInactivityTimeout = "audio.voiceModeInactivityTimeout"
+        static let hapticsEnabled = "haptics.enabled"
     }
 
     private enum Defaults {
@@ -19,6 +20,7 @@ final class AudioSettingsStore: ObservableObject {
         static let voiceModeDeactivationVolume = 0.35
         static let aiVoiceResponseVolume = 1.0
         static let voiceModeInactivityTimeout = 60.0
+        static let hapticsEnabled = true
     }
 
     static let minimumVoiceModeInactivityTimeout = 30.0
@@ -50,6 +52,12 @@ final class AudioSettingsStore: ObservableObject {
         }
     }
 
+    /// Whether the app fires haptic feedback on send and when the AI starts responding.
+    /// Defaults to on. User can toggle in Audio settings.
+    @Published var hapticsEnabled: Bool {
+        didSet { defaults.set(hapticsEnabled, forKey: Keys.hapticsEnabled) }
+    }
+
     private let defaults: UserDefaults
 
     private init(defaults: UserDefaults = .standard) {
@@ -59,6 +67,9 @@ final class AudioSettingsStore: ObservableObject {
         voiceModeDeactivationVolume = Self.load(Keys.voiceModeDeactivationVolume, fallback: Defaults.voiceModeDeactivationVolume, defaults: defaults)
         aiVoiceResponseVolume = Self.load(Keys.aiVoiceResponseVolume, fallback: Defaults.aiVoiceResponseVolume, defaults: defaults)
         voiceModeInactivityTimeout = Self.loadTimeout(Keys.voiceModeInactivityTimeout, fallback: Defaults.voiceModeInactivityTimeout, defaults: defaults)
+        hapticsEnabled = defaults.object(forKey: Keys.hapticsEnabled) != nil
+            ? defaults.bool(forKey: Keys.hapticsEnabled)
+            : Defaults.hapticsEnabled
     }
 
     func resetToDefaults() {
@@ -67,6 +78,7 @@ final class AudioSettingsStore: ObservableObject {
         voiceModeDeactivationVolume = Defaults.voiceModeDeactivationVolume
         aiVoiceResponseVolume = Defaults.aiVoiceResponseVolume
         voiceModeInactivityTimeout = Defaults.voiceModeInactivityTimeout
+        hapticsEnabled = Defaults.hapticsEnabled
     }
 
     func voiceModeVolume(for resourceName: String) -> Double {
