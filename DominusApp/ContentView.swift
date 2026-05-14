@@ -220,10 +220,8 @@ struct ContentView: View {
             scheduleVoiceModeAutoExit()
         }
         .onChange(of: prompt) { newText in
-            // Speculative pre-assembly: after 300 ms of typing inactivity, pre-fetch
-            // RAG memories AND pre-build the full LLM context so _send() skips straight
-            // to generation. Both caches are keyed by conversation ID + message count
-            // so switching conversations invalidates them automatically.
+            // Speculative RAG: after 300 ms of typing inactivity, pre-fetch memories
+            // so _send() can skip retrieval and start generating immediately.
             speculativeRetrievalTask?.cancel()
             let trimmed = newText.trimmingCharacters(in: .whitespacesAndNewlines)
             guard trimmed.count >= 4, pttState == .idle, !store.isGenerating else { return }
@@ -231,7 +229,6 @@ struct ContentView: View {
                 try? await Task.sleep(nanoseconds: 300_000_000)
                 guard !Task.isCancelled else { return }
                 store.speculativeRetrieve(for: trimmed)
-                store.preassembleContext()
             }
         }
         // Rename alert

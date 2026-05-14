@@ -156,9 +156,6 @@ final class ChatStore: ObservableObject {
             // When the user navigates away from a chat, give it an LLM title
             // if it doesn't have one yet. Skip on initial assignment (oldValue == nil).
             guard let old = oldValue, old != selectedID else { return }
-            // Pre-assembled context is conversation-specific — discard on switch.
-            eagerContext = nil
-            cachedSpeculativeMemory = nil
             updateEpisodeSummary(for: old)
             scheduleTitleGeneration(for: old)
         }
@@ -192,19 +189,6 @@ final class ChatStore: ObservableObject {
     /// One-slot cache for speculative RAG retrieval kicked off while the user types.
     /// Consumed and cleared in `_send()` when the query matches exactly.
     private var cachedSpeculativeMemory: (query: String, context: String)?
-
-    /// Pre-assembled LLM context built while the user is typing.
-    /// Keyed by conversation ID + message count so it is automatically
-    /// invalidated when the conversation changes or a new message arrives.
-    /// Memory context is NOT included — that comes from cachedSpeculativeMemory.
-    private struct EagerContext {
-        let conversationID: UUID
-        let messageCount:   Int
-        let profileBlock:   String
-        let systemPromptBase: String     // prompt without memory / active ambient cues
-        let baseMessages: [LlamaChatMessage]  // history only — no system msg, no new user msg
-    }
-    private var eagerContext: EagerContext?
     private var conversationMaintenanceTask: Task<Void, Never>?
     /// Background memory refinement also uses the single LlamaService instance, so chat wins.
     private var memoryRefinementTask: Task<Void, Never>?
@@ -385,55 +369,6 @@ final class ChatStore: ObservableObject {
     }
 
     /// Non-async entry point — cancels any in-progress generation instantly, then starts fresh.
-    /// Pre-build the full LLM context (profile, system prompt, filtered history) while
-    /// the user is composing so `_send()` can skip straight to generation on a cache hit.
-    /// Cache is keyed by conversation ID + message count — switching conversations or
-    /// receiving a new message automatically invalidates it. No bleed between chats.
-    func preassembleContext() {
-        guard !isGenerating,
-              let convoIndex = indexForSelectedConversation() else { return }
-        let convo = conversations[convoIndex]
-
-        // 1. Profile block
-        let profileBlock = ProfileStore.shared.systemPromptBlock()
-
-        // 2. System prompt base — everything except memory context and active ambient cues
-        //    (those depend on the actual message text and are injected in _send())
-        var base = systemPrompt
-        if !profileBlock.isEmpty {
-            base += "\n\n\(profileBlock)"
-        }
-        if !convo.rollingSummary.isEmpty {
-            base += "\n\nEarlier in this conversation:\n\(convo.rollingSummary)"
-        }
-        let recentAmbientContext = recentAmbientEventsPromptBlock(for: convo)
-        if !recentAmbientContext.isEmpty {
-            base += "\n\n\(recentAmbientContext)"
-        }
-
-        // 3. Message history — filter noise and trim, using a placeholder system message
-        //    so filterNoiseTurns/trimLLMHistory see the expected [system, ...turns] shape.
-        var msgs: [LlamaChatMessage] = [.init(role: .system, content: base)]
-        msgs += convo.messages.compactMap { m in
-            guard !isMemoryStatusMessage(m.content) else { return nil }
-            switch m.role {
-            case .user:      return .init(role: .user,      content: m.content)
-            case .assistant: return .init(role: .assistant, content: m.content)
-            }
-        }
-        msgs = filterNoiseTurns(msgs)
-        msgs = trimLLMHistory(msgs)
-        msgs.removeFirst()  // drop placeholder system msg — _send() inserts the real one
-
-        eagerContext = EagerContext(
-            conversationID: convo.id,
-            messageCount:   convo.messages.count,
-            profileBlock:   profileBlock,
-            systemPromptBase: base,
-            baseMessages:   msgs
-        )
-    }
-
     /// Pre-fetch RAG memories while the user is composing a message so `_send()`
     /// can skip retrieval entirely on a cache hit. Called from ContentView with a
     /// 300 ms debounce on every keystroke. No-op when the model is busy.
@@ -552,67 +487,23 @@ final class ChatStore: ObservableObject {
         isGenerating = true
 
         // ── Build LLM context ──────────────────────────────────────────────
-        // Check for a pre-assembled context built while the user was typing.
-        // Valid only when conversation ID and message count both match exactly —
-        // this guarantees no bleed between conversations or stale history.
-        // After adding the user message above, messages.count is +1 from cache time.
-        let eager = eagerContext.flatMap { c -> EagerContext? in
-            c.conversationID == conversations[convoIndex].id &&
-            c.messageCount == conversations[convoIndex].messages.count - 1
-                ? c : nil
-        }
-        eagerContext = nil  // always consume / clear
+        // 1. User profile — always injected first
+        let profileBlock = ProfileStore.shared.systemPromptBlock()
 
-        let profileBlock: String
-        var systemPromptBase: String
-        var baseMessages: [LlamaChatMessage]
-
-        if let e = eager {
-            // Cache hit — skip profile scan, prompt assembly, and history filtering
-            profileBlock    = e.profileBlock
-            systemPromptBase = e.systemPromptBase
-            baseMessages    = e.baseMessages
-        } else {
-            // Cache miss — build everything fresh (same as before)
-            profileBlock = ProfileStore.shared.systemPromptBlock()
-            var base = systemPrompt
-            if !profileBlock.isEmpty {
-                base += "\n\n\(profileBlock)"
-            }
-            if !conversations[convoIndex].rollingSummary.isEmpty {
-                base += "\n\nEarlier in this conversation:\n\(conversations[convoIndex].rollingSummary)"
-            }
-            let recentAmbientCtx = recentAmbientEventsPromptBlock(for: conversations[convoIndex])
-            if !recentAmbientCtx.isEmpty {
-                base += "\n\n\(recentAmbientCtx)"
-            }
-            systemPromptBase = base
-
-            var msgs: [LlamaChatMessage] = [.init(role: .system, content: base)]
-            msgs += conversations[convoIndex].messages.compactMap { m in
-                guard !isMemoryStatusMessage(m.content) else { return nil }
-                switch m.role {
-                case .user:      return .init(role: .user,      content: m.content)
-                case .assistant: return .init(role: .assistant, content: m.content)
-                }
-            }
-            msgs = filterNoiseTurns(msgs)
-            msgs = trimLLMHistory(msgs)
-            msgs.removeFirst()  // remove placeholder system msg
-            baseMessages = msgs
-        }
-
-        // 2. Memory context — use speculative cache if query matches, else retrieve fresh
+        // 2. Retrieve older current-chat context only when the latest message asks for recall.
         let recentAssistantText = conversations[convoIndex].messages.reversed()
             .first(where: { $0.role == .assistant && !isMemoryStatusMessage($0.content) })?
             .content
         let activeConversationContext = activeConversationMemoryContext(in: conversations[convoIndex])
         let shouldRetrieveCurrentChat = hasVisibleUserText && shouldUseCurrentChatRecall(for: visibleUserText)
+        // Use speculative retrieval result if the query matches exactly; otherwise
+        // fall back to a fresh retrieve call. Cache is cleared after each send.
         let memoryContext: String
         if shouldRetrieveCurrentChat,
            let cached = cachedSpeculativeMemory,
            cached.query == visibleUserText {
             memoryContext = cached.context
+            cachedSpeculativeMemory = nil
         } else if shouldRetrieveCurrentChat {
             memoryContext = MemoryRetriever.shared.retrieve(
                 query: visibleUserText,
@@ -622,15 +513,29 @@ final class ChatStore: ObservableObject {
                 activeConversationContext: activeConversationContext,
                 topK: 5
             )
+            cachedSpeculativeMemory = nil
         } else {
             memoryContext = ""
+            cachedSpeculativeMemory = nil
         }
-        cachedSpeculativeMemory = nil
 
-        // 3. Compose full system prompt — inject memory and active ambient cues
-        var fullSystemPrompt = systemPromptBase
+        // 3. Compose full system prompt
+        var fullSystemPrompt = systemPrompt
+        if !profileBlock.isEmpty {
+            fullSystemPrompt += "\n\n\(profileBlock)"
+        }
+        // Rolling summary — older turns compressed by the LLM and injected directly
+        // so prior context is always available without spending raw-turn token budget.
+        let rollingSummary = conversations[convoIndex].rollingSummary
+        if !rollingSummary.isEmpty {
+            fullSystemPrompt += "\n\nEarlier in this conversation:\n\(rollingSummary)"
+        }
         if !memoryContext.isEmpty {
             fullSystemPrompt += "\n\n\(memoryContext)"
+        }
+        let recentAmbientContext = recentAmbientEventsPromptBlock(for: conversations[convoIndex])
+        if !recentAmbientContext.isEmpty {
+            fullSystemPrompt += "\n\n\(recentAmbientContext)"
         }
         if !eligibleAmbientCues.isEmpty {
             let activeAmbientBlock = ambientCuePromptBlock(
@@ -640,15 +545,25 @@ final class ChatStore: ObservableObject {
             fullSystemPrompt += "\n\n\(activeAmbientBlock)"
         }
 
-        // 4. Assemble final message list — pre-filtered history + system msg + new turn
-        var llmMessages: [LlamaChatMessage] = [.init(role: .system, content: fullSystemPrompt)]
-        llmMessages += baseMessages
+        // 3. Build message list: system + last N turns of raw history
+        var llmMessages: [LlamaChatMessage] = [
+            .init(role: .system, content: fullSystemPrompt)
+        ]
+        llmMessages += conversations[convoIndex].messages.compactMap { m in
+            guard !isMemoryStatusMessage(m.content) else { return nil }
+            switch m.role {
+            case .user:      return .init(role: .user,      content: m.content)
+            case .assistant: return .init(role: .assistant, content: m.content)
+            }
+        }
         if !hasVisibleUserText {
             llmMessages.append(.init(
                 role: .user,
                 content: ambientOnlyUserPrompt(for: eligibleAmbientCues, duration: ambientDuration)
             ))
         }
+        llmMessages = filterNoiseTurns(llmMessages)
+        llmMessages = trimLLMHistory(llmMessages)
 
         // Snapshot the assembled context for the inspector sheet (tappable ring).
         lastContextSnapshot = ContextSnapshot(
