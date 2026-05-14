@@ -100,6 +100,14 @@ struct AudioSettingsView: View {
                 }
 
                 Section {
+                    Toggle(isOn: $settings.hapticsEnabled) {
+                        Label("Haptic feedback", systemImage: "hand.tap")
+                    }
+                } footer: {
+                    Text("Subtle tap when you send a message and when Dominus starts responding.")
+                }
+
+                Section {
                     Button(role: .destructive) {
                         settings.resetToDefaults()
                     } label: {

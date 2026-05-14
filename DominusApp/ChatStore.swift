@@ -1,6 +1,7 @@
 import Foundation
 import Combine
 import SwiftLlama
+import UIKit
 
 struct Conversation: Identifiable, Codable, Equatable {
     let id: UUID
@@ -642,6 +643,10 @@ final class ChatStore: ObservableObject {
                     let ttft = Date().timeIntervalSince(generationStartedAt)
                     if ttft < 1.5 {
                         ThinkingFillerManager.shared.cancelScheduling()
+                    }
+                    // Light haptic pulse when the AI starts responding.
+                    if AudioSettingsStore.shared.hapticsEnabled {
+                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
                     }
                     // A: always show the first token immediately so the response
                     // feels instant rather than waiting for a full batch to accumulate.

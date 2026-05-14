@@ -711,6 +711,9 @@ struct ContentView: View {
                 beginListening()
                 return
             }
+            if AudioSettingsStore.shared.hapticsEnabled {
+                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            }
             store.send(
                 visibleVoiceText,
                 includeAmbientCues: true,
@@ -1082,6 +1085,9 @@ struct ContentView: View {
                         if store.isGenerating && trimmed.isEmpty {
                             store.stopGeneration()
                         } else if !trimmed.isEmpty {
+                            if AudioSettingsStore.shared.hapticsEnabled {
+                                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                            }
                             prompt = ""
                             store.send(trimmed)
                         }
