@@ -573,20 +573,30 @@ final class ChatStore: ObservableObject {
             var ttsBuffer     = ""
             var lastEnqueuedAtCount = 0
             var realSpeechHasStarted = false
+            // Batch SwiftUI re-renders: push a new ChatMessage every N tokens instead
+            // of every single one. TTS sentence detection still runs per-token.
+            // At ~20 tok/s this gives ~3 UI updates/s — smooth to the eye, and the
+            // main thread stays free for typing, scrolling, and button taps.
+            var uiTokenCount = 0
+            let uiTokenBatch = 6
 
             for try await token in stream {
                 // Exit immediately if a new message was sent
                 try Task.checkCancellation()
 
                 assistantText += token
+                uiTokenCount  += 1
 
-                let displayText = stripRoboticOpener(cleanLlamaArtifacts(assistantText))
-                conversations[convoIndex].messages[assistantIndex] = ChatMessage(
-                    id: assistantID,
-                    role: .assistant,
-                    content: displayText,
-                    timestamp: assistantTS
-                )
+                if uiTokenCount >= uiTokenBatch {
+                    let displayText = stripRoboticOpener(cleanLlamaArtifacts(assistantText))
+                    conversations[convoIndex].messages[assistantIndex] = ChatMessage(
+                        id: assistantID,
+                        role: .assistant,
+                        content: displayText,
+                        timestamp: assistantTS
+                    )
+                    uiTokenCount = 0
+                }
 
                 if voiceEnabled {
                     ttsBuffer += token
@@ -618,6 +628,16 @@ final class ChatStore: ObservableObject {
                     }
                 }
             }
+
+            // Final UI flush — always write the complete text so the last
+            // few tokens (which may not have hit the batch boundary) are shown.
+            let finalDisplayText = stripRoboticOpener(cleanLlamaArtifacts(assistantText))
+            conversations[convoIndex].messages[assistantIndex] = ChatMessage(
+                id: assistantID,
+                role: .assistant,
+                content: finalDisplayText,
+                timestamp: assistantTS
+            )
 
             if voiceEnabled && !ttsBuffer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 if !realSpeechHasStarted {

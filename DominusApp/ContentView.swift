@@ -1,5 +1,6 @@
 import SwiftUI
 import AVFoundation
+import UIKit
 
 // MARK: - PTT State
 
@@ -317,8 +318,28 @@ struct ContentView: View {
             group.addTask { await store.prewarmEngine() }
             group.addTask { await whisper.prewarmTranscription() }
             group.addTask { @MainActor in SpeechManager.shared.prewarmVoice() }
+            group.addTask { @MainActor in prewarmKeyboard() }
         }
         isWarmedUp = true
+    }
+
+    /// Pre-loads the iOS keyboard extension so the first tap on the text field
+    /// has no delay. Creates a hidden UITextField, makes it first responder to
+    /// trigger keyboard load, then immediately resigns and removes it.
+    private func prewarmKeyboard() {
+        guard let window = UIApplication.shared.connectedScenes
+            .compactMap({ $0 as? UIWindowScene })
+            .first?.windows.first else { return }
+
+        let dummy = UITextField()
+        dummy.alpha = 0
+        dummy.isUserInteractionEnabled = false
+        window.addSubview(dummy)
+        dummy.becomeFirstResponder()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            dummy.resignFirstResponder()
+            dummy.removeFromSuperview()
+        }
     }
 
     private func beginListening() {
