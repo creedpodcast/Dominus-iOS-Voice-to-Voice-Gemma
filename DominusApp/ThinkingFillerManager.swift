@@ -48,9 +48,9 @@ final class ThinkingFillerManager {
 
     private let quickFillers = [
         "Got it...",
-        "Alright so...",
+        "Alright...",
         "Okay...",
-        "Right so...",
+        "Right...",
         "Makes sense..."
     ]
 
