@@ -6,7 +6,7 @@ Dominus is a fully local, privacy-first AI assistant for iPhone. No internet con
 
 ## What It Does
 
-Talk to an AI that talks back. Tap once to speak, then pause — after real words are transcribed and the transcript has been stable for 2 seconds, Dominus sends the message automatically and responds with text and voice simultaneously. Tap at any point while the AI is speaking to cut it off and speak again. Fully on-device, fully private.
+Talk to an AI that talks back. Tap once to speak, then pause — after real words are transcribed and the transcript has been stable for 1.5 seconds, Dominus sends the message automatically and responds with text and voice simultaneously. Tap at any point while the AI is speaking to cut it off and speak again. Fully on-device, fully private.
 
 ---
 
@@ -14,7 +14,7 @@ Talk to an AI that talks back. Tap once to speak, then pause — after real word
 
 ### Working
 - **Push-to-talk (PTT) voice-to-voice conversation**
-  - Tap mic → speak → transcript stable for 2 seconds → AI responds with text + voice
+  - Tap mic → speak → transcript stable for 1.5 seconds → AI responds with text + voice
   - Mute button and ambient noise do not block auto-send — only transcript stability matters
   - Tap again while listening to manually send before the timer fires
   - Tap during AI response → interrupts voice and generation, waits briefly for audio to drain, then starts listening again
@@ -27,7 +27,10 @@ Talk to an AI that talks back. Tap once to speak, then pause — after real word
   - Short questions get short answers; longer questions get appropriately longer ones
   - Robotic openers ("Sure!", "Certainly!", "Of course!") are stripped automatically before text is displayed or spoken
   - Noise turns ("ok", "yeah", "uh huh") are filtered out of LLM history before inference so they don't inflate context or shift tone
-- **Pipeline pre-warming at launch** — all four cold-start costs (LLM inference graph, audio session, STT recognizer, TTS voice file) are paid behind the loading screen in parallel; the app becomes interactive only when every component is ready
+- **Instant response start** — the first token always renders immediately when it arrives; subsequent tokens batch every 6 to keep the main thread free for typing and scrolling during generation. Thinking fillers are cancelled automatically if the model responds in under 1.5 seconds so they never talk over a fast answer.
+- **Speculative RAG** — memory retrieval starts 300 ms after the user pauses typing, so by the time send is tapped the relevant memories are already loaded and generation begins without waiting for embedding lookup.
+- **Haptic feedback** — medium tap on send (text and voice), light tap when the AI's first token arrives. Toggle on/off in Audio settings.
+- **Pipeline pre-warming at launch** — all four cold-start costs (LLM inference graph, audio session, STT recognizer, TTS voice file, keyboard) are paid behind the loading screen in parallel; the app becomes interactive only when every component is ready
 - **Full-screen loading splash on launch** — blocks interaction until both Gemma and Whisper are fully ready; shows live progress bars per component
 - **Startup ready sound** — plays a bundled local sound effect once the loading screen finishes and both models are ready
 - **Audio settings** — sidebar audio controls let the user adjust and test startup, voice-mode activation, voice-mode deactivation, AI voice-response volume, and voice-mode inactivity timeout independently
@@ -119,7 +122,7 @@ If the app is foregrounded after a long background session and either model need
 [idle]  — waveform icon (gray)
   ↓ tap
 [listening]  — full-screen black voice surface + waveform icon (green)
-  ↓ transcript stable for 2 seconds (unconditional), or tap again to send manually
+  ↓ transcript stable for 1.5 seconds (unconditional), or tap again to send manually
 [transcribing] — "Transcribing your speech…" pill appears
   ↓ Whisper done
 [AI talking] — "Thinking…" pill → waveform icon (red) as TTS begins
@@ -158,7 +161,7 @@ The same single button controls every step. No hold-to-talk. Auto-send fires aft
 | Hidden ambient cues | Bracketed or parenthesized non-speech markers are stripped from visible text, stored as per-chat ambient events, and injected only as hidden context when relevant |
 | Text-to-Speech | `AVSpeechSynthesizer.speak()` + delegate (Apple Neural Engine, fully local) |
 | TTS voice | Evan Enhanced (male, en-US) — falls back to best available |
-| Input mode | Push-to-talk with auto-send after 2 seconds of transcript stability (mute/noise do not block) |
+| Input mode | Push-to-talk with auto-send after 1.5 seconds of transcript stability (mute/noise do not block) |
 | Voice UI | Full-screen black orb surface while voice mode is active; orb is gray (idle), green (user speaking), red (AI speaking) |
 | Thinking fillers | Local `ThinkingFillerManager` chooses restrained voice-only filler phrases based on greetings, short prompts, complex prompts, follow-ups, and long delays |
 | Smart idle timer | 1-second ticker that only advances during true silence; resets to zero while the user or AI is speaking |
@@ -171,6 +174,7 @@ The same single button controls every step. No hold-to-talk. Auto-send fires aft
 | Headphone safety | TTS volume is route-aware: user-controlled AI voice volume still keeps a lower app-level cap for headphones/Bluetooth, plus persistent high/low system-volume warnings during voice mode |
 | Half-duplex gating | `outstandingUtterances` counter tracks every queued sentence; mic engine stays off until counter hits zero + 350 ms hardware drain |
 | Streaming TTS | Spoken sentence-by-sentence as tokens arrive — `preUtteranceDelay`/`postUtteranceDelay` set to 0 so Apple cross-fades sentences with no gap |
+| Haptic feedback | Medium tap on send (text and voice mode); light tap when AI's first token arrives. Respects user toggle in Audio settings. |
 
 ### Context management
 | Component | Details |
@@ -180,6 +184,8 @@ The same single button controls every step. No hold-to-talk. Auto-send fires aft
 | Compaction timing | Runs only when the model is idle (not generating); append-only so older summaries are never discarded |
 | Dual storage | Compacted summaries are also written to RAG so retrieval can surface them when relevant |
 | Context inspector | Tap the context ring in the chat header to see every assembled section (system prompt, profile, rolling summary, memories, raw turns) with token counts |
+| Speculative RAG | Memory retrieval fires 300 ms after typing pauses so the result is ready before send; `_send()` uses the cache on an exact query match and skips retrieval entirely |
+| Token batching | SwiftUI message re-render fires every 6 tokens to keep the main thread free; first token always renders immediately so the response feels instant |
 
 ### Memory Journal + RAG
 | Component | Details |
