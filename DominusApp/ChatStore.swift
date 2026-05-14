@@ -21,6 +21,10 @@ struct Conversation: Identifiable, Codable, Equatable {
     var ambientEvents: [AmbientEvent]
     /// Number of oldest messages already converted into short-term RAG summaries.
     var summarizedMessageCount: Int
+    /// Rolling LLM-generated summary of messages that have aged out of the raw
+    /// context window. Injected directly into every system prompt so older context
+    /// is always available without burning raw-turn token budget.
+    var rollingSummary: String
 
     init(
         id: UUID = UUID(),
@@ -32,7 +36,8 @@ struct Conversation: Identifiable, Codable, Equatable {
         hasGeneratedTitle: Bool = false,
         ambientCueLastAcknowledgedTurn: [String: Int] = [:],
         ambientEvents: [AmbientEvent] = [],
-        summarizedMessageCount: Int = 0
+        summarizedMessageCount: Int = 0,
+        rollingSummary: String = ""
     ) {
         self.id = id
         self.title = title
@@ -44,6 +49,7 @@ struct Conversation: Identifiable, Codable, Equatable {
         self.ambientCueLastAcknowledgedTurn = ambientCueLastAcknowledgedTurn
         self.ambientEvents = ambientEvents
         self.summarizedMessageCount = summarizedMessageCount
+        self.rollingSummary = rollingSummary
     }
 
     enum CodingKeys: String, CodingKey {
@@ -52,6 +58,7 @@ struct Conversation: Identifiable, Codable, Equatable {
         case ambientCueLastAcknowledgedTurn
         case ambientEvents
         case summarizedMessageCount
+        case rollingSummary
     }
 
     // Custom decoder for backward compatibility with chats saved before these fields existed.
@@ -71,6 +78,7 @@ struct Conversation: Identifiable, Codable, Equatable {
         ) ?? [:]
         ambientEvents = try c.decodeIfPresent([AmbientEvent].self, forKey: .ambientEvents) ?? []
         summarizedMessageCount = try c.decodeIfPresent(Int.self, forKey: .summarizedMessageCount) ?? 0
+        rollingSummary = try c.decodeIfPresent(String.self, forKey: .rollingSummary) ?? ""
     }
 }
 
@@ -470,6 +478,12 @@ final class ChatStore: ObservableObject {
         var fullSystemPrompt = systemPrompt
         if !profileBlock.isEmpty {
             fullSystemPrompt += "\n\n\(profileBlock)"
+        }
+        // Rolling summary — older turns compressed by the LLM and injected directly
+        // so prior context is always available without spending raw-turn token budget.
+        let rollingSummary = conversations[convoIndex].rollingSummary
+        if !rollingSummary.isEmpty {
+            fullSystemPrompt += "\n\nEarlier in this conversation:\n\(rollingSummary)"
         }
         if !memoryContext.isEmpty {
             fullSystemPrompt += "\n\n\(memoryContext)"
@@ -962,17 +976,66 @@ final class ChatStore: ObservableObject {
         guard cutoff - alreadySummarized >= 4 else { return }
 
         let slice = Array(messages[alreadySummarized..<cutoff])
-        let summary = compactSummary(for: slice)
-        guard !summary.isEmpty else { return }
-
+        let convoID = conversations[convoIndex].id
         let sourceID = "\(alreadySummarized)-\(cutoff)"
-        MemoryRetriever.shared.rememberSummary(
-            conversationID: conversations[convoIndex].id,
-            summary: summary,
-            sourceID: sourceID
-        )
-        conversations[convoIndex].summarizedMessageCount = cutoff
-        saveToDisk()
+
+        Task { @MainActor [weak self] in
+            guard let self, !self.isGenerating else { return }
+            guard let newSummary = await self.generateRollingSummary(for: slice) else { return }
+            guard let idx = self.conversations.firstIndex(where: { $0.id == convoID }) else { return }
+
+            // Append-only: layer new summary onto existing one so older context
+            // is preserved without reprocessing the full history.
+            let existing = self.conversations[idx].rollingSummary
+            self.conversations[idx].rollingSummary = existing.isEmpty
+                ? newSummary
+                : "\(existing)\n\(newSummary)"
+            self.conversations[idx].summarizedMessageCount = cutoff
+
+            // Also store in RAG so retrieval can surface it when relevant.
+            MemoryRetriever.shared.rememberSummary(
+                conversationID: convoID,
+                summary: newSummary,
+                sourceID: sourceID
+            )
+            self.saveToDisk()
+        }
+    }
+
+    /// Ask the model to produce a concise 2-3 sentence summary of a message slice.
+    /// Runs as a side-channel generation — never blocks the main chat path.
+    private func generateRollingSummary(for messages: [ChatMessage]) async -> String? {
+        guard !messages.isEmpty else { return nil }
+
+        let transcript = messages
+            .filter { !isMemoryStatusMessage($0.content) }
+            .map { m in
+                let label = m.role == .user ? "User" : "Dominus"
+                let text = m.content
+                    .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                let capped = text.count > 300
+                    ? String(text.prefix(300)) + "..."
+                    : text
+                return "\(label): \(capped)"
+            }
+            .joined(separator: "\n")
+
+        guard !transcript.isEmpty else { return nil }
+
+        let prompt: [LlamaChatMessage] = [
+            .init(role: .system, content: "You write concise conversation summaries. Output 2-3 plain sentences only. No preamble, no bullet points, no headers. Focus on what the user said and what was decided or explained."),
+            .init(role: .user, content: "Summarize this conversation excerpt:\n\n\(transcript)")
+        ]
+
+        do {
+            let raw = try await engine.generateOnce(prompt, temperature: 0.3, maxChars: 400)
+            let cleaned = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            return cleaned.isEmpty ? nil : cleaned
+        } catch {
+            print("⚠️ Rolling summary generation failed:", error.localizedDescription)
+            return nil
+        }
     }
 
     private func scheduleConversationMaintenance(for conversationID: UUID) {
