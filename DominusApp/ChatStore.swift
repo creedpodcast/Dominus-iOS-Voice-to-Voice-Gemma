@@ -441,18 +441,14 @@ final class ChatStore: ObservableObject {
         let trimmed = ambientResult.visibleText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty || !ambientResult.cues.isEmpty else { return }
 
-        let hasVisibleUserText = !trimmed.isEmpty
-        let visibleUserText = trimmed
+        var hasVisibleUserText = !trimmed.isEmpty
+        var visibleUserText = trimmed
         let currentUserTurn = conversations[convoIndex].messages.filter { $0.role == .user }.count
         let nextUserTurn = currentUserTurn + 1
         let eligibleAmbientCues = ambientResult.cues.filter {
             shouldAcknowledgeAmbientCue($0, in: conversations[convoIndex], userTurn: nextUserTurn)
         }
-        let shouldRespondToAmbientOnly = !hasVisibleUserText && shouldAutoRespondToAmbientOnly(
-            cues: eligibleAmbientCues,
-            duration: ambientDuration
-        )
-
+        // Always store ambient events regardless of response decision.
         recordAmbientEvents(
             ambientResult.cues,
             in: convoIndex,
@@ -460,20 +456,25 @@ final class ChatStore: ObservableObject {
             duration: ambientDuration
         )
 
-        guard hasVisibleUserText || shouldRespondToAmbientOnly else {
-            conversations[convoIndex].updatedAt = Date()
-            saveToDisk()
-            silentAmbientEventCount += 1
-            return
+        // Ambient-only turn (no spoken words) — promote the cue labels to the
+        // visible user message so both the cue and the AI's reply appear in the
+        // chat feed. The AI sees and responds to the sound naturally.
+        if !hasVisibleUserText {
+            guard !eligibleAmbientCues.isEmpty else {
+                // No eligible cues to respond to — just silently acknowledge and resume
+                conversations[convoIndex].updatedAt = Date()
+                saveToDisk()
+                silentAmbientEventCount += 1
+                return
+            }
+            let cueDisplay = eligibleAmbientCues.map { "[\($0.label)]" }.joined(separator: " ")
+            visibleUserText = cueDisplay
+            hasVisibleUserText = true
         }
 
-        if hasVisibleUserText {
-            conversations[convoIndex].messages.append(ChatMessage(role: .user, content: visibleUserText))
-        }
+        conversations[convoIndex].messages.append(ChatMessage(role: .user, content: visibleUserText))
         conversations[convoIndex].updatedAt = Date()
-        if hasVisibleUserText {
-            autoTitleIfNeeded(convoIndex: convoIndex, userText: visibleUserText)
-        }
+        autoTitleIfNeeded(convoIndex: convoIndex, userText: visibleUserText)
         saveToDisk()
 
         if hasVisibleUserText,
@@ -556,12 +557,6 @@ final class ChatStore: ObservableObject {
             case .assistant: return .init(role: .assistant, content: m.content)
             }
         }
-        if !hasVisibleUserText {
-            llmMessages.append(.init(
-                role: .user,
-                content: ambientOnlyUserPrompt(for: eligibleAmbientCues, duration: ambientDuration)
-            ))
-        }
         llmMessages = filterNoiseTurns(llmMessages)
         llmMessages = trimLLMHistory(llmMessages)
 
@@ -582,9 +577,7 @@ final class ChatStore: ObservableObject {
         }
         if shouldUseThinkingFiller {
             ThinkingFillerManager.shared.start(
-                for: hasVisibleUserText
-                    ? visibleUserText
-                    : ambientOnlyUserPrompt(for: eligibleAmbientCues, duration: ambientDuration),
+                for: visibleUserText,
                 recentAssistantText: recentAssistantText,
                 personality: .curious
             )
@@ -782,8 +775,20 @@ final class ChatStore: ObservableObject {
         let label: String
     }
 
-    private let ambientCueCooldownTurns = 12
     private let maxStoredAmbientEvents = 24
+
+    /// Per-sound-type cooldown in turns before Dominus can acknowledge the same
+    /// cue again. Sneezes get a short gap (always feel worth a "bless you"),
+    /// typing is essentially silenced, others sit in the middle.
+    private func ambientCueCooldownTurns(for cue: AmbientCue) -> Int {
+        let k = cue.key
+        if k.contains("sneez")                          { return 3  }
+        if k.contains("cough")                          { return 6  }
+        if k.contains("laugh")                          { return 5  }
+        if k.contains("typing") || k.contains("keyboard") { return 999 } // never proactively
+        if k.contains("silence")                        { return 999 } // handled separately
+        return 10
+    }
 
     /// Whisper can return non-speech markers such as "[Laughter]", "(coughing)",
     /// or "(keyboard typing)". Keep them out of the visible transcript, but let
@@ -851,34 +856,12 @@ final class ChatStore: ObservableObject {
         guard let lastTurn = conversation.ambientCueLastAcknowledgedTurn[cue.key] else {
             return true
         }
-        return userTurn - lastTurn >= ambientCueCooldownTurns
+        return userTurn - lastTurn >= ambientCueCooldownTurns(for: cue)
     }
 
-    private func shouldAutoRespondToAmbientOnly(cues: [AmbientCue], duration: TimeInterval?) -> Bool {
-        guard !cues.isEmpty else { return false }
-
-        if cues.contains(where: { $0.key.contains("silence") }) {
-            return (duration ?? 0) >= 60
-        }
-
-        let highestChance = cues.map { ambientOnlyResponseChance(for: $0) }.max() ?? 0
-        guard highestChance > 0 else { return false }
-        return Double.random(in: 0...1) < highestChance
-    }
-
-    private func ambientOnlyResponseChance(for cue: AmbientCue) -> Double {
-        if cue.key.contains("laughter") || cue.key.contains("laughing") {
-            return 0.45
-        }
-        if cue.key.contains("cough") || cue.key.contains("sneez") {
-            return 0.25
-        }
-        if cue.key.contains("typing") || cue.key.contains("keyboard") {
-            return 0.08
-        }
-        return 0.12
-    }
-
+    /// Returns a pre-written local phrase Dominus should speak for an ambient-only turn,
+    /// or nil if it should stay silent. No LLM involved — purely Swift-side orchestration.
+    /// Phrases are sound-specific, frequency-aware, and randomised so they never feel canned.
     private func recordAmbientEvents(
         _ cues: [AmbientCue],
         in convoIndex: Int,
@@ -908,15 +891,29 @@ final class ChatStore: ObservableObject {
         let recent = conversation.ambientEvents.suffix(8)
         guard !recent.isEmpty else { return "" }
 
-        let lines = recent.map { event in
-            let durationText = event.duration.map { String(format: ", recording %.0fs", $0) } ?? ""
-            return "- \(event.label) near user turn \(event.userTurn)\(durationText)"
+        // Group repeated sounds and show a count so Gemma understands patterns
+        // (e.g., "Coughing (3 times)" vs just "Coughing").
+        var grouped: [(label: String, turns: [Int])] = []
+        for event in recent {
+            if let idx = grouped.firstIndex(where: { $0.label == event.label }) {
+                grouped[idx].turns.append(event.userTurn)
+            } else {
+                grouped.append((label: event.label, turns: [event.userTurn]))
+            }
+        }
+
+        let lines = grouped.map { entry in
+            let countText = entry.turns.count > 1 ? " (\(entry.turns.count) times)" : ""
+            let turnText = entry.turns.count > 1
+                ? "turns \(entry.turns.map(String.init).joined(separator: ", "))"
+                : "turn \(entry.turns[0])"
+            return "- \(entry.label)\(countText) near user \(turnText)"
         }.joined(separator: "\n")
 
         return """
-        Hidden recent ambient events:
+        Hidden recent ambient events (not visible to the user in chat):
         \(lines)
-        These are not visible chat messages. Use them only if the user asks what you heard, what sound they made, what they were just doing, or if a separate active ambient instruction says to mention one. Otherwise do not bring them up.
+        Use these only if the user asks what you heard, what sound they made, or what they were doing. If they have been coughing or sneezing repeatedly, you may briefly check in once. Do not volunteer this information unprompted in normal conversation.
         """
     }
 
@@ -933,14 +930,6 @@ final class ChatStore: ObservableObject {
         Hidden ambient context: the voice transcript contained these non-speech background cues, removed from the visible user message: \(labels).
         Briefly acknowledge this ambient context once in your reply if it feels natural. Do not quote the bracket syntax. Do not mention the same cue again until it reappears much later in the chat.
         """
-    }
-
-    private func ambientOnlyUserPrompt(for cues: [AmbientCue], duration: TimeInterval?) -> String {
-        let labels = cues.map(\.label).joined(separator: ", ")
-        if cues.contains(where: { $0.key.contains("silence") }), (duration ?? 0) >= 60 {
-            return "The user has been silent for about one minute while voice mode appears to still be active. Check in briefly."
-        }
-        return "The user did not speak words. Hidden ambient sound detected: \(labels). Respond only if it feels natural."
     }
 
     private func cleanLlamaArtifacts(_ text: String) -> String {

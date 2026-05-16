@@ -421,6 +421,20 @@ struct ContentView: View {
         }
     }
 
+    /// Returns true if `transcript` contains any bracket/paren cue that is NOT
+    /// silence or pause. These are real sounds (cough, sneeze, typing, etc.)
+    /// that should trigger auto-send just like spoken words.
+    private func containsActionableAmbientCue(_ transcript: String) -> Bool {
+        let pattern = "(?:\\[[^\\]\\n]{1,48}\\]|\\([^)\\n]{1,48}\\))"
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return false }
+        let range = NSRange(transcript.startIndex..., in: transcript)
+        return regex.matches(in: transcript, range: range).contains { match in
+            guard let r = Range(match.range, in: transcript) else { return false }
+            let cue = transcript[r].lowercased()
+            return !cue.contains("silence") && !cue.contains("pause")
+        }
+    }
+
     private func handleLiveVoiceTranscript(_ transcript: String) {
         guard pttState == .listening, !whisper.isMicMuted else {
             resetVoiceAutoSendState()
@@ -428,12 +442,16 @@ struct ContentView: View {
         }
 
         let visibleTranscript = WhisperManager.visibleTranscript(from: transcript)
-        guard !visibleTranscript.isEmpty else {
+        let hasAmbientSound = containsActionableAmbientCue(transcript)
+
+        // Allow ambient-only transcripts (no visible words but real sounds detected)
+        // to schedule auto-send, just like spoken words do.
+        guard !visibleTranscript.isEmpty || hasAmbientSound else {
             resetVoiceAutoSendState()
             return
         }
 
-        if visibleTranscript != latestVisibleVoiceTranscript {
+        if !visibleTranscript.isEmpty, visibleTranscript != latestVisibleVoiceTranscript {
             latestVisibleVoiceTranscript = visibleTranscript
             latestVisibleVoiceTranscriptUpdatedAt = Date()
         }
@@ -447,30 +465,32 @@ struct ContentView: View {
     private func handleListeningAudioActivity(_ activityAt: Date?) {
         guard pttState == .listening, !whisper.isMicMuted else { return }
         guard let activityAt else { return }
-
         lastVoiceActivityAt = activityAt
-        guard !latestVisibleVoiceTranscript.isEmpty else { return }
+        // Schedule on any audio activity — ambient sounds (cough, sneeze, etc.) don't
+        // produce visible transcript text until stopAndTranscribe(), so we can't gate
+        // on latestVisibleVoiceTranscript here. submitVoiceRecording() handles the
+        // "nothing to send" case by calling beginListening() and returning.
         scheduleVoiceAutoSend()
     }
 
     private func scheduleVoiceAutoSend() {
         let transcriptSnapshot = latestVisibleVoiceTranscript
+        let rawSnapshot = whisper.liveTranscript
         voiceAutoSendTask?.cancel()
         voiceAutoSendTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: UInt64(voiceAutoSendDelay * 1_000_000_000))
-            guard !Task.isCancelled,
-                  pttState == .listening,
-                  !transcriptSnapshot.isEmpty
-            else { return }
+            guard !Task.isCancelled, pttState == .listening else { return }
 
             // If the transcript is still growing, the user is still speaking — wait again.
-            // Otherwise send unconditionally: mute state, ambient noise, and audio
-            // activity are irrelevant once the transcript has been stable for 2 seconds.
-            if latestVisibleVoiceTranscript != transcriptSnapshot {
+            if latestVisibleVoiceTranscript != transcriptSnapshot ||
+               whisper.liveTranscript != rawSnapshot {
                 scheduleVoiceAutoSend()
                 return
             }
 
+            // submitVoiceRecording() handles the empty case — if stopAndTranscribe()
+            // returns nothing (no words, no ambient cues), it calls beginListening()
+            // and we return to listening immediately without sending anything.
             submitVoiceRecording()
         }
     }
@@ -707,7 +727,14 @@ struct ContentView: View {
         Task {
             let spoken = await whisper.stopAndTranscribe()
             let visibleVoiceText = cleanVoiceSubmission(spoken)
-            guard !visibleVoiceText.isEmpty else {
+
+            // Detect whether Whisper embedded actionable non-speech markers
+            // (cough, sneeze, laughter, typing, etc.). Silence and pause markers
+            // are excluded — they never get sent or acknowledged.
+            let hasAmbientCues = containsActionableAmbientCue(spoken)
+            let textForSend = hasAmbientCues ? spoken : visibleVoiceText
+
+            guard !visibleVoiceText.isEmpty || hasAmbientCues else {
                 beginListening()
                 return
             }
@@ -715,7 +742,7 @@ struct ContentView: View {
                 UIImpactFeedbackGenerator(style: .medium).impactOccurred()
             }
             store.send(
-                visibleVoiceText,
+                textForSend,
                 includeAmbientCues: true,
                 ambientDuration: whisper.lastRecordingDuration
             )
@@ -987,15 +1014,29 @@ struct ContentView: View {
             ZStack {
                 ScrollView {
                     VStack(spacing: 12) {
-                        let msgs = store.selectedConversation()?.messages ?? []
+                        // In voice mode: show messages as-is (brackets visible so the
+                        // user can see what the AI is reacting to in real time).
+                        // In text mode: strip bracket markers from user messages so
+                        // "[Coughing]" disappears and "Hello! [Coughing]" becomes "Hello!".
+                        // Pure ambient-only messages (entirely brackets) are hidden in text mode.
+                        let isInVoiceMode = pttState != .idle
+                        let allMsgs = store.selectedConversation()?.messages ?? []
+                        let msgs = allMsgs.filter { msg in
+                            guard msg.role == .user, !isInVoiceMode else { return true }
+                            return !WhisperManager.visibleTranscript(from: msg.content).isEmpty
+                        }
                         ForEach(msgs) { msg in
                             let isStreamingAssistant = store.isGenerating
                                 && msg.role == .assistant
-                                && msg.id == msgs.last?.id
+                                && msg.id == allMsgs.last?.id
+                            let displayText: String = {
+                                guard msg.role == .user, !isInVoiceMode else { return msg.content }
+                                return WhisperManager.visibleTranscript(from: msg.content)
+                            }()
                             ChatBubble(
                                 messageID: msg.id,
                                 role: msg.role,
-                                text: msg.content,
+                                text: displayText,
                                 isStreaming: isStreamingAssistant
                             )
                                 .id(msg.id)
