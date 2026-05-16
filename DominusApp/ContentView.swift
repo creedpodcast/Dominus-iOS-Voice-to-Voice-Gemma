@@ -90,6 +90,9 @@ struct ContentView: View {
     /// True once the idle-exit monitor has been started this session.
     /// Prevents beginListening() re-entries from spawning duplicate monitors.
     @State private var voiceModeExitScheduled = false
+    /// Conversations the user has entered voice mode for at least once this
+    /// app launch. Used to pick a "welcome back" greeting vs. a first-time one.
+    @State private var chatsWithPriorVoiceSession: Set<UUID> = []
     /// Accumulated seconds of true silence (neither user nor AI talking).
     /// Resets to 0 whenever activity resumes.
     @State private var voiceIdleSeconds: TimeInterval = 0
@@ -295,11 +298,24 @@ struct ContentView: View {
             voiceWasEnabled    = store.voiceEnabled
             store.voiceEnabled = true
             SpeechManager.shared.stopAndClear()
+            SpeechManager.shared.prepareForVoiceMode()
             startVolumeMonitoring()
-            beginListening()
             isVoiceModeTransitioning = false
+
+            // Pick a greeting based on whether this chat has had a prior voice
+            // session this app launch. Speak it before listening starts; the
+            // existing `onAllSpeechFinished` callback will transition us into
+            // listening once the greeting finishes.
+            let chatID = store.selectedID
+            let returning = chatID.map { chatsWithPriorVoiceSession.contains($0) } ?? false
+            let greeting = VoiceModeGreetings.pick(hasBeenInVoiceModeForThisChat: returning)
+            if let id = chatID { chatsWithPriorVoiceSession.insert(id) }
+
+            pttState = .aiTalking
             Task { @MainActor in
                 await playVoiceModeSound(named: "ActivateVoicetoVoice")
+                guard pttState == .aiTalking, store.voiceEnabled else { return }
+                SpeechManager.shared.enqueue(greeting)
             }
 
         case .listening:

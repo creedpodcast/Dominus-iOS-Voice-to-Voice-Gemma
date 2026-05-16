@@ -1,26 +1,60 @@
 import AVFoundation
+import AudioToolbox
+import Accelerate
 import Combine
 
-/// Industry-standard TTS pipeline using `AVSpeechSynthesizer.speak()` + delegate.
-/// Apple handles sentence sequencing internally — no gaps, no duplicates, rock-solid timing.
+/// High-gain TTS pipeline. Instead of playing through `AVSpeechSynthesizer.speak()`
+/// (which is hard-capped at Apple's default output level), this routes the
+/// synthesizer's raw PCM buffers through an `AVAudioEngine` chain:
 ///
-/// "All speech finished" is determined by tracking outstanding utterances:
-///  - increment when `speak()` is called
-///  - decrement in `didFinish` delegate callback
-///  - fire `onAllSpeechFinished` only when the count returns to zero
+///     synth.write → vDSP gain (~+8 dB) → player → peak limiter → output
 ///
-/// Volume is controlled by the audio session mode, the device volume rocker, and
-/// a route-aware app cap so headphones/Bluetooth do not play at full blast.
+/// vDSP multiplies the raw PCM samples by `speechGain` (AVAudioMixerNode's
+/// outputVolume is clamped to 1.0, so the boost has to happen on the samples
+/// themselves). The peak limiter catches any sample that would otherwise clip.
+/// Net effect: TTS is noticeably louder than what AVSpeechSynthesizer can
+/// produce on its own — same technique apps like Voice Dream Reader use.
+///
+/// "All speech finished" is determined by tracking buffer completion across
+/// every utterance currently queued. When the last buffer of the last utterance
+/// completes, `onAllSpeechFinished` fires.
 @MainActor
-final class SpeechManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
+final class SpeechManager: NSObject, ObservableObject {
 
     static let shared = SpeechManager()
 
     private let synth = AVSpeechSynthesizer()
     private var preferredVoice: AVSpeechSynthesisVoice?
 
-    /// Number of utterances queued with `speak()` that haven't finished yet.
+    // MARK: - High-gain audio pipeline
+
+    private let audioEngine = AVAudioEngine()
+    private let playerNode  = AVAudioPlayerNode()
+    private var limiter: AVAudioUnitEffect?
+    /// Format used when wiring the engine. Determined from the very first
+    /// synthesizer buffer and then reused for every subsequent connection.
+    private var engineFormat: AVAudioFormat?
+    private var engineConfigured = false
+
+    /// Linear gain applied to TTS samples before the peak limiter. 2.5 ≈ +8 dB
+    /// above what AVSpeechSynthesizer outputs on its own. The limiter prevents
+    /// the extra gain from clipping on loud syllables.
+    private let speechGain: Float = 2.5
+
+    // MARK: - Bookkeeping
+
+    /// Number of utterances queued whose audio has not yet fully played.
     private var outstandingUtterances: Int = 0
+    /// Per-utterance buffer accounting. Keyed by utterance instance because the
+    /// synth `write` callback fires once per buffer; we know an utterance is
+    /// fully scheduled when it sends its zero-length terminating buffer.
+    private var bufferQueue: [ObjectIdentifier: BufferQueueState] = [:]
+
+    private struct BufferQueueState {
+        var scheduled: Int = 0
+        var completed: Int = 0
+        var allBuffersScheduled: Bool = false
+    }
 
     /// True while any utterance is queued or actively playing
     @Published var isSpeaking: Bool = false
@@ -38,7 +72,6 @@ final class SpeechManager: NSObject, ObservableObject, AVSpeechSynthesizerDelega
 
     override init() {
         super.init()
-        synth.delegate = self
         preferredVoice = pickMaleEnglishVoice()
     }
 
@@ -52,9 +85,9 @@ final class SpeechManager: NSObject, ObservableObject, AVSpeechSynthesizerDelega
     }
 
     /// Pre-load the AVSpeechSynthesizer voice file at app launch so the very first
-    /// real `speak()` call doesn't pay the cold voice-load delay. Plays an inaudible
-    /// utterance at volume 0 through a side-channel synthesizer so our main delegate
-    /// bookkeeping and `onAllSpeechFinished` callback are untouched.
+    /// real call doesn't pay the cold voice-load delay. Renders a single inaudible
+    /// space-character utterance through the engine to warm both the synthesizer
+    /// and the gain-pipeline AU graph.
     func prewarmVoice() {
         if preferredVoice == nil {
             preferredVoice = pickMaleEnglishVoice()
@@ -68,9 +101,7 @@ final class SpeechManager: NSObject, ObservableObject, AVSpeechSynthesizerDelega
         utt.voice  = preferredVoice ?? AVSpeechSynthesisVoice(language: "en-US")
         utt.preUtteranceDelay  = 0
         utt.postUtteranceDelay = 0
-        warmupSynth.speak(utt)
-        // Hold a strong reference until the utterance drains. Two seconds is well
-        // beyond the time a single space takes to synthesize even on a cold pipeline.
+        warmupSynth.write(utt) { _ in /* discard buffers */ }
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             _ = warmupSynth   // keep alive until here
@@ -92,7 +123,7 @@ final class SpeechManager: NSObject, ObservableObject, AVSpeechSynthesizerDelega
 
         outstandingUtterances += 1
         isSpeaking = true
-        synth.speak(utt)
+        scheduleUtteranceThroughEngine(utt)
     }
 
     /// Speak `text` and tag the playback with `id` so per-message UI can show a
@@ -108,19 +139,192 @@ final class SpeechManager: NSObject, ObservableObject, AVSpeechSynthesizerDelega
     func stopAndClear() {
         ThinkingFillerManager.shared.cancelScheduling()
         outstandingUtterances = 0
+        bufferQueue.removeAll()
         isSpeaking            = false
         isStartingPlayback    = false
         nowPlayingMessageID   = nil
         synth.stopSpeaking(at: .immediate)
+        if playerNode.isPlaying {
+            playerNode.stop()
+        }
+    }
+
+    // MARK: - Engine pipeline
+
+    private func scheduleUtteranceThroughEngine(_ utt: AVSpeechUtterance) {
+        let utteranceKey = ObjectIdentifier(utt)
+        bufferQueue[utteranceKey] = BufferQueueState()
+
+        // `synth.write` calls the callback once per output buffer. A buffer with
+        // `frameLength == 0` signals end-of-utterance. The synthesiser invokes
+        // the callback on a background thread, so we hop to the main actor for
+        // state mutation and engine scheduling.
+        synth.write(utt) { [weak self] buffer in
+            guard let self else { return }
+            guard let pcm = buffer as? AVAudioPCMBuffer else { return }
+            Task { @MainActor in
+                self.handleSynthesizedBuffer(pcm, for: utteranceKey)
+            }
+        }
+    }
+
+    private func handleSynthesizedBuffer(_ buffer: AVAudioPCMBuffer,
+                                         for utteranceKey: ObjectIdentifier) {
+        // Zero-length buffer is the synthesizer's end-of-utterance marker.
+        if buffer.frameLength == 0 {
+            if var state = bufferQueue[utteranceKey] {
+                state.allBuffersScheduled = true
+                bufferQueue[utteranceKey] = state
+                checkUtteranceCompletion(utteranceKey)
+            }
+            return
+        }
+
+        configureEngineIfNeeded(with: buffer.format)
+        guard engineConfigured, audioEngine.isRunning else { return }
+
+        // Apply the gain boost ONLY when output is the built-in speaker.
+        // Headphones, AirPods, and Bluetooth keep their existing safety cap
+        // (handled by `safeSpeechVolume()` on `utt.volume`) and receive no
+        // extra boost — they are listened to up close and must not be louder
+        // than Apple's default.
+        let gain = currentSpeechGain()
+        if gain != 1.0 {
+            applyGain(gain, to: buffer)
+        }
+
+        if var state = bufferQueue[utteranceKey] {
+            state.scheduled += 1
+            bufferQueue[utteranceKey] = state
+        }
+
+        if isStartingPlayback {
+            isStartingPlayback = false
+        }
+
+        playerNode.scheduleBuffer(buffer) { [weak self] in
+            guard let self else { return }
+            Task { @MainActor in
+                self.handleBufferCompletion(for: utteranceKey)
+            }
+        }
+        if !playerNode.isPlaying {
+            playerNode.play()
+        }
+    }
+
+    /// Per-route speech gain. Returns the full `speechGain` boost only when
+    /// the user is listening on the device's built-in speaker. For headphones,
+    /// AirPods, and Bluetooth output (any "private listening" route), returns
+    /// 1.0 — no boost, so the headphone safety cap on `utt.volume` is the
+    /// only thing controlling level. Output is then identical to stock Apple
+    /// TTS, which is what the user expects when wearing headphones.
+    private func currentSpeechGain() -> Float {
+        let route = AVAudioSession.sharedInstance().currentRoute
+        let isPrivateListening = route.outputs.contains { output in
+            switch output.portType {
+            case .headphones,
+                 .bluetoothA2DP,
+                 .bluetoothHFP,
+                 .bluetoothLE,
+                 .carAudio,
+                 .airPlay:
+                return true
+            default:
+                return false
+            }
+        }
+        return isPrivateListening ? 1.0 : speechGain
+    }
+
+    /// Multiply every sample in every channel of `buffer` by `gain` using vDSP.
+    /// In-place; safe because `synth.write` hands us a buffer we own.
+    private func applyGain(_ gain: Float, to buffer: AVAudioPCMBuffer) {
+        let frameCount = vDSP_Length(buffer.frameLength)
+        guard frameCount > 0 else { return }
+        let channelCount = Int(buffer.format.channelCount)
+        guard let channelData = buffer.floatChannelData else { return }
+        var scale = gain
+        for channel in 0 ..< channelCount {
+            vDSP_vsmul(channelData[channel], 1, &scale, channelData[channel], 1, frameCount)
+        }
+    }
+
+    private func handleBufferCompletion(for utteranceKey: ObjectIdentifier) {
+        if var state = bufferQueue[utteranceKey] {
+            state.completed += 1
+            bufferQueue[utteranceKey] = state
+        }
+        checkUtteranceCompletion(utteranceKey)
+    }
+
+    private func checkUtteranceCompletion(_ utteranceKey: ObjectIdentifier) {
+        guard let state = bufferQueue[utteranceKey] else { return }
+        guard state.allBuffersScheduled, state.completed >= state.scheduled else { return }
+        bufferQueue.removeValue(forKey: utteranceKey)
+        handleUtteranceCompleted()
+    }
+
+    private func configureEngineIfNeeded(with format: AVAudioFormat) {
+        if engineConfigured {
+            if audioEngine.isRunning { return }
+            do { try audioEngine.start() } catch {
+                print("❌ TTS engine restart failed:", error.localizedDescription)
+            }
+            return
+        }
+
+        engineFormat = format
+
+        let limiterDesc = AudioComponentDescription(
+            componentType:         kAudioUnitType_Effect,
+            componentSubType:      kAudioUnitSubType_PeakLimiter,
+            componentManufacturer: kAudioUnitManufacturer_Apple,
+            componentFlags:        0,
+            componentFlagsMask:    0
+        )
+        let limiterUnit = AVAudioUnitEffect(audioComponentDescription: limiterDesc)
+        self.limiter = limiterUnit
+
+        audioEngine.attach(playerNode)
+        audioEngine.attach(limiterUnit)
+
+        // player (pre-gained samples) → limiter (catches peaks) → main mixer → output
+        audioEngine.connect(playerNode,  to: limiterUnit,                format: format)
+        audioEngine.connect(limiterUnit, to: audioEngine.mainMixerNode,  format: format)
+
+        // Tune the peak limiter: very fast attack so the boost never clips
+        // audibly, moderate release so the envelope doesn't pump on syllables.
+        let au = limiterUnit.audioUnit
+        AudioUnitSetParameter(au, kLimiterParam_AttackTime, kAudioUnitScope_Global, 0, 0.001, 0)
+        AudioUnitSetParameter(au, kLimiterParam_DecayTime,  kAudioUnitScope_Global, 0, 0.050, 0)
+        AudioUnitSetParameter(au, kLimiterParam_PreGain,    kAudioUnitScope_Global, 0, 0,     0)
+
+        audioEngine.prepare()
+        do {
+            try audioEngine.start()
+            engineConfigured = true
+        } catch {
+            print("❌ TTS engine start failed:", error.localizedDescription)
+        }
     }
 
     private func prepareAudioSessionForSpeech() {
         let session = AVAudioSession.sharedInstance()
         do {
+            // Use `.playback` (not `.playAndRecord`) while the AI is speaking.
+            // `.playAndRecord` is a conversational category and iOS attenuates
+            // its output ~6-10 dB below `.playback` even with `.spokenAudio`
+            // mode. `.playback` uses the loud audiobook/media path — same as
+            // Audible, Spotify, and ChatGPT voice. When the user starts
+            // talking again, `WhisperManager.setupAudioSession()` flips the
+            // category back to `.playAndRecord` for recording. The mic is off
+            // during AI speech, so voice barge-in is disabled — the user
+            // interrupts by tapping the orb.
             try session.setCategory(
-                .playAndRecord,
-                mode: .videoChat,
-                options: [.defaultToSpeaker, .allowBluetooth, .allowBluetoothA2DP]
+                .playback,
+                mode: .spokenAudio,
+                options: [.duckOthers]
             )
             try session.setActive(true, options: .notifyOthersOnDeactivation)
         } catch {
@@ -147,30 +351,19 @@ final class SpeechManager: NSObject, ObservableObject, AVSpeechSynthesizerDelega
         return min(1.0, max(0.0, routeCap * userVolume))
     }
 
-    // MARK: - AVSpeechSynthesizerDelegate
-
-    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer,
-                                       willSpeakRangeOfSpeechString characterRange: NSRange,
-                                       utterance: AVSpeechUtterance) {
-        // First word is about to be spoken — audio pipeline is live, clear the
-        // "starting" spinner so the UI settles into the active-playback state.
-        Task { @MainActor in self.isStartingPlayback = false }
-    }
-
-    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer,
-                                       didFinish utterance: AVSpeechUtterance) {
-        Task { @MainActor in self.handleUtteranceCompleted() }
-    }
-
-    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer,
-                                       didCancel utterance: AVSpeechUtterance) {
-        Task { @MainActor in self.handleUtteranceCompleted() }
-    }
+    // MARK: - Completion tracking
+    //
+    // The pipeline now uses `synth.write` instead of `synth.speak`, so the
+    // delegate `didFinish`/`didCancel` callbacks do not fire. Completion is
+    // driven from `scheduleBuffer`'s completion handler — when every buffer
+    // of every queued utterance has finished playing, we fire
+    // `onAllSpeechFinished` just like before.
 
     private func handleUtteranceCompleted() {
         outstandingUtterances = max(0, outstandingUtterances - 1)
         if outstandingUtterances == 0 {
             isSpeaking          = false
+            isStartingPlayback  = false
             nowPlayingMessageID = nil
             onAllSpeechFinished?()
         }
