@@ -90,6 +90,9 @@ struct ContentView: View {
     /// True once the idle-exit monitor has been started this session.
     /// Prevents beginListening() re-entries from spawning duplicate monitors.
     @State private var voiceModeExitScheduled = false
+    /// Conversations the user has entered voice mode for at least once this
+    /// app launch. Used to pick a "welcome back" greeting vs. a first-time one.
+    @State private var chatsWithPriorVoiceSession: Set<UUID> = []
     /// Accumulated seconds of true silence (neither user nor AI talking).
     /// Resets to 0 whenever activity resumes.
     @State private var voiceIdleSeconds: TimeInterval = 0
@@ -295,11 +298,28 @@ struct ContentView: View {
             voiceWasEnabled    = store.voiceEnabled
             store.voiceEnabled = true
             SpeechManager.shared.stopAndClear()
+            // Do NOT call SpeechManager.prepareForVoiceMode() here — it flips
+            // the audio session to .playback + .spokenAudio before the
+            // activation cue plays, which makes the cue play through the loud
+            // TTS session even after playVoiceModeSound tries to revert. The
+            // greeting's enqueue() will set up the speech session itself.
             startVolumeMonitoring()
-            beginListening()
             isVoiceModeTransitioning = false
+
+            // Pick a greeting based on whether this chat has had a prior voice
+            // session this app launch. Speak it before listening starts; the
+            // existing `onAllSpeechFinished` callback will transition us into
+            // listening once the greeting finishes.
+            let chatID = store.selectedID
+            let returning = chatID.map { chatsWithPriorVoiceSession.contains($0) } ?? false
+            let greeting = VoiceModeGreetings.pick(hasBeenInVoiceModeForThisChat: returning)
+            if let id = chatID { chatsWithPriorVoiceSession.insert(id) }
+
+            pttState = .aiTalking
             Task { @MainActor in
                 await playVoiceModeSound(named: "ActivateVoicetoVoice")
+                guard pttState == .aiTalking, store.voiceEnabled else { return }
+                SpeechManager.shared.enqueue(greeting)
             }
 
         case .listening:
@@ -647,19 +667,18 @@ struct ContentView: View {
 
         do {
             do {
-                if pttState == .idle && !isVoiceModeTransitioning {
-                    try AVAudioSession.sharedInstance().setCategory(
-                        .playback,
-                        mode: .default,
-                        options: []
-                    )
-                } else {
-                    try AVAudioSession.sharedInstance().setCategory(
-                        .playAndRecord,
-                        mode: .voiceChat,
-                        options: [.defaultToSpeaker, .allowBluetooth, .allowBluetoothA2DP]
-                    )
-                }
+                // Always play voice-mode cues through the same loud session the
+                // greeting / AI voice uses (.playback + .spokenAudio). Flipping
+                // to .voiceChat just for the cue made it noticeably quieter
+                // than the speech it sits next to. The cue's own volume slider
+                // (voiceModeActivationVolume / voiceModeDeactivationVolume in
+                // Audio Settings) still controls its level relative to the AI
+                // voice — adjust there if it ever feels too loud.
+                try AVAudioSession.sharedInstance().setCategory(
+                    .playback,
+                    mode: .spokenAudio,
+                    options: [.duckOthers]
+                )
                 try AVAudioSession.sharedInstance().setActive(true, options: [])
             } catch {
                 print("🔇 Voice mode sound session setup failed:", error.localizedDescription)
@@ -672,7 +691,9 @@ struct ContentView: View {
             player.setVolume(volume, fadeDuration: 0)
             player.play()
             voiceModeSoundPlayer = player
-            let duration = max(0.25, min(player.duration + 0.08, 1.2))
+            // No trailing pad — the greeting must begin the instant the
+            // activation cue ends, with no audible gap between them.
+            let duration = max(0.25, min(player.duration, 1.2))
             try? await Task.sleep(nanoseconds: UInt64(duration * 1_000_000_000))
         } catch {
             print("🔇 Failed to play voice mode sound:", error.localizedDescription)

@@ -27,7 +27,6 @@ final class ThinkingFillerManager {
     ]
 
     private let coreFillers = [
-        "Hmm...",
         "Let me think...",
         "Okay...",
         "Alright...",
@@ -207,7 +206,7 @@ final class ThinkingFillerManager {
         case .confident:
             return ["Alright...", "Okay..."]
         case .curious:
-            return ["Hmm...", "Interesting..."]
+            return ["Well then...", "Let's see..."]
         case .analytical:
             return ["Let me think through that...", "Let me break that down..."]
         }
@@ -220,7 +219,7 @@ final class ThinkingFillerManager {
 
     private func chooseUnique(from phrases: [String]) -> String {
         let available = phrases.filter { !recentlyUsed.contains($0) }
-        return (available.isEmpty ? phrases : available).randomElement() ?? "Hmm..."
+        return (available.isEmpty ? phrases : available).randomElement() ?? "Let me think..."
     }
 
     private func remember(_ phrase: String) {
