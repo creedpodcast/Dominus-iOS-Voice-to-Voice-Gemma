@@ -6,6 +6,7 @@ struct AudioSettingsView: View {
     @ObservedObject private var settings = AudioSettingsStore.shared
 
     @State private var previewPlayer: AVAudioPlayer?
+    @State private var showOrbSizeAdjuster: Bool = false
 
     var body: some View {
         NavigationStack {
@@ -100,6 +101,24 @@ struct AudioSettingsView: View {
                 }
 
                 Section {
+                    Button {
+                        showOrbSizeAdjuster = true
+                    } label: {
+                        HStack {
+                            Label("Adjust orb size", systemImage: "circle.dashed")
+                            Spacer()
+                            Text("\(Int((settings.orbScale * 100).rounded()))%")
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                        }
+                    }
+                } header: {
+                    Text("Voice orb")
+                } footer: {
+                    Text("Opens a full-screen preview that looks exactly like voice mode. Drag the slider or pinch the orb to resize — your change applies the moment you tap Done. You can also pinch the orb directly in voice mode to resize at any time.")
+                }
+
+                Section {
                     Toggle(isOn: $settings.hapticsEnabled) {
                         Label("Haptic feedback", systemImage: "hand.tap")
                     }
@@ -123,6 +142,9 @@ struct AudioSettingsView: View {
                         dismiss()
                     }
                 }
+            }
+            .fullScreenCover(isPresented: $showOrbSizeAdjuster) {
+                OrbSizeAdjustView()
             }
         }
     }
@@ -193,3 +215,4 @@ struct AudioSettingsView: View {
         return "\(minutes)m \(remainder)s"
     }
 }
+

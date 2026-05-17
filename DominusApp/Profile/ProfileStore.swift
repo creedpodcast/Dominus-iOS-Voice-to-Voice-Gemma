@@ -22,6 +22,20 @@ final class ProfileStore {
         set { UserDefaults.standard.set(newValue, forKey: "dominus_persona") }
     }
 
+    /// When true, voice-to-voice replies are asked to end with an emoji.
+    /// User-controlled in Profile under the "How Dominus Should Talk" area.
+    /// Persisted in UserDefaults. Defaults to `true` so the orb has something
+    /// to show out of the box; the user can disable it any time.
+    var voiceEmojisEnabled: Bool {
+        get {
+            if UserDefaults.standard.object(forKey: "dominus_voice_emojis") == nil {
+                return true
+            }
+            return UserDefaults.standard.bool(forKey: "dominus_voice_emojis")
+        }
+        set { UserDefaults.standard.set(newValue, forKey: "dominus_voice_emojis") }
+    }
+
     var displayName: String {
         value(for: Self.displayNameKey)
     }
@@ -124,7 +138,10 @@ final class ProfileStore {
 
     /// Returns a compact string to prepend to the system prompt.
     /// Empty string when neither facts nor persona exist.
-    func systemPromptBlock() -> String {
+    /// - Parameter voiceMode: when true and the user has the voice-emoji
+    ///   preference enabled, appends an emoji directive to the "How to talk"
+    ///   block so voice-mode replies always carry an end-of-response emoji.
+    func systemPromptBlock(voiceMode: Bool = false) -> String {
         var parts: [String] = []
 
         let profileLines = structuredProfileLines()
@@ -136,9 +153,16 @@ final class ProfileStore {
             """)
         }
 
+        // "How to talk to this user" — user-typed persona + (voice-only)
+        // emoji preference, combined so the model treats them as one block.
+        var talkLines: [String] = []
         let p = persona.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !p.isEmpty {
-            parts.append("How to talk to this user:\n\(p)")
+        if !p.isEmpty { talkLines.append(p) }
+        if voiceMode && voiceEmojisEnabled {
+            talkLines.append("Use an emoji at the end of every response.")
+        }
+        if !talkLines.isEmpty {
+            parts.append("How to talk to this user:\n\(talkLines.joined(separator: "\n"))")
         }
 
         return parts.joined(separator: "\n\n")

@@ -169,6 +169,35 @@ final class ChatStore: ObservableObject {
     /// generate a reply, so the UI can keep the PTT loop moving.
     @Published var silentAmbientEventCount: Int = 0
 
+    /// Phase 1 of the emoji-orb feature: the glyphs OrbEmojiScanner pulled out
+    /// of the most recent voice-mode AI reply. Voice-mode UI binds to this so
+    /// the orb can show what was found. Cleared on every new send.
+    @Published var latestOrbPlacements: [OrbEmojiScanner.Placement] = []
+
+    /// Fallback glyph shown in the orb when there's no AI reply emoji to show
+    /// — i.e. the AI is idle or the user is mid-speech. ContentView updates
+    /// this from a simple state machine driven by `pttState` and the live
+    /// Whisper transcript. `nil` = no fallback glyph (orb stays empty).
+    @Published var orbActivityGlyph: String? = nil
+
+    // MARK: - Emoji-orb throttle state
+    //
+    // Each AI reply may emit several emojis. The orb is required to hold
+    // each glyph on screen for AT LEAST 3.5 seconds before switching to the
+    // next, regardless of how fast the model streams text. We do that by
+    // keeping the scanner's full output in `pendingOrbPlacements` and
+    // *growing* `latestOrbPlacements` one element at a time on a timer.
+    // The orb itself just renders `latestOrbPlacements.last`.
+    private var pendingOrbPlacements: [OrbEmojiScanner.Placement] = []
+    /// Bumps on every `_send` so a new reply restarts the throttle from the
+    /// new reply's first emoji instead of trying to append to the old one.
+    private var orbReplyGeneration: Int = 0
+    /// Generation that the currently visible orb was started from.
+    private var displayedOrbGeneration: Int = -1
+    private var lastOrbChangeAt: Date?
+    private var orbThrottleTask: Task<Void, Never>?
+    private let minOrbHoldSeconds: TimeInterval = 3.5
+
     /// Master TTS toggle. Used in BOTH text mode (header speaker icon) and
     /// voice mode (orb mute button). When entering PTT we force this true and
     /// restore the prior value on exit. Persisted across launches in UserDefaults.
@@ -384,7 +413,7 @@ final class ChatStore: ObservableObject {
         let recentAssistantTxt = conversations[convoIndex].messages.reversed()
             .first(where: { $0.role == .assistant && !isMemoryStatusMessage($0.content) })?
             .content
-        let profileBlock       = ProfileStore.shared.systemPromptBlock()
+        let profileBlock       = ProfileStore.shared.systemPromptBlock(voiceMode: voiceEnabled)
         let activeChatCtx      = activeConversationMemoryContext(in: conversations[convoIndex])
 
         let context = MemoryRetriever.shared.retrieve(
@@ -488,8 +517,9 @@ final class ChatStore: ObservableObject {
         isGenerating = true
 
         // ── Build LLM context ──────────────────────────────────────────────
-        // 1. User profile — always injected first
-        let profileBlock = ProfileStore.shared.systemPromptBlock()
+        // 1. User profile — always injected first. Pass voiceEnabled so the
+        //    profile's voice-only emoji directive (if enabled) is added.
+        let profileBlock = ProfileStore.shared.systemPromptBlock(voiceMode: voiceEnabled)
 
         // 2. Retrieve older current-chat context only when the latest message asks for recall.
         let recentAssistantText = conversations[convoIndex].messages.reversed()
@@ -545,6 +575,8 @@ final class ChatStore: ObservableObject {
             )
             fullSystemPrompt += "\n\n\(activeAmbientBlock)"
         }
+        // (Voice-mode emoji directive is now opt-in via the user profile —
+        //  see ProfileStore.systemPromptBlock(voiceMode:) above.)
 
         // 3. Build message list: system + last N turns of raw history
         var llmMessages: [LlamaChatMessage] = [
@@ -611,6 +643,11 @@ final class ChatStore: ObservableObject {
             var ttsBuffer     = ""
             var lastEnqueuedAtCount = 0
             var realSpeechHasStarted = false
+            // Mark a new reply generation. The previous reply's emoji stays
+            // on the orb until the new reply's first emoji emits — at which
+            // point the throttle resets to start cycling the new list.
+            orbReplyGeneration += 1
+            pendingOrbPlacements = []
             // Batch SwiftUI re-renders: push a new ChatMessage every N tokens instead
             // of every single one. TTS sentence detection still runs per-token.
             // At ~20 tok/s this gives ~3 UI updates/s — smooth to the eye, and the
@@ -651,6 +688,7 @@ final class ChatStore: ObservableObject {
                         timestamp: assistantTS
                     )
                     uiTokenCount = 0
+                    publishOrbPlacementsIfChanged(from: displayText)
                 } else if uiTokenCount >= uiTokenBatch {
                     let displayText = stripRoboticOpener(cleanLlamaArtifacts(assistantText))
                     conversations[convoIndex].messages[assistantIndex] = ChatMessage(
@@ -660,6 +698,7 @@ final class ChatStore: ObservableObject {
                         timestamp: assistantTS
                     )
                     uiTokenCount = 0
+                    publishOrbPlacementsIfChanged(from: displayText)
                 }
 
                 if voiceEnabled {
@@ -702,6 +741,17 @@ final class ChatStore: ObservableObject {
                 content: finalDisplayText,
                 timestamp: assistantTS
             )
+
+            // Final orb-glyph publish for the completed reply. Streaming
+            // batches already publish incrementally via
+            // publishOrbPlacementsIfChanged, so this is mostly a safety net
+            // for any glyphs added by the cleanup pass.
+            if voiceEnabled {
+                publishOrbPlacementsIfChanged(from: finalDisplayText)
+                print("🟣 OrbEmojiScanner: \(latestOrbPlacements.count) glyph(s) in final reply")
+            } else {
+                latestOrbPlacements = []
+            }
 
             if voiceEnabled && !ttsBuffer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 if !realSpeechHasStarted {
@@ -930,6 +980,73 @@ final class ChatStore: ObservableObject {
         Hidden ambient context: the voice transcript contained these non-speech background cues, removed from the visible user message: \(labels).
         Briefly acknowledge this ambient context once in your reply if it feels natural. Do not quote the bracket syntax. Do not mention the same cue again until it reappears much later in the chat.
         """
+    }
+
+    /// Scan the partial AI reply for orb glyphs and feed them into the
+    /// throttle. The throttle reveals one emoji at a time on
+    /// `latestOrbPlacements`, holding each for at least `minOrbHoldSeconds`
+    /// before advancing. Empty scans are ignored so the prior reply's
+    /// emoji stays on the orb until the new reply has at least one.
+    private func publishOrbPlacementsIfChanged(from displayText: String) {
+        let placements = OrbEmojiScanner.extract(from: displayText)
+        guard !placements.isEmpty else { return }
+        if placements == pendingOrbPlacements { return }
+        pendingOrbPlacements = placements
+        reconcileOrbThrottle()
+    }
+
+    /// Decides what `latestOrbPlacements` should look like right now given
+    /// the pending list and the per-emoji minimum hold time. On a brand-new
+    /// reply (generation bumped), snaps the orb to the first new emoji
+    /// immediately. Then schedules the throttle to walk through the rest.
+    private func reconcileOrbThrottle() {
+        guard !pendingOrbPlacements.isEmpty else { return }
+
+        if displayedOrbGeneration != orbReplyGeneration {
+            // First emoji of a new reply — show it immediately.
+            displayedOrbGeneration = orbReplyGeneration
+            latestOrbPlacements    = [pendingOrbPlacements[0]]
+            lastOrbChangeAt        = Date()
+        }
+        scheduleOrbAdvance()
+    }
+
+    /// Background loop that appends the next pending emoji to
+    /// `latestOrbPlacements` once `minOrbHoldSeconds` has elapsed since the
+    /// last change, then repeats until all pending emojis are visible.
+    private func scheduleOrbAdvance() {
+        orbThrottleTask?.cancel()
+        orbThrottleTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                let visibleCount = latestOrbPlacements.count
+                let pendingCount = pendingOrbPlacements.count
+                guard visibleCount < pendingCount else { return }
+
+                let elapsed: TimeInterval = lastOrbChangeAt
+                    .map { Date().timeIntervalSince($0) } ?? .infinity
+                let wait = max(0, minOrbHoldSeconds - elapsed)
+                if wait > 0 {
+                    try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
+                    if Task.isCancelled { return }
+                }
+
+                guard latestOrbPlacements.count < pendingOrbPlacements.count else { return }
+                latestOrbPlacements.append(pendingOrbPlacements[latestOrbPlacements.count])
+                lastOrbChangeAt = Date()
+            }
+        }
+    }
+
+    /// Called from ContentView (e.g. on voice-mode exit or the 10-second
+    /// post-AI clear) to drop all orb state cleanly.
+    func resetOrbThrottle() {
+        orbThrottleTask?.cancel()
+        orbThrottleTask     = nil
+        pendingOrbPlacements = []
+        latestOrbPlacements  = []
+        lastOrbChangeAt      = nil
+        displayedOrbGeneration = -1
     }
 
     private func cleanLlamaArtifacts(_ text: String) -> String {
@@ -1454,7 +1571,7 @@ final class ChatStore: ObservableObject {
                     || self.isLoading
                     || self.isMemoryRefining
                     || SpeechManager.shared.isSpeaking
-                    || SpeechRecognitionManager.shared.isListening {
+                    || WhisperManager.shared.isRecording {
                     try? await Task.sleep(nanoseconds: 1_000_000_000)
                     continue
                 }
