@@ -8,11 +8,10 @@ enum VoiceModeGreetings {
     /// Played the first time the user enters voice mode for the current chat
     /// (this app launch).
     static let firstTime: [String] = [
-        "How can I help you today?",
+        "How can I help you?",
         "What would you like to talk about?",
-        "Let's see what's in store for today.",
-        "I'm listening — where do you want to start?",
-        "Ready when you are. What's on your mind?",
+        "What's up?",
+        "What's on your mind?",
         "What can I do for you?",
         "Go ahead, I'm all ears.",
         "What are we working on today?"

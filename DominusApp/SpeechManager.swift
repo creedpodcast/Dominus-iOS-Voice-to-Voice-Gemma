@@ -202,7 +202,17 @@ final class SpeechManager: NSObject, ObservableObject {
             isStartingPlayback = false
         }
 
-        playerNode.scheduleBuffer(buffer) { [weak self] in
+        // `.dataPlayedBack` fires after the buffer has actually finished playing
+        // through the output (not just when the engine has consumed it). This
+        // is critical for voice mode: the listening grace period starts from
+        // this callback, so if it fired early the AI's own voice tail could
+        // bleed into Whisper's first recording.
+        playerNode.scheduleBuffer(
+            buffer,
+            at: nil,
+            options: [],
+            completionCallbackType: .dataPlayedBack
+        ) { [weak self] _ in
             guard let self else { return }
             Task { @MainActor in
                 self.handleBufferCompletion(for: utteranceKey)

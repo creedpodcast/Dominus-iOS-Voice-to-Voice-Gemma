@@ -298,7 +298,11 @@ struct ContentView: View {
             voiceWasEnabled    = store.voiceEnabled
             store.voiceEnabled = true
             SpeechManager.shared.stopAndClear()
-            SpeechManager.shared.prepareForVoiceMode()
+            // Do NOT call SpeechManager.prepareForVoiceMode() here — it flips
+            // the audio session to .playback + .spokenAudio before the
+            // activation cue plays, which makes the cue play through the loud
+            // TTS session even after playVoiceModeSound tries to revert. The
+            // greeting's enqueue() will set up the speech session itself.
             startVolumeMonitoring()
             isVoiceModeTransitioning = false
 
@@ -663,19 +667,18 @@ struct ContentView: View {
 
         do {
             do {
-                if pttState == .idle && !isVoiceModeTransitioning {
-                    try AVAudioSession.sharedInstance().setCategory(
-                        .playback,
-                        mode: .default,
-                        options: []
-                    )
-                } else {
-                    try AVAudioSession.sharedInstance().setCategory(
-                        .playAndRecord,
-                        mode: .voiceChat,
-                        options: [.defaultToSpeaker, .allowBluetooth, .allowBluetoothA2DP]
-                    )
-                }
+                // Always play voice-mode cues through the same loud session the
+                // greeting / AI voice uses (.playback + .spokenAudio). Flipping
+                // to .voiceChat just for the cue made it noticeably quieter
+                // than the speech it sits next to. The cue's own volume slider
+                // (voiceModeActivationVolume / voiceModeDeactivationVolume in
+                // Audio Settings) still controls its level relative to the AI
+                // voice — adjust there if it ever feels too loud.
+                try AVAudioSession.sharedInstance().setCategory(
+                    .playback,
+                    mode: .spokenAudio,
+                    options: [.duckOthers]
+                )
                 try AVAudioSession.sharedInstance().setActive(true, options: [])
             } catch {
                 print("🔇 Voice mode sound session setup failed:", error.localizedDescription)
@@ -688,7 +691,9 @@ struct ContentView: View {
             player.setVolume(volume, fadeDuration: 0)
             player.play()
             voiceModeSoundPlayer = player
-            let duration = max(0.25, min(player.duration + 0.08, 1.2))
+            // No trailing pad — the greeting must begin the instant the
+            // activation cue ends, with no audible gap between them.
+            let duration = max(0.25, min(player.duration, 1.2))
             try? await Task.sleep(nanoseconds: UInt64(duration * 1_000_000_000))
         } catch {
             print("🔇 Failed to play voice mode sound:", error.localizedDescription)
