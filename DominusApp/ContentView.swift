@@ -32,7 +32,6 @@ private enum HeadphoneVolumeWarning: Equatable {
 struct ContentView: View {
 
     @StateObject private var store   = ChatStore()
-    @StateObject private var speech  = SpeechRecognitionManager.shared
     @StateObject private var whisper = WhisperManager.shared
     @ObservedObject private var speechMgr = SpeechManager.shared
     @ObservedObject private var audioSettings = AudioSettingsStore.shared
@@ -73,6 +72,32 @@ struct ContentView: View {
     @State private var voiceAutoSendTask: Task<Void, Never>?
     @State private var listeningSilenceFillerTask: Task<Void, Never>?
     @State private var voiceModeAutoExitTask: Task<Void, Never>?
+    /// Timer that, 3 seconds after the AI stops speaking, drops the orb into
+    /// its idle 🙂 face if the user hasn't started talking yet.
+    @State private var idleOrbEmojiTask: Task<Void, Never>?
+    /// Marks the entry/return greeting so its post-speech handler can show
+    /// the 🙂 face for ~5 seconds before clearing back to the dot field.
+    @State private var entryGreetingActive: Bool = false
+    /// Timer that clears the 5-second entry smile once it has shown long
+    /// enough (and the user hasn't started speaking).
+    @State private var entrySmileClearTask: Task<Void, Never>?
+    /// Timer that clears the AI's last emoji 10 seconds after the AI
+    /// finishes speaking. Cancelled when a new reply starts.
+    @State private var clearOrbPlacementsTask: Task<Void, Never>?
+    /// One-shot timer that auto-clears the user-speaking 🙂 face N seconds
+    /// after it first appears. Set only when the glyph transitions from
+    /// nil → 🙂, NOT restarted on subsequent transcript updates — that's
+    /// what stops noisy/background-only transcripts from looping the smile.
+    @State private var activitySmileClearTask: Task<Void, Never>?
+    /// How long 🙂 holds before auto-clearing if no escalation happens.
+    private var activitySmileHoldSeconds: TimeInterval { 5 }
+    /// Timer that, after the "you still there?" filler plays and the user
+    /// still hasn't responded, switches the orb to 😴 to signal Dominus is
+    /// drifting off while it waits.
+    @State private var sleepyOrbEmojiTask: Task<Void, Never>?
+    /// Seconds of continued user silence after the "you still there?" filler
+    /// before the orb shows 😴.
+    private var sleepyOrbDelay: TimeInterval { 15 }
     @State private var isInterruptRestartPending = false
     @State private var latestVisibleVoiceTranscript = ""
     @State private var latestVisibleVoiceTranscriptUpdatedAt: Date?
@@ -123,6 +148,9 @@ struct ContentView: View {
                     status:          activeStatus,
                     isMicMuted:      whisper.isMicMuted,
                     isGenerating:    store.isGenerating || speechMgr.isSpeaking,
+                    isSpeaking:      store.isGenerating || speechMgr.isSpeaking,
+                    orbPlacements:   store.latestOrbPlacements,
+                    activityGlyph:   store.orbActivityGlyph,
                     onTap:           handlePTTTap,
                     onToggleMicMute: { whisper.isMicMuted.toggle() },
                     onStop:          stopCurrentResponse,
@@ -214,6 +242,23 @@ struct ContentView: View {
         }
         .onChange(of: whisper.liveTranscript) { transcript in
             handleLiveVoiceTranscript(transcript)
+            updateActivityGlyphFromTranscript(transcript)
+        }
+        .onChange(of: speechMgr.isSpeaking) { isSpeaking in
+            handleAISpeakingChange(isSpeaking)
+        }
+        .onChange(of: pttState) { newState in
+            if newState == .idle {
+                // Leaving voice mode entirely — clear all orb state.
+                idleOrbEmojiTask?.cancel()
+                sleepyOrbEmojiTask?.cancel()
+                entrySmileClearTask?.cancel()
+                clearOrbPlacementsTask?.cancel()
+                activitySmileClearTask?.cancel()
+                entryGreetingActive = false
+                store.orbActivityGlyph = nil
+                store.resetOrbThrottle()
+            }
         }
         .onChange(of: whisper.lastAudioActivityAt) { activityAt in
             handleListeningAudioActivity(activityAt)
@@ -306,6 +351,17 @@ struct ContentView: View {
             startVolumeMonitoring()
             isVoiceModeTransitioning = false
 
+            // Show 🙂 the instant voice mode opens, so the orb has a friendly
+            // face the moment the user enters (or re-enters). The greeting
+            // about to play will briefly clear it while the AI is speaking,
+            // and `handleAISpeakingChange` re-asserts it for 5 seconds once
+            // the greeting finishes. Also drop any stale AI orb state.
+            store.resetOrbThrottle()
+            store.orbActivityGlyph = "🙂"
+            entryGreetingActive   = true
+            entrySmileClearTask?.cancel()
+            clearOrbPlacementsTask?.cancel()
+
             // Pick a greeting based on whether this chat has had a prior voice
             // session this app launch. Speak it before listening starts; the
             // existing `onAllSpeechFinished` callback will transition us into
@@ -380,9 +436,6 @@ struct ContentView: View {
         resetVoiceAutoSendState()
         isInterruptRestartPending = false
         SpeechManager.shared.stopAndClear()
-        // Tear down SpeechRecognitionManager's engine first — two AVAudioEngines
-        // cannot both install a tap on the input node simultaneously.
-        speech.tearDownVoiceSession()
         whisper.startRecording()
         startPulse()
         pttState = .listening
@@ -452,6 +505,126 @@ struct ContentView: View {
             guard let r = Range(match.range, in: transcript) else { return false }
             let cue = transcript[r].lowercased()
             return !cue.contains("silence") && !cue.contains("pause")
+        }
+    }
+
+    // MARK: - Idle / user-activity orb emoji
+    //
+    // State machine driving `store.orbActivityGlyph`:
+    //   • While the AI is generating or speaking: nothing (the AI's own
+    //     reply emojis own the orb, persisting until the next emoji).
+    //   • User begins speaking (transcript non-empty): 🙂
+    //   • User has spoken 3+ sentences: 🤔
+    //   • User has spoken 5+ sentences: 🧐 (face with monocle)
+    //   • User submits / leaves voice mode: cleared.
+    //   • Silence check-in fires ("you still there?"): 👀
+    //   • 15s more of silence: 😴
+
+    private func handleAISpeakingChange(_ isSpeaking: Bool) {
+        idleOrbEmojiTask?.cancel()
+        if isSpeaking {
+            // AI is talking — its own reply emojis take over. Cancel any
+            // pending entry-smile, activity-smile, or post-AI clear
+            // timers; they'll be re-scheduled when this speech finishes.
+            store.orbActivityGlyph = nil
+            entrySmileClearTask?.cancel()
+            activitySmileClearTask?.cancel()
+            clearOrbPlacementsTask?.cancel()
+            return
+        }
+        guard pttState != .idle else { return }
+
+        // Path A — entry / return greeting just finished: show 🙂 for 5s
+        // so the user has a friendly face on screen during the welcome
+        // window, then clear back to the live dot field.
+        if entryGreetingActive {
+            entryGreetingActive = false
+            store.orbActivityGlyph = "🙂"
+            entrySmileClearTask?.cancel()
+            entrySmileClearTask = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                if Task.isCancelled { return }
+                guard pttState != .idle else { return }
+                let visible = WhisperManager.visibleTranscript(from: whisper.liveTranscript)
+                guard visible.isEmpty else { return }   // user already started talking
+                store.orbActivityGlyph = nil
+            }
+            return
+        }
+
+        // Path B — normal AI reply just finished. If it produced any
+        // emojis, hold them on the orb for 10 seconds, then clear so the
+        // orb settles to its pure dot-field state.
+        if !store.latestOrbPlacements.isEmpty {
+            clearOrbPlacementsTask?.cancel()
+            clearOrbPlacementsTask = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 10_000_000_000)
+                if Task.isCancelled { return }
+                guard pttState != .idle else { return }
+                store.resetOrbThrottle()
+            }
+        }
+    }
+
+    private func updateActivityGlyphFromTranscript(_ transcript: String) {
+        guard pttState == .listening else { return }
+        // Don't override the AI's own emoji while it's still speaking.
+        guard !speechMgr.isSpeaking, !store.isGenerating else { return }
+
+        let visible = WhisperManager.visibleTranscript(from: transcript)
+        guard !visible.isEmpty else { return }   // leave existing state alone
+
+        // User finally responded — clear any pending sleepy-orb transition.
+        sleepyOrbEmojiTask?.cancel()
+        sleepyOrbEmojiTask = nil
+
+        // Count sentence-terminator punctuation (Whisper inserts these).
+        let sentenceCount = visible.reduce(0) { acc, ch in
+            (ch == "." || ch == "?" || ch == "!") ? acc + 1 : acc
+        }
+
+        let glyph: String
+        if sentenceCount >= 5 {
+            glyph = "🧐"     // monocle / thinking-with-glasses
+        } else if sentenceCount >= 3 {
+            glyph = "🤔"     // thinking face
+        } else {
+            glyph = "🙂"     // single smile
+        }
+
+        // Already showing this glyph — do nothing. (Stops noisy/background
+        // transcript ticks from re-triggering the glyph or resetting the
+        // smile auto-clear timer.)
+        guard store.orbActivityGlyph != glyph else { return }
+
+        // Upgrades to 🤔 / 🧐 mean the user is genuinely talking at length
+        // — cancel the auto-clear so those stay until a real submit or AI
+        // reply takes over. The 🙂 face stays only on its one-shot timer.
+        if glyph == "🙂" {
+            store.orbActivityGlyph = "🙂"
+            scheduleActivitySmileAutoClear()
+        } else {
+            activitySmileClearTask?.cancel()
+            store.orbActivityGlyph = glyph
+        }
+    }
+
+    /// One-shot timer that takes 🙂 off the orb after `activitySmileHoldSeconds`.
+    /// Not restarted by subsequent transcript ticks, so background noise that
+    /// keeps re-publishing the same 🙂 can't extend the smile indefinitely.
+    private func scheduleActivitySmileAutoClear() {
+        activitySmileClearTask?.cancel()
+        activitySmileClearTask = Task { @MainActor in
+            try? await Task.sleep(
+                nanoseconds: UInt64(activitySmileHoldSeconds * 1_000_000_000)
+            )
+            if Task.isCancelled { return }
+            guard pttState == .listening,
+                  !speechMgr.isSpeaking,
+                  !store.isGenerating,
+                  store.orbActivityGlyph == "🙂"
+            else { return }
+            store.orbActivityGlyph = nil
         }
     }
 
@@ -550,8 +723,27 @@ struct ContentView: View {
         stopPulse()
         whisper.cancelRecording()
         pttState = .aiTalking
+
+        // Orb states for the check-in:
+        //   • 👀 the moment Dominus speaks the "still there?" prompt
+        //   • 😴 after `sleepyOrbDelay` more seconds of continued silence
+        // (activityGlyph overrides AI placements via the orb's priority,
+        // so we don't need to wipe placements — they remain underneath.)
+        idleOrbEmojiTask?.cancel()
+        store.orbActivityGlyph = "👀"
+
         SpeechManager.shared.stopAndClear()
         SpeechManager.shared.enqueue(listeningSilenceFillers.randomElement() ?? "You still there?")
+
+        sleepyOrbEmojiTask?.cancel()
+        sleepyOrbEmojiTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: UInt64(sleepyOrbDelay * 1_000_000_000))
+            if Task.isCancelled { return }
+            guard pttState != .idle else { return }
+            let visible = WhisperManager.visibleTranscript(from: whisper.liveTranscript)
+            guard visible.isEmpty else { return }   // user finally spoke; activity handler took over
+            store.orbActivityGlyph = "😴"
+        }
     }
 
     private func scheduleVoiceModeAutoExit() {
@@ -745,6 +937,18 @@ struct ContentView: View {
         resetVoiceAutoSendState()
         cancelListeningSilenceFiller()
         stopPulse()
+        // Cancel pending greeting / post-AI / smile timers so the next AI
+        // reply gets a clean orb pipeline. Note: we deliberately do NOT
+        // reset `orbActivityGlyph` here — the noise-driven auto-send used
+        // to wipe 🙂 each cycle and let the next noise tick re-trigger it
+        // in a loop. `handleAISpeakingChange` will clear the glyph cleanly
+        // when the AI actually starts speaking.
+        idleOrbEmojiTask?.cancel()
+        sleepyOrbEmojiTask?.cancel()
+        entrySmileClearTask?.cancel()
+        clearOrbPlacementsTask?.cancel()
+        activitySmileClearTask?.cancel()
+        entryGreetingActive = false
         Task {
             let spoken = await whisper.stopAndTranscribe()
             let visibleVoiceText = cleanVoiceSubmission(spoken)

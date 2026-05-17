@@ -11,9 +11,10 @@ import Combine
 ///   2. Call `startRecording()` when the user opens the PTT session.
 ///   3. Call `stopAndTranscribe()` when the user taps send — returns the full transcript.
 ///
-/// `SpeechRecognitionManager` is NOT replaced — it still handles VAD amplitude
-/// monitoring while the AI is speaking. WhisperManager only runs during the
-/// user's recording window.
+/// This is now the sole STT path. The legacy `SpeechRecognitionManager`
+/// (SFSpeechRecognizer) lives under `/Archive` and is no longer in the build;
+/// this manager owns audio session setup, recording, VAD amplitude monitoring,
+/// and transcription end-to-end.
 @MainActor
 final class WhisperManager: ObservableObject {
 

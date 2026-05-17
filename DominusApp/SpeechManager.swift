@@ -45,6 +45,14 @@ final class SpeechManager: NSObject, ObservableObject {
 
     /// Number of utterances queued whose audio has not yet fully played.
     private var outstandingUtterances: Int = 0
+
+    /// Smoothed RMS amplitude (0...1) of the TTS audio currently playing
+    /// through the engine. The orb visualizer reads this directly so its
+    /// pulse follows the real attack/sustain/decay of the spoken voice —
+    /// every consonant hit, vowel sustain, and breath gap is reflected.
+    /// Fast attack (instantaneous on louder samples) + moderate decay so
+    /// the visual has natural inertia.
+    @Published var ttsAmplitude: Float = 0
     /// Per-utterance buffer accounting. Keyed by utterance instance because the
     /// synth `write` callback fires once per buffer; we know an utterance is
     /// fully scheduled when it sends its zero-length terminating buffer.
@@ -143,6 +151,7 @@ final class SpeechManager: NSObject, ObservableObject {
         isSpeaking            = false
         isStartingPlayback    = false
         nowPlayingMessageID   = nil
+        ttsAmplitude          = 0
         synth.stopSpeaking(at: .immediate)
         if playerNode.isPlaying {
             playerNode.stop()
@@ -310,12 +319,51 @@ final class SpeechManager: NSObject, ObservableObject {
         AudioUnitSetParameter(au, kLimiterParam_DecayTime,  kAudioUnitScope_Global, 0, 0.050, 0)
         AudioUnitSetParameter(au, kLimiterParam_PreGain,    kAudioUnitScope_Global, 0, 0,     0)
 
+        // Tap the main mixer's output to compute real-time RMS amplitude of
+        // the TTS audio. The orb visualizer subscribes to `ttsAmplitude` and
+        // pulses in time with the actual spoken signal — capturing every
+        // syllable stress, vowel sustain, consonant hit, and breath gap
+        // automatically (because real audio already has all of that).
+        let outputFormat = audioEngine.mainMixerNode.outputFormat(forBus: 0)
+        audioEngine.mainMixerNode.installTap(
+            onBus: 0,
+            bufferSize: 1024,
+            format: outputFormat
+        ) { [weak self] buffer, _ in
+            guard let self else { return }
+            guard let channelData = buffer.floatChannelData?[0] else { return }
+            let frameCount = Int(buffer.frameLength)
+            guard frameCount > 0 else { return }
+            var meanSquare: Float = 0
+            vDSP_measqv(channelData, 1, &meanSquare, vDSP_Length(frameCount))
+            let rms = sqrt(meanSquare)
+            // Boost + clamp. TTS is mid-level even when loud, so multiplying
+            // gives the orb headroom to actually move on quieter vowels.
+            let raw = min(rms * 4.5, 1.0)
+            Task { @MainActor [weak self] in
+                self?.applySmoothedAmplitude(raw)
+            }
+        }
+
         audioEngine.prepare()
         do {
             try audioEngine.start()
             engineConfigured = true
         } catch {
             print("❌ TTS engine start failed:", error.localizedDescription)
+        }
+    }
+
+    /// Asymmetric envelope follower:
+    ///   - fast attack: an incoming sample that's louder than current
+    ///     amplitude takes over immediately (so consonant hits punch through)
+    ///   - moderate decay: when the signal drops, amplitude eases down
+    ///     gradually so the orb has natural inertia instead of jittering
+    private func applySmoothedAmplitude(_ raw: Float) {
+        if raw > ttsAmplitude {
+            ttsAmplitude = raw
+        } else {
+            ttsAmplitude = ttsAmplitude * 0.82 + raw * 0.18
         }
     }
 

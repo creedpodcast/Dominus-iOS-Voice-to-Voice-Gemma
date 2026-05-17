@@ -13,10 +13,13 @@ struct VoiceOrbOverlay: View {
     let audioLevel:    Float
     let status:        (icon: String, message: String)?
     let isMicMuted:    Bool
-    let isGenerating:  Bool   // controls whether the stop button is visible
+    let isGenerating:  Bool   // kept for API parity; the stop button has been removed
+    let isSpeaking:    Bool   // drives the orb's pulse + glow while the AI is talking
+    let orbPlacements: [OrbEmojiScanner.Placement]
+    let activityGlyph: String?   // idle / user-talking face fallback
     let onTap:         () -> Void
     let onToggleMicMute: () -> Void
-    let onStop:        () -> Void
+    let onStop:        () -> Void   // still wired through `onTap` when AI is speaking
     let onDismiss:     () -> Void
 
     var body: some View {
@@ -38,10 +41,25 @@ struct VoiceOrbOverlay: View {
             .allowsHitTesting(false)
 
             VStack(spacing: 36) {
-                VoiceOrb(color: orbColor, audioLevel: audioLevel)
+                // Emoji-orb feature: render the new `EmojiOrb` (in EmojiOrb.swift)
+                // which adds an emoji glyph layer on top of the same ripple +
+                // core visuals. To revert to the original orb, swap the
+                // `EmojiOrb(...)` call below for `VoiceOrb(color: orbColor,
+                // audioLevel: audioLevel)` — the old struct is preserved
+                // intact at the bottom of this file.
+                EmojiOrb(
+                    color: orbColor,
+                    audioLevel: audioLevel,
+                    isSpeaking: isSpeaking,
+                    orbPlacements: orbPlacements,
+                    activityGlyph: activityGlyph
+                )
                     .onTapGesture { onTap() }
 
-                // Bottom button row: mic mute, stop (when generating), exit
+                // Bottom button row: mic mute + exit only. The orange stop
+                // button has been removed — tapping the orb while the AI is
+                // speaking now interrupts it (handled by the existing PTT
+                // state machine in ContentView).
                 HStack(spacing: 28) {
                     circleButton(
                         icon: isMicMuted ? "mic.slash.fill" : "mic.fill",
@@ -49,22 +67,12 @@ struct VoiceOrbOverlay: View {
                         action: onToggleMicMute
                     )
 
-                    if isGenerating {
-                        circleButton(
-                            icon: "stop.fill",
-                            tint: .orange,
-                            action: onStop
-                        )
-                        .transition(.scale.combined(with: .opacity))
-                    }
-
                     circleButton(
                         icon: "xmark",
                         tint: .white,
                         action: onDismiss
                     )
                 }
-                .animation(.easeInOut(duration: 0.2), value: isGenerating)
             }
         }
         .transition(
@@ -142,6 +150,7 @@ struct VoiceOrb: View {
                 .scaleEffect(coreScale)
                 .shadow(color: color.opacity(0.6), radius: 20, x: 0, y: 0)
                 .animation(.easeOut(duration: 0.08), value: audioLevel)
+
         }
         .onAppear { startRipples() }
         .onChange(of: color) { _ in restartRipples() }
@@ -166,3 +175,4 @@ struct VoiceOrb: View {
         startRipples()
     }
 }
+
