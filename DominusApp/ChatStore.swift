@@ -201,6 +201,17 @@ final class ChatStore: ObservableObject {
     /// Master TTS toggle. Used in BOTH text mode (header speaker icon) and
     /// voice mode (orb mute button). When entering PTT we force this true and
     /// restore the prior value on exit. Persisted across launches in UserDefaults.
+    /// Fast Speech Mode — strips conversation history, RAG memories, rolling
+    /// summary, and ambient context from every send so the LLM only sees the
+    /// system prompt + profile + the user's latest message. Generation is
+    /// noticeably faster at the cost of any continuity between turns.
+    /// Persisted across app launches in UserDefaults.
+    @Published var fastSpeechModeEnabled: Bool = UserDefaults.standard.bool(forKey: "fastSpeechModeEnabled") {
+        didSet {
+            UserDefaults.standard.set(fastSpeechModeEnabled, forKey: "fastSpeechModeEnabled")
+        }
+    }
+
     @Published var voiceEnabled: Bool = UserDefaults.standard.bool(forKey: "voiceEnabled") {
         didSet {
             UserDefaults.standard.set(voiceEnabled, forKey: "voiceEnabled")
@@ -263,7 +274,8 @@ final class ChatStore: ObservableObject {
     /// Older current-chat context is covered by conversation RAG summaries/exchanges.
     private let maxTurnsToKeep = 4
     private let minTurnsToKeep = 3
-    private let targetContextUsage: Double = 0.45
+    private let targetContextUsage: Double = 0.25
+    private let fastSpeechContextUsage: Double = 0.05
     private let approximateContextTokenLimit = 2048
 
     private var saveURL: URL {
@@ -506,10 +518,12 @@ final class ChatStore: ObservableObject {
         autoTitleIfNeeded(convoIndex: convoIndex, userText: visibleUserText)
         saveToDisk()
 
+        let shouldSpeakReply = voiceEnabled || includeAmbientCues
+
         if hasVisibleUserText,
            let undoContent = memoryUndoContent(from: visibleUserText, in: conversations[convoIndex]) {
             MemoryStore.shared.deleteMatching(content: undoContent)
-            appendMemoryStatus("Forgot Memory:\n\(undoContent)", convoIndex: convoIndex, speak: voiceEnabled)
+            appendMemoryStatus("Forgot Memory:\n\(undoContent)", convoIndex: convoIndex, speak: shouldSpeakReply)
             isGenerating = false
             return
         }
@@ -517,16 +531,21 @@ final class ChatStore: ObservableObject {
         isGenerating = true
 
         // ── Build LLM context ──────────────────────────────────────────────
-        // 1. User profile — always injected first. Pass voiceEnabled so the
-        //    profile's voice-only emoji directive (if enabled) is added.
-        let profileBlock = ProfileStore.shared.systemPromptBlock(voiceMode: voiceEnabled)
+        // 1. User profile — always injected first. Fast Speech Mode keeps this
+        //    compact by skipping the voice-only emoji directive.
+        let profileBlock = ProfileStore.shared.systemPromptBlock(
+            voiceMode: shouldSpeakReply && !fastSpeechModeEnabled
+        )
 
-        // 2. Retrieve older current-chat context only when the latest message asks for recall.
+        // 2. Retrieve older current-chat context only when the latest message
+        //    asks for recall — and only when Fast Speech Mode is OFF.
         let recentAssistantText = conversations[convoIndex].messages.reversed()
             .first(where: { $0.role == .assistant && !isMemoryStatusMessage($0.content) })?
             .content
         let activeConversationContext = activeConversationMemoryContext(in: conversations[convoIndex])
-        let shouldRetrieveCurrentChat = hasVisibleUserText && shouldUseCurrentChatRecall(for: visibleUserText)
+        let shouldRetrieveCurrentChat = !fastSpeechModeEnabled
+            && hasVisibleUserText
+            && shouldUseCurrentChatRecall(for: visibleUserText)
         // Use speculative retrieval result if the query matches exactly; otherwise
         // fall back to a fresh retrieve call. Cache is cleared after each send.
         let memoryContext: String
@@ -550,47 +569,68 @@ final class ChatStore: ObservableObject {
             cachedSpeculativeMemory = nil
         }
 
-        // 3. Compose full system prompt
+        // 3. Compose full system prompt. In Fast Speech Mode we deliberately
+        //    skip the rolling summary, retrieved memories, and ambient
+        //    context blocks — only the base prompt + profile (which includes
+        //    the voice-only emoji directive when relevant) are kept.
         var fullSystemPrompt = systemPrompt
         if !profileBlock.isEmpty {
             fullSystemPrompt += "\n\n\(profileBlock)"
         }
-        // Rolling summary — older turns compressed by the LLM and injected directly
-        // so prior context is always available without spending raw-turn token budget.
-        let rollingSummary = conversations[convoIndex].rollingSummary
-        if !rollingSummary.isEmpty {
-            fullSystemPrompt += "\n\nEarlier in this conversation:\n\(rollingSummary)"
+        if !fastSpeechModeEnabled {
+            // Rolling summary — older turns compressed by the LLM and injected directly
+            // so prior context is always available without spending raw-turn token budget.
+            let rollingSummary = conversations[convoIndex].rollingSummary
+            if !rollingSummary.isEmpty {
+                fullSystemPrompt += "\n\nEarlier in this conversation:\n\(rollingSummary)"
+            }
+            if !memoryContext.isEmpty {
+                fullSystemPrompt += "\n\n\(memoryContext)"
+            }
+            let recentAmbientContext = recentAmbientEventsPromptBlock(for: conversations[convoIndex])
+            if !recentAmbientContext.isEmpty {
+                fullSystemPrompt += "\n\n\(recentAmbientContext)"
+            }
+            if !eligibleAmbientCues.isEmpty {
+                let activeAmbientBlock = ambientCuePromptBlock(
+                    for: eligibleAmbientCues,
+                    ambientOnly: !hasVisibleUserText
+                )
+                fullSystemPrompt += "\n\n\(activeAmbientBlock)"
+            }
         }
-        if !memoryContext.isEmpty {
-            fullSystemPrompt += "\n\n\(memoryContext)"
-        }
-        let recentAmbientContext = recentAmbientEventsPromptBlock(for: conversations[convoIndex])
-        if !recentAmbientContext.isEmpty {
-            fullSystemPrompt += "\n\n\(recentAmbientContext)"
-        }
-        if !eligibleAmbientCues.isEmpty {
-            let activeAmbientBlock = ambientCuePromptBlock(
-                for: eligibleAmbientCues,
-                ambientOnly: !hasVisibleUserText
-            )
-            fullSystemPrompt += "\n\n\(activeAmbientBlock)"
-        }
-        // (Voice-mode emoji directive is now opt-in via the user profile —
-        //  see ProfileStore.systemPromptBlock(voiceMode:) above.)
+        // (Voice-mode emoji directive is opt-in via the user profile and is
+        //  skipped in Fast Speech Mode — see ProfileStore.systemPromptBlock.)
 
-        // 3. Build message list: system + last N turns of raw history
+        // 3. Build message list. Fast Speech Mode keeps history out of the
+        //    prompt entirely — only the system block + the user's current
+        //    message are sent, so the LLM generates with the smallest
+        //    possible context and replies faster.
         var llmMessages: [LlamaChatMessage] = [
             .init(role: .system, content: fullSystemPrompt)
         ]
-        llmMessages += conversations[convoIndex].messages.compactMap { m in
-            guard !isMemoryStatusMessage(m.content) else { return nil }
-            switch m.role {
-            case .user:      return .init(role: .user,      content: m.content)
-            case .assistant: return .init(role: .assistant, content: m.content)
+        if fastSpeechModeEnabled {
+            // Keep only a tiny recent-history slice so follow-ups like
+            // "explain that" still have an anchor, without pulling in full
+            // chat context, RAG, summaries, or ambient history.
+            llmMessages += fastSpeechRecentContextMessages(
+                from: conversations[convoIndex],
+                excludingLatestMessageID: conversations[convoIndex].messages.last?.id
+            )
+            if hasVisibleUserText {
+                llmMessages.append(.init(role: .user, content: visibleUserText))
             }
+        } else {
+            llmMessages += conversations[convoIndex].messages.compactMap { m in
+                guard !isMemoryStatusMessage(m.content) else { return nil }
+                switch m.role {
+                case .user:      return .init(role: .user,      content: m.content)
+                case .assistant: return .init(role: .assistant, content: m.content)
+                }
+            }
+            llmMessages = filterNoiseTurns(llmMessages)
+            llmMessages = trimLLMHistory(llmMessages)
         }
-        llmMessages = filterNoiseTurns(llmMessages)
-        llmMessages = trimLLMHistory(llmMessages)
 
         // Snapshot the assembled context for the inspector sheet (tappable ring).
         lastContextSnapshot = ContextSnapshot(
@@ -603,8 +643,10 @@ final class ChatStore: ObservableObject {
             }
         )
 
-        let shouldUseThinkingFiller = voiceEnabled && includeAmbientCues
-        if voiceEnabled {
+        // Fast Speech Mode keeps voice mode bone-dry — no "let me think…"
+        // fillers between question and answer. Replies arrive raw, fast.
+        let shouldUseThinkingFiller = shouldSpeakReply && includeAmbientCues && !fastSpeechModeEnabled
+        if shouldSpeakReply {
             SpeechManager.shared.stopAndClear()
         }
         if shouldUseThinkingFiller {
@@ -623,7 +665,14 @@ final class ChatStore: ObservableObject {
             let assistantID    = conversations[convoIndex].messages[assistantIndex].id
             let assistantTS    = conversations[convoIndex].messages[assistantIndex].timestamp
 
-            let stream = try await engine.streamChat(llmMessages, temperature: 0.7, seed: 42)
+            // Temperature is the "creativity / honesty" knob — lower values
+            // make Gemma stick close to the most likely next token (terse,
+            // direct, more likely to admit "I don't know"); higher values
+            // explore further (longer, more creative, more prone to make
+            // things up). Fast Speech Mode wants quick, direct answers, so
+            // we drop the temperature to 0.4 there.
+            let sendTemperature: Float = fastSpeechModeEnabled ? 0.4 : 0.7
+            let stream = try await engine.streamChat(llmMessages, temperature: sendTemperature, seed: 42)
 
             // Length-match the response to the question. Soft cap that only kicks
             // in at a sentence boundary, so we never chop a sentence mid-word.
@@ -701,7 +750,7 @@ final class ChatStore: ObservableObject {
                     publishOrbPlacementsIfChanged(from: displayText)
                 }
 
-                if voiceEnabled {
+                if shouldSpeakReply {
                     ttsBuffer += token
                     let trimmedTTSBuffer = ttsBuffer.trimmingCharacters(in: .whitespacesAndNewlines)
                     let hitSentenceEnd   = trimmedTTSBuffer.last == "." || trimmedTTSBuffer.last == "?" || trimmedTTSBuffer.last == "!"
@@ -746,14 +795,14 @@ final class ChatStore: ObservableObject {
             // batches already publish incrementally via
             // publishOrbPlacementsIfChanged, so this is mostly a safety net
             // for any glyphs added by the cleanup pass.
-            if voiceEnabled {
+            if shouldSpeakReply {
                 publishOrbPlacementsIfChanged(from: finalDisplayText)
                 print("🟣 OrbEmojiScanner: \(latestOrbPlacements.count) glyph(s) in final reply")
             } else {
                 latestOrbPlacements = []
             }
 
-            if voiceEnabled && !ttsBuffer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if shouldSpeakReply && !ttsBuffer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 if !realSpeechHasStarted {
                     ThinkingFillerManager.shared.prepareForRealAnswer()
                     realSpeechHasStarted = true
@@ -1101,6 +1150,58 @@ final class ChatStore: ObservableObject {
         }
 
         return trimmed
+    }
+
+    /// Fast Speech Mode gets a tiny recent-history budget so short follow-ups
+    /// have a referent while the prompt still stays extremely small.
+    private func fastSpeechRecentContextMessages(
+        from conversation: Conversation,
+        excludingLatestMessageID latestID: UUID?
+    ) -> [LlamaChatMessage] {
+        let budget = max(1, Int(Double(approximateContextTokenLimit) * fastSpeechContextUsage))
+        var remaining = budget
+        var selected: [LlamaChatMessage] = []
+
+        let priorMessages = conversation.messages
+            .filter { message in
+                message.id != latestID && !isMemoryStatusMessage(message.content)
+            }
+            .reversed()
+
+        for message in priorMessages {
+            let normalized = message.content
+                .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !normalized.isEmpty else { continue }
+            if message.role == .user, isNoiseTurn(normalized) { continue }
+
+            let tokenEstimate = max(1, normalized.count / 4)
+            let content: String
+            let usedTokens: Int
+
+            if tokenEstimate <= remaining {
+                content = normalized
+                usedTokens = tokenEstimate
+            } else {
+                let maxChars = max(24, remaining * 4)
+                content = String(normalized.prefix(maxChars))
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                usedTokens = max(1, content.count / 4)
+            }
+
+            guard !content.isEmpty else { continue }
+            switch message.role {
+            case .user:
+                selected.insert(.init(role: .user, content: content), at: 0)
+            case .assistant:
+                selected.insert(.init(role: .assistant, content: content), at: 0)
+            }
+            remaining -= usedTokens
+
+            if remaining <= 0 { break }
+        }
+
+        return selected
     }
 
     /// Drop low-signal user turns ("ok", "yeah", "thanks" etc.) and their paired

@@ -28,6 +28,7 @@ Talk to an AI that talks back. Tap once to speak, then pause — after real word
   - Robotic openers ("Sure!", "Certainly!", "Of course!") are stripped automatically before text is displayed or spoken
   - Noise turns ("ok", "yeah", "uh huh") are filtered out of LLM history before inference so they don't inflate context or shift tone
 - **Instant response start** — the first token always renders immediately when it arrives; subsequent tokens batch every 6 to keep the main thread free for typing and scrolling during generation. Thinking fillers are cancelled automatically if the model responds in under 1.5 seconds so they never talk over a fast answer.
+- **Fast Speech Mode** — rabbit toggle for low-latency turns. Fast mode skips RAG, rolling summaries, ambient context, voice greetings, and thinking fillers; it keeps only the base prompt, compact profile, latest user message, and a tiny recent-history slice capped at ~5% of the context window so short follow-ups still have an anchor. Replies use lower-temperature generation and a faster word-by-word reveal.
 - **Speculative RAG** — memory retrieval starts 300 ms after the user pauses typing, so by the time send is tapped the relevant memories are already loaded and generation begins without waiting for embedding lookup.
 - **Haptic feedback** — medium tap on send (text and voice), light tap when the AI's first token arrives. Toggle on/off in Audio settings.
 - **Pipeline pre-warming at launch** — all four cold-start costs (LLM inference graph, audio session, STT recognizer, TTS voice file, keyboard) are paid behind the loading screen in parallel; the app becomes interactive only when every component is ready
@@ -182,8 +183,9 @@ The same single button controls every step. No hold-to-talk. Auto-send fires aft
 ### Context management
 | Component | Details |
 |---|---|
-| Rolling window | Latest 10 turns (20 messages) kept as raw history in every prompt |
-| Conversation compaction | Turns that age out of the 10-turn window are summarised by a side-channel LLM call (temperature 0.3, max 400 chars); summary is injected into the system prompt as "Earlier in this conversation:" so prior context is always reachable without burning token budget |
+| Rolling window | Regular mode keeps up to 4 recent turns (8 messages), then trims toward a 25% context target while preserving at least 3 turns when needed |
+| Fast Speech context | Fast mode skips full history/RAG/summary blocks and keeps only a tiny recent-history slice capped at ~5% of the 2048-token window |
+| Conversation compaction | Turns that age out of the regular raw window are summarised by a side-channel LLM call (temperature 0.3, max 400 chars); summary is injected into the system prompt as "Earlier in this conversation:" so prior context is always reachable without burning token budget |
 | Compaction timing | Runs only when the model is idle (not generating); append-only so older summaries are never discarded |
 | Dual storage | Compacted summaries are also written to RAG so retrieval can surface them when relevant |
 | Context inspector | Tap the context ring in the chat header to see every assembled section (system prompt, profile, rolling summary, memories, raw turns) with token counts |
@@ -264,5 +266,4 @@ DominusApp/
 ## Known Issues
 
 - **Context window** — 2048 tokens can overflow when system prompt + profile + memories + history are large. Fix: increase to 4096.
-- **STT 1-minute OS limit** — Apple's `SFSpeechRecognizer` (used for VAD only) auto-cancels after ~60 seconds. Does not affect WhisperKit transcription.
 - **Live transcript delay** — WhisperKit live preview runs every second; first preview requires at least 0.5s of audio. Final transcript on send is always complete.

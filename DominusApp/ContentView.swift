@@ -362,20 +362,33 @@ struct ContentView: View {
             entrySmileClearTask?.cancel()
             clearOrbPlacementsTask?.cancel()
 
-            // Pick a greeting based on whether this chat has had a prior voice
-            // session this app launch. Speak it before listening starts; the
-            // existing `onAllSpeechFinished` callback will transition us into
-            // listening once the greeting finishes.
-            let chatID = store.selectedID
-            let returning = chatID.map { chatsWithPriorVoiceSession.contains($0) } ?? false
-            let greeting = VoiceModeGreetings.pick(hasBeenInVoiceModeForThisChat: returning)
-            if let id = chatID { chatsWithPriorVoiceSession.insert(id) }
+            // In Fast Speech Mode, voice mode is silent on entry — no
+            // greeting at all (per user spec: no filler words in fast mode).
+            // Skip straight to listening after the activation cue.
+            if store.fastSpeechModeEnabled {
+                entryGreetingActive = false
+                pttState = .aiTalking
+                Task { @MainActor in
+                    await playVoiceModeSound(named: "ActivateVoicetoVoice")
+                    guard pttState != .idle, store.voiceEnabled else { return }
+                    beginListening()
+                }
+            } else {
+                // Normal mode — pick a greeting based on whether this chat has
+                // had a prior voice session. Speak it before listening starts;
+                // the existing `onAllSpeechFinished` callback transitions us
+                // into listening once the greeting finishes.
+                let chatID = store.selectedID
+                let returning = chatID.map { chatsWithPriorVoiceSession.contains($0) } ?? false
+                let greeting = VoiceModeGreetings.pick(hasBeenInVoiceModeForThisChat: returning)
+                if let id = chatID { chatsWithPriorVoiceSession.insert(id) }
 
-            pttState = .aiTalking
-            Task { @MainActor in
-                await playVoiceModeSound(named: "ActivateVoicetoVoice")
-                guard pttState == .aiTalking, store.voiceEnabled else { return }
-                SpeechManager.shared.enqueue(greeting)
+                pttState = .aiTalking
+                Task { @MainActor in
+                    await playVoiceModeSound(named: "ActivateVoicetoVoice")
+                    guard pttState == .aiTalking, store.voiceEnabled else { return }
+                    SpeechManager.shared.enqueue(greeting)
+                }
             }
 
         case .listening:
@@ -697,6 +710,9 @@ struct ContentView: View {
         // Only fire once per voice session — after it plays we don't reschedule,
         // so the exit timer can run to completion without looping.
         guard !silenceFillerHasPlayed else { return }
+        // Fast Speech Mode skips all spoken filler, including the
+        // "you still there?" check-in — voice mode stays bone-quiet.
+        guard !store.fastSpeechModeEnabled else { return }
         listeningSilenceFillerTask?.cancel()
         listeningSilenceFillerTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: UInt64(listeningSilenceFillerDelay * 1_000_000_000))
@@ -966,6 +982,7 @@ struct ContentView: View {
             if AudioSettingsStore.shared.hapticsEnabled {
                 UIImpactFeedbackGenerator(style: .medium).impactOccurred()
             }
+            store.voiceEnabled = true
             store.send(
                 textForSend,
                 includeAmbientCues: true,
@@ -1201,6 +1218,24 @@ struct ContentView: View {
                 .lineLimit(1)
             Spacer()
 
+            // Fast Speech Mode — strips conversation history and memories
+            // so the LLM only sees the profile + current message. Generates
+            // faster, but every turn stands alone. Visible at all times so
+            // the user always knows which mode they're in.
+            Button {
+                store.fastSpeechModeEnabled.toggle()
+            } label: {
+                Image(systemName: store.fastSpeechModeEnabled ? "hare.fill" : "hare")
+                    .font(.system(size: 16, weight: .medium))
+                    .foregroundStyle(store.fastSpeechModeEnabled ? Color.accentColor : .secondary)
+                    .frame(width: 32, height: 32)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(store.fastSpeechModeEnabled
+                ? "Disable Fast Speech Mode"
+                : "Enable Fast Speech Mode")
+
             // TTS toggle — read replies aloud in text mode. Hidden during voice mode
             // because voice mode controls TTS internally (mute lives on the orb).
             if pttState == .idle {
@@ -1262,7 +1297,8 @@ struct ContentView: View {
                                 messageID: msg.id,
                                 role: msg.role,
                                 text: displayText,
-                                isStreaming: isStreamingAssistant
+                                isStreaming: isStreamingAssistant,
+                                wordByWord: store.fastSpeechModeEnabled && msg.role == .assistant
                             )
                                 .id(msg.id)
                         }
@@ -1592,39 +1628,72 @@ struct ContextInspectorSheet: View {
 struct CinematicStreamingText: View {
     let text: String
     let isStreaming: Bool
+    /// When true (Fast Speech Mode), chunks are split per WORD and the
+    /// reveal pacing is much faster — gives a snappy typewriter feel.
+    var wordByWord: Bool = false
 
     @State private var revealedChunkCount = 0
     @State private var revealTask: Task<Void, Never>?
 
     private var chunks: [String] {
-        Self.chunkText(text)
+        wordByWord ? Self.splitIntoWords(text) : Self.chunkText(text)
+    }
+
+    /// Per-chunk reveal delay. Word mode runs at ~30 ms/word; sentence mode
+    /// keeps its original 38 ms/chunk cadence.
+    private var revealDelayNS: UInt64 {
+        wordByWord ? 30_000_000 : 38_000_000
+    }
+
+    /// Per-chunk fade duration. Word mode fades very fast; sentence mode
+    /// uses its original 0.18 s ease.
+    private var revealAnimationDuration: Double {
+        wordByWord ? 0.08 : 0.18
     }
 
     var body: some View {
         Group {
             if isStreaming {
-                VStack(alignment: .leading, spacing: 5) {
-                    ForEach(Array(chunks.enumerated()), id: \.offset) { index, chunk in
-                        ZStack(alignment: .leading) {
-                            Text(chunk)
-                                .opacity(index < revealedChunkCount ? 0 : 0.18)
-                                .blur(radius: 1.1)
-
-                            Text(chunk)
-                                .opacity(index < revealedChunkCount ? 1 : 0)
-                                .blur(radius: index < revealedChunkCount ? 0 : 0.8)
-                        }
+                if wordByWord {
+                    // Word-mode (Fast Speech Mode): one running Text that
+                    // grows as words are revealed. The natural text-flow
+                    // layout handles wrapping; each word appearing inline
+                    // gives a clean typewriter feel without per-word view
+                    // overhead.
+                    Text(chunks.prefix(revealedChunkCount).joined(separator: " "))
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .animation(.easeOut(duration: 0.2), value: revealedChunkCount)
+                        .animation(.easeOut(duration: revealAnimationDuration),
+                                   value: revealedChunkCount)
+                        .onAppear { syncReveal(animated: true) }
+                        .onChange(of: text) { _ in syncReveal(animated: true) }
+                        .onDisappear {
+                            revealTask?.cancel()
+                            revealTask = nil
+                        }
+                } else {
+                    // Sentence-mode (normal): cinematic chunk reveal with
+                    // blur + opacity on each sentence pair.
+                    VStack(alignment: .leading, spacing: 5) {
+                        ForEach(Array(chunks.enumerated()), id: \.offset) { index, chunk in
+                            ZStack(alignment: .leading) {
+                                Text(chunk)
+                                    .opacity(index < revealedChunkCount ? 0 : 0.18)
+                                    .blur(radius: 1.1)
+
+                                Text(chunk)
+                                    .opacity(index < revealedChunkCount ? 1 : 0)
+                                    .blur(radius: index < revealedChunkCount ? 0 : 0.8)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .animation(.easeOut(duration: 0.2), value: revealedChunkCount)
+                        }
                     }
-                }
-                .onAppear { syncReveal(animated: true) }
-                .onChange(of: text) { _ in
-                    syncReveal(animated: true)
-                }
-                .onDisappear {
-                    revealTask?.cancel()
-                    revealTask = nil
+                    .onAppear { syncReveal(animated: true) }
+                    .onChange(of: text) { _ in syncReveal(animated: true) }
+                    .onDisappear {
+                        revealTask?.cancel()
+                        revealTask = nil
+                    }
                 }
             } else {
                 Text(text)
@@ -1650,20 +1719,30 @@ struct CinematicStreamingText: View {
         }
 
         revealTask?.cancel()
+        let delayNS = revealDelayNS
+        let animDuration = revealAnimationDuration
         revealTask = Task { @MainActor in
             var index = revealedChunkCount
             while index < latestChunks.count, !Task.isCancelled {
-                let delay: UInt64 = animated ? 38_000_000 : 0
+                let delay: UInt64 = animated ? delayNS : 0
                 if delay > 0 {
                     try? await Task.sleep(nanoseconds: delay)
                 }
                 guard !Task.isCancelled else { return }
-                withAnimation(.easeOut(duration: 0.18)) {
+                withAnimation(.easeOut(duration: animDuration)) {
                     revealedChunkCount = index + 1
                 }
                 index += 1
             }
         }
+    }
+
+    /// Splits text into whitespace-separated words for word-by-word reveal
+    /// in Fast Speech Mode. Collapses repeat whitespace; drops empties.
+    private static func splitIntoWords(_ text: String) -> [String] {
+        text
+            .split(whereSeparator: { $0.isWhitespace })
+            .map(String.init)
     }
 
     private static func chunkText(_ text: String) -> [String] {
@@ -1731,6 +1810,9 @@ struct ChatBubble: View {
         let role: ChatMessage.Role
         let text: String
         var isStreaming: Bool = false
+        /// Forwarded to CinematicStreamingText. When true, the bubble
+        /// renders one word at a time (Fast Speech Mode typewriter look).
+        var wordByWord: Bool = false
 
     @ObservedObject private var speech = SpeechManager.shared
     @State private var copied: Bool = false
@@ -1781,7 +1863,11 @@ struct ChatBubble: View {
     }
 
     private func bubbleView(background: Color, foreground: Color, align: Alignment) -> some View {
-        CinematicStreamingText(text: text, isStreaming: isStreaming && role == .assistant && !isMemoryNotice)
+        CinematicStreamingText(
+            text: text,
+            isStreaming: isStreaming && role == .assistant && !isMemoryNotice,
+            wordByWord: wordByWord
+        )
             .textSelection(.enabled)
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
