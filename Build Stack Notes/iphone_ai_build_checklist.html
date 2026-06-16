@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>iPhone AI App — Build Checklist</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: #f5f4f0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2rem 1rem;
+    min-height: 100vh;
+    color: #1a1a18;
+  }
+  h1 { font-size: 18px; font-weight: 500; color: #1a1a18; margin-bottom: 4px; }
+  .subtitle { font-size: 13px; color: #73726c; margin-bottom: 1.5rem; }
+  .card {
+    background: #fff;
+    border: 0.5px solid rgba(0,0,0,0.12);
+    border-radius: 16px;
+    padding: 1.5rem;
+    width: 100%;
+    max-width: 680px;
+  }
+  .top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1.25rem; flex-wrap: wrap; gap: 10px; }
+  .progress-wrap { display: flex; align-items: center; gap: 10px; }
+  .progress-bar { width: 160px; height: 6px; background: #e0dfd8; border-radius: 99px; overflow: hidden; }
+  .progress-fill { height: 100%; background: #1D9E75; border-radius: 99px; transition: width 0.3s; }
+  .progress-label { font-size: 13px; color: #73726c; min-width: 48px; }
+  .reset-btn { font-size: 12px; color: #73726c; background: none; border: 0.5px solid #ccc; border-radius: 8px; padding: 4px 10px; cursor: pointer; }
+  .reset-btn:hover { background: #f5f4f0; }
+  .section { margin-bottom: 1.25rem; }
+  .section-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; padding-bottom: 6px; border-bottom: 0.5px solid #e5e4dc; }
+  .section-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .section-title { font-size: 13px; font-weight: 500; color: #1a1a18; }
+  .section-count { font-size: 11px; color: #73726c; margin-left: auto; }
+  .item { display: flex; align-items: flex-start; gap: 10px; padding: 8px 10px; border-radius: 8px; cursor: pointer; transition: background 0.12s; user-select: none; }
+  .item:hover { background: #f5f4f0; }
+  .item.done .item-label { color: #a0a09a; text-decoration: line-through; }
+  .item.done .item-note { opacity: 0.5; }
+  .checkbox { width: 16px; height: 16px; border: 1.5px solid #c0bfb8; border-radius: 4px; flex-shrink: 0; margin-top: 1px; display: flex; align-items: center; justify-content: center; transition: background 0.15s, border-color 0.15s; }
+  .item.done .checkbox { background: #1D9E75; border-color: #1D9E75; }
+  .checkmark { width: 9px; height: 9px; opacity: 0; transition: opacity 0.15s; }
+  .item.done .checkmark { opacity: 1; }
+  .item-body { flex: 1; min-width: 0; }
+  .item-label { font-size: 13px; color: #1a1a18; line-height: 1.4; }
+  .item-note { font-size: 11px; color: #73726c; margin-top: 2px; line-height: 1.4; }
+  .tag { display: inline-block; font-size: 10px; font-weight: 500; padding: 1px 6px; border-radius: 20px; margin-left: 6px; vertical-align: middle; }
+  .tag-build { background: #E6F1FB; color: #0C447C; }
+  .tag-feature { background: #EAF3DE; color: #27500A; }
+  .legend { display: flex; gap: 12px; margin-top: 1.25rem; padding-top: 1rem; border-top: 0.5px solid #e5e4dc; }
+  .leg { display: flex; align-items: center; gap: 5px; font-size: 12px; color: #73726c; }
+</style>
+</head>
+<body>
+
+<h1>iPhone AI App — Build Checklist</h1>
+<p class="subtitle">iPhone 13 Pro Max · gemma-2-2b-it Q4_K_M · On-device</p>
+
+<div class="card">
+  <div class="top">
+    <div class="progress-wrap">
+      <div class="progress-bar"><div class="progress-fill" id="prog-fill" style="width:0%"></div></div>
+      <span class="progress-label" id="prog-label">0 / 0</span>
+    </div>
+    <button class="reset-btn" onclick="resetAll()">Reset all</button>
+  </div>
+
+  <div id="checklist"></div>
+
+  <div class="legend">
+    <div class="leg"><span class="tag tag-build">build</span> Implementation task</div>
+    <div class="leg"><span class="tag tag-feature">feature</span> User-facing UI</div>
+  </div>
+</div>
+
+<script>
+const sections = [
+  {
+    title: "Project setup",
+    color: "#888780",
+    items: [
+      { label: "Create Xcode project (SwiftUI)", note: "iOS 16+ target, iPhone only", type: "build" },
+      { label: "Integrate llama.cpp via Swift Package Manager", note: "For running .gguf models on-device", type: "build" },
+      { label: "Add gemma-2-2b-it-Q4_K_M.gguf to bundle", note: "~1.6GB — add to .gitignore", type: "build" },
+      { label: "Verify model loads and outputs a test response", note: "Confirm inference works before building UI", type: "build" },
+    ]
+  },
+  {
+    title: "Speech pipeline",
+    color: "#534AB7",
+    items: [
+      { label: "Integrate Silero VAD tiny (~2MB)", note: "CoreML model — detects speech vs silence in real time", type: "build" },
+      { label: "Integrate WhisperKit for STT", note: "Start with whisper-tiny for speed, upgrade later", type: "build" },
+      { label: "Wire mic → Silero → WhisperKit pipeline", note: "Silero signals end-of-utterance, Whisper transcribes the chunk", type: "build" },
+      { label: "Tune Silero silence threshold", note: "Target 600–1200ms pause before triggering transcription", type: "build" },
+      { label: "Add AVSpeechSynthesizer for TTS responses", note: "System framework — zero extra size", type: "build" },
+    ]
+  },
+  {
+    title: "Core storage",
+    color: "#5F5E5A",
+    items: [
+      { label: "Set up SQLite database with GRDB or SQLite.swift", note: "Handles all persistent data in the app", type: "build" },
+      { label: "Create chat_history table", note: "Store role, content, timestamp, project_id", type: "build" },
+      { label: "Create user_profile table", note: "Name, preferences, created_at", type: "build" },
+    ]
+  },
+  {
+    title: "Memory blocks",
+    color: "#185FA5",
+    items: [
+      { label: "Create memories table in SQLite", note: "id, label, category, content, is_active", type: "build" },
+      { label: "Build memory block UI (add / edit / delete)", note: "SwiftUI list with toggle per block", type: "feature" },
+      { label: "Build context_builder function in Swift", note: "Fetches active memories → injects into system prompt", type: "build" },
+      { label: "Test memory injection with LLM", note: "Verify Gemma respects injected facts", type: "build" },
+    ]
+  },
+  {
+    title: "NLEmbedding RAG",
+    color: "#185FA5",
+    items: [
+      { label: "Create embeddings table in SQLite", note: "id, source_id, source_type, vector blob, content", type: "build" },
+      { label: "Embed all memory blocks on save", note: "Use NLEmbedding to generate vectors", type: "build" },
+      { label: "Add semantic retrieval to context_builder", note: "Top-k relevant memories per conversation turn", type: "build" },
+    ]
+  },
+  {
+    title: "Project folders",
+    color: "#3B6D11",
+    items: [
+      { label: "Create projects table in SQLite", note: "id, name, system_prompt, created_at", type: "build" },
+      { label: "Build project list UI", note: "SwiftUI NavigationSplitView or List", type: "feature" },
+      { label: "Build per-project system prompt editor", note: "Multiline text field, saved on change", type: "feature" },
+      { label: "Add project-scoped memory blocks", note: "memories table gets optional project_id FK", type: "feature" },
+      { label: "Switch active project in context_builder", note: "Loads project prompt + project memories on session open", type: "build" },
+    ]
+  },
+  {
+    title: "File attachments",
+    color: "#3B6D11",
+    items: [
+      { label: "Create files table in SQLite", note: "id, project_id, filename, type, path, created_at", type: "build" },
+      { label: "Add iOS file picker (UIDocumentPickerViewController)", note: "Support txt, pdf, jpg, png, mp3, m4a, csv, json", type: "feature" },
+      { label: "Copy picked files to app's Documents directory", note: "Store relative path in SQLite", type: "build" },
+      { label: "Show attached files list per project", note: "SwiftUI with delete swipe action", type: "feature" },
+    ]
+  },
+  {
+    title: "File reading",
+    color: "#3B6D11",
+    items: [
+      { label: "Plain text / JSON / CSV / code reader", note: "Swift String(contentsOf:) — trivial", type: "build" },
+      { label: "PDF text extractor via PDFKit", note: "System framework — iterate pages, extract string", type: "build" },
+      { label: "Image OCR via Vision framework", note: "VNRecognizeTextRequest on UIImage", type: "build" },
+      { label: "Audio transcription via WhisperKit", note: "Reuse STT model — feed file instead of mic", type: "build" },
+      { label: "Chunk file content and embed via NLEmbedding", note: "Store chunks in embeddings table, retrieve via RAG", type: "build" },
+      { label: "Add .docx / .xlsx support (optional)", note: "Third-party lib or convert-to-PDF on import", type: "feature" },
+    ]
+  },
+  {
+    title: "Polish & testing",
+    color: "#854F0B",
+    items: [
+      { label: "Add loading states during inference", note: "Typing indicator while Gemma generates", type: "feature" },
+      { label: "Handle context window overflow gracefully", note: "Trim oldest history when approaching 8192 tokens", type: "build" },
+      { label: "Test full pipeline on-device (not simulator)", note: "RAM usage, inference speed, VAD accuracy", type: "build" },
+      { label: "Profile memory footprint", note: "Target under 4GB total — leave headroom for iOS", type: "build" },
+      { label: "Add haptic feedback on send / receive", note: "UIImpactFeedbackGenerator", type: "feature" },
+    ]
+  },
+];
+
+let state = {};
+
+function save() {
+  try { localStorage.setItem('ai_checklist_v2', JSON.stringify(state)); } catch(e) {}
+}
+function load() {
+  try { const d = localStorage.getItem('ai_checklist_v2'); if (d) state = JSON.parse(d); } catch(e) {}
+}
+
+function toggle(id) {
+  state[id] = !state[id];
+  save();
+  render();
+}
+
+function resetAll() {
+  if (!confirm('Reset all checkboxes?')) return;
+  state = {};
+  save();
+  render();
+}
+
+function render() {
+  const container = document.getElementById('checklist');
+  let total = 0, done = 0;
+  let html = '';
+
+  sections.forEach((sec, si) => {
+    let secDone = 0;
+    let itemsHtml = '';
+    sec.items.forEach((item, ii) => {
+      const id = `${si}-${ii}`;
+      const checked = !!state[id];
+      total++;
+      if (checked) { done++; secDone++; }
+      itemsHtml += `<div class="item${checked ? ' done' : ''}" onclick="toggle('${id}')">
+        <div class="checkbox">
+          <svg class="checkmark" viewBox="0 0 10 8" fill="none">
+            <path d="M1 4L3.5 6.5L9 1" stroke="white" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </div>
+        <div class="item-body">
+          <div class="item-label">${item.label}<span class="tag tag-${item.type}">${item.type}</span></div>
+          <div class="item-note">${item.note}</div>
+        </div>
+      </div>`;
+    });
+
+    html += `<div class="section">
+      <div class="section-header">
+        <div class="section-dot" style="background:${sec.color}"></div>
+        <span class="section-title">${sec.title}</span>
+        <span class="section-count">${secDone} / ${sec.items.length}</span>
+      </div>
+      ${itemsHtml}
+    </div>`;
+  });
+
+  container.innerHTML = html;
+  const pct = total ? Math.round(done / total * 100) : 0;
+  document.getElementById('prog-fill').style.width = pct + '%';
+  document.getElementById('prog-label').textContent = done + ' / ' + total;
+}
+
+load();
+render();
+</script>
+</body>
+</html>

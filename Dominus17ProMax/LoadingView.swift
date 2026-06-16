@@ -1,0 +1,164 @@
+import SwiftUI
+
+// MARK: - Splash loading screen (blocks all interaction until fully ready)
+
+struct SplashLoadingView: View {
+    let gemmaProgress: Double
+    let gemmaStatus: String
+    let whisperProgress: Double
+    let whisperStatus: String
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+
+            VStack(spacing: 0) {
+                Spacer()
+
+                // App title
+                VStack(spacing: 10) {
+                    Text("Dominus")
+                        .font(.system(size: 52, weight: .bold, design: .rounded))
+                        .foregroundStyle(.white)
+                    Text("On-device AI assistant")
+                        .font(.subheadline)
+                        .foregroundStyle(.white.opacity(0.4))
+                }
+
+                Spacer()
+
+                // "Please Wait" spinner — always visible until both models are ready
+                VStack(spacing: 10) {
+                    ProgressView()
+                        .scaleEffect(1.4)
+                        .tint(.white.opacity(0.7))
+                    Text("Please Wait\u{2026}")
+                        .font(.footnote.weight(.medium))
+                        .foregroundStyle(.white.opacity(0.55))
+                        .kerning(0.5)
+                }
+                .padding(.bottom, 32)
+
+                // Per-component progress bars
+                VStack(spacing: 14) {
+                    LoadingBarView(
+                        icon: "cpu.fill",
+                        label: "Language Model",
+                        status: gemmaStatus,
+                        progress: gemmaProgress
+                    )
+                    LoadingBarView(
+                        icon: "waveform",
+                        label: "Voice Recognition",
+                        status: whisperStatus,
+                        progress: whisperProgress
+                    )
+                    LoadingBarView(
+                        icon: "memorychip",
+                        label: "Memory & Embeddings",
+                        status: gemmaProgress >= 1.0 ? "Ready" : "Waiting for model\u{2026}",
+                        progress: gemmaProgress >= 1.0 ? 1.0 : gemmaProgress * 0.6
+                    )
+                }
+                .padding(.horizontal, 28)
+                .padding(.bottom, 64)
+            }
+        }
+    }
+}
+
+// MARK: - In-use activity pill (transcribing, thinking, etc.)
+
+struct StatusPillView: View {
+    let icon: String
+    let message: String
+
+    var body: some View {
+        HStack(spacing: 8) {
+            ProgressView()
+                .scaleEffect(0.72)
+                .tint(.white)
+            Image(systemName: icon)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.7))
+            Text(message)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.white)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(
+            Capsule()
+                .fill(Color.black.opacity(0.72))
+                .overlay(Capsule().stroke(Color.white.opacity(0.1), lineWidth: 0.5))
+        )
+        .shadow(color: .black.opacity(0.3), radius: 6, x: 0, y: 2)
+    }
+}
+
+// MARK: - Per-component loading pill
+
+struct LoadingBarView: View {
+    let icon: String
+    let label: String
+    let status: String
+    let progress: Double
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 10) {
+            Image(systemName: icon)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.85))
+                .frame(width: 18)
+
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 4) {
+                    Text(label)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.white)
+                    Spacer()
+                    Text("\(Int((progress * 100).rounded()))%")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.white.opacity(0.6))
+                        .animation(nil, value: progress)
+                }
+
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        Capsule()
+                            .fill(Color.white.opacity(0.10))
+                            .frame(height: 3)
+                        Capsule()
+                            .fill(
+                                LinearGradient(
+                                    colors: [.blue, .cyan],
+                                    startPoint: .leading,
+                                    endPoint: .trailing
+                                )
+                            )
+                            .frame(width: max(0, geo.size.width * progress), height: 3)
+                            .animation(.linear(duration: 0.12), value: progress)
+                    }
+                }
+                .frame(height: 3)
+
+                if !status.isEmpty {
+                    Text(status)
+                        .font(.caption2)
+                        .foregroundStyle(.white.opacity(0.45))
+                        .lineLimit(1)
+                }
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color.white.opacity(0.06))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(Color.white.opacity(0.08), lineWidth: 0.5)
+                )
+        )
+    }
+}

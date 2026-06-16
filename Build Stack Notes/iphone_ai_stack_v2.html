@@ -1,0 +1,154 @@
+
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+.stack { padding: 1.5rem 0; font-family: var(--font-sans); }
+.section { margin-bottom: 1.5rem; }
+.section-title { font-size: 11px; font-weight: 500; color: var(--color-text-secondary); letter-spacing: 0.06em; text-transform: uppercase; margin-bottom: 10px; padding-left: 2px; }
+.row { display: grid; grid-template-columns: 28px 1fr auto auto; align-items: center; gap: 10px; padding: 10px 14px; background: var(--color-background-primary); border: 0.5px solid var(--color-border-tertiary); border-radius: var(--border-radius-md); margin-bottom: 6px; }
+.row-icon { width: 28px; height: 28px; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 14px; flex-shrink: 0; }
+.row-body { min-width: 0; }
+.row-name { font-size: 13px; font-weight: 500; color: var(--color-text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.row-desc { font-size: 11px; color: var(--color-text-secondary); margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.row-size { font-size: 11px; color: var(--color-text-secondary); font-family: var(--font-mono); white-space: nowrap; }
+.badge { font-size: 10px; font-weight: 500; padding: 2px 7px; border-radius: 20px; white-space: nowrap; }
+.b-core { background: #E6F1FB; color: #0C447C; }
+.b-new { background: #EAF3DE; color: #27500A; }
+.b-sys { background: #F1EFE8; color: #444441; }
+.b-expanded { background: #EEEDFE; color: #3C3489; }
+.b-optional { background: #FAEEDA; color: #633806; }
+.b-updated { background: #FCEBEB; color: #791F1F; }
+.divider { height: 0.5px; background: var(--color-border-tertiary); margin: 1.5rem 0; }
+.legend { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 1.5rem; }
+.total-bar { display: grid; grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); gap: 8px; }
+.stat { background: var(--color-background-secondary); border-radius: var(--border-radius-md); padding: 10px 14px; }
+.stat-n { font-size: 20px; font-weight: 500; color: var(--color-text-primary); }
+.stat-l { font-size: 11px; color: var(--color-text-secondary); margin-top: 1px; }
+.highlight-row { border: 1.5px solid #F09595; }
+</style>
+
+<div class="stack">
+  <h2 style="position:absolute;width:1px;height:1px;overflow:hidden;">iPhone AI app full stack — updated with Gemma 2 2B</h2>
+
+  <div class="legend">
+    <span class="badge b-updated">Updated</span>
+    <span class="badge b-core">Core</span>
+    <span class="badge b-new">New</span>
+    <span class="badge b-expanded">Expanded</span>
+    <span class="badge b-sys">System — 0 MB</span>
+    <span class="badge b-optional">Optional</span>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Inference</div>
+    <div class="row highlight-row">
+      <div class="row-icon" style="background:#FCEBEB;">🧠</div>
+      <div class="row-body"><div class="row-name">gemma-2-2b-it-Q4_K_M.gguf</div><div class="row-desc">Core LLM — instruction-tuned, runs via llama.cpp</div></div>
+      <div class="row-size">~1.6 GB</div>
+      <span class="badge b-updated">Updated</span>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Speech</div>
+    <div class="row">
+      <div class="row-icon" style="background:#EAF3DE;">🎙</div>
+      <div class="row-body"><div class="row-name">WhisperKit</div><div class="row-desc">On-device STT — replaces SFSpeechRecognizer</div></div>
+      <div class="row-size">~70–600 MB</div>
+      <span class="badge b-new">New</span>
+    </div>
+    <div class="row">
+      <div class="row-icon" style="background:#F1EFE8;">🔊</div>
+      <div class="row-body"><div class="row-name">AVSpeechSynthesizer</div><div class="row-desc">TTS — system, free</div></div>
+      <div class="row-size">0 MB</div>
+      <span class="badge b-sys">System</span>
+    </div>
+    <div class="row">
+      <div class="row-icon" style="background:#EAF3DE;">〰</div>
+      <div class="row-body"><div class="row-name">Silero VAD tiny</div><div class="row-desc">Voice activity detection — smarter silence handling</div></div>
+      <div class="row-size">~2 MB</div>
+      <span class="badge b-new">New</span>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Memory &amp; Storage</div>
+    <div class="row">
+      <div class="row-icon" style="background:#EEEDFE;">🗄</div>
+      <div class="row-body"><div class="row-name">SQLite — core database</div><div class="row-desc">Memories, user profile, projects, file refs, chat history</div></div>
+      <div class="row-size">~5–20 MB</div>
+      <span class="badge b-expanded">Expanded</span>
+    </div>
+    <div class="row">
+      <div class="row-icon" style="background:#EEEDFE;">🔍</div>
+      <div class="row-body"><div class="row-name">NLEmbedding RAG</div><div class="row-desc">Semantic search over memories + file chunks</div></div>
+      <div class="row-size">~52 MB</div>
+      <span class="badge b-expanded">Expanded</span>
+    </div>
+    <div class="row">
+      <div class="row-icon" style="background:#EAF3DE;">💡</div>
+      <div class="row-body"><div class="row-name">Persistent memory blocks</div><div class="row-desc">User-written facts injected into system prompt</div></div>
+      <div class="row-size">~0 MB</div>
+      <span class="badge b-new">New</span>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Projects</div>
+    <div class="row">
+      <div class="row-icon" style="background:#EAF3DE;">📁</div>
+      <div class="row-body"><div class="row-name">Project folders</div><div class="row-desc">Per-project system prompt, memories, and file attachments</div></div>
+      <div class="row-size">~0 MB</div>
+      <span class="badge b-new">New</span>
+    </div>
+    <div class="row">
+      <div class="row-icon" style="background:#EAF3DE;">📎</div>
+      <div class="row-body"><div class="row-name">File attachments</div><div class="row-desc">iOS file picker — attach files per project</div></div>
+      <div class="row-size">~0 MB</div>
+      <span class="badge b-new">New</span>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">File reading</div>
+    <div class="row">
+      <div class="row-icon" style="background:#F1EFE8;">📄</div>
+      <div class="row-body"><div class="row-name">Plain text / JSON / CSV / code</div><div class="row-desc">Native Swift string reading</div></div>
+      <div class="row-size">0 MB</div>
+      <span class="badge b-sys">System</span>
+    </div>
+    <div class="row">
+      <div class="row-icon" style="background:#F1EFE8;">📕</div>
+      <div class="row-body"><div class="row-name">PDFKit</div><div class="row-desc">PDF text extraction — built into iOS</div></div>
+      <div class="row-size">0 MB</div>
+      <span class="badge b-sys">System</span>
+    </div>
+    <div class="row">
+      <div class="row-icon" style="background:#F1EFE8;">🖼</div>
+      <div class="row-body"><div class="row-name">Vision framework (OCR)</div><div class="row-desc">Read text from images — built into iOS</div></div>
+      <div class="row-size">0 MB</div>
+      <span class="badge b-sys">System</span>
+    </div>
+    <div class="row">
+      <div class="row-icon" style="background:#EAF3DE;">🎧</div>
+      <div class="row-body"><div class="row-name">WhisperKit (audio files)</div><div class="row-desc">Transcribe uploaded audio — same model as STT</div></div>
+      <div class="row-size">shared</div>
+      <span class="badge b-new">New</span>
+    </div>
+    <div class="row">
+      <div class="row-icon" style="background:#FAEEDA;">📊</div>
+      <div class="row-body"><div class="row-name">.docx / .xlsx parser</div><div class="row-desc">Third-party lib or convert-to-PDF workaround</div></div>
+      <div class="row-size">~2–5 MB</div>
+      <span class="badge b-optional">Optional</span>
+    </div>
+  </div>
+
+  <div class="divider"></div>
+
+  <div class="total-bar">
+    <div class="stat"><div class="stat-n">~1.6 GB</div><div class="stat-l">Core model size</div></div>
+    <div class="stat"><div class="stat-n">~730 MB</div><div class="stat-l">Supporting stack</div></div>
+    <div class="stat"><div class="stat-n">~2.4 GB</div><div class="stat-l">Total footprint</div></div>
+    <div class="stat"><div class="stat-n">6 GB</div><div class="stat-l">iPhone 13 PM RAM</div></div>
+  </div>
+
+</div>
