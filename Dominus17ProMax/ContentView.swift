@@ -126,9 +126,14 @@ struct ContentView: View {
     /// Resets to 0 whenever activity resumes.
     @State private var voiceIdleSeconds: TimeInterval = 0
 
-    private let defaultVoiceAutoSendDelay: TimeInterval = 1.8
-    private let fastVoiceAutoSendDelay: TimeInterval = 1.5
-    private let shortVoiceAutoSendDelay: TimeInterval = 2.0
+    // Tuned for whisper-only autosend: the gate is now "transcript hasn't
+    // changed for X seconds". Whisper itself updates the transcript every
+    // ~0.5–1.0s, so X must stay above ~1.0s — anything lower fires in the
+    // natural gap between Whisper's own chunks and cuts the user off
+    // mid-sentence.
+    private let defaultVoiceAutoSendDelay: TimeInterval = 1.0
+    private let fastVoiceAutoSendDelay: TimeInterval = 1.0
+    private let shortVoiceAutoSendDelay: TimeInterval = 1.0
     private let voiceActivityGraceDelay: TimeInterval = 0.8
     /// Minimum continuous mic silence required before auto-send fires.
     /// The transcript can plateau mid-sentence (Whisper passes are 1s apart),
@@ -748,31 +753,25 @@ struct ContentView: View {
             // a send happens anyway, there's a second send path we missed.
             print("⏱ autosend FIRED — delay=\(delay)s, transcript='\(transcriptSnapshot)', lastAudioActivityAt=\(String(describing: whisper.lastAudioActivityAt))")
 
-            // If the transcript is still growing, the user is still speaking — wait again.
-            if latestVisibleVoiceTranscript != transcriptSnapshot ||
-               whisper.liveTranscript != rawSnapshot {
-                print("📝 transcript still growing — rescheduling")
+            // If the VISIBLE transcript is still growing, the user is still
+            // speaking — wait again. We deliberately do NOT compare the raw
+            // `liveTranscript` here: it mutates on every ambient cue Whisper
+            // emits ([BLANK_AUDIO], [BREATHING], cough, typing, blowing into
+            // the mic, etc.), which would block autosend forever in noisy
+            // environments. The visible transcript already strips those.
+            if latestVisibleVoiceTranscript != transcriptSnapshot {
+                print("📝 visible transcript still growing — rescheduling")
                 scheduleVoiceAutoSend()
                 return
             }
 
-            // The transcript can plateau mid-sentence while Whisper waits for its
-            // next 1s pass — the user is still talking but the snapshot looks
-            // stable. Require continuous mic silence too so we don't cut off
-            // mid-thought.
-            let activityAt = whisper.lastAudioActivityAt ?? lastVoiceActivityAt
-            if let activityAt {
-                let silenceElapsed = Date().timeIntervalSince(activityAt)
-                if silenceElapsed < voiceAutoSendSilenceRequirement {
-                    print("🔊 audio active \(silenceElapsed)s ago < \(voiceAutoSendSilenceRequirement)s — rescheduling")
-                    scheduleVoiceAutoSend()
-                    return
-                }
-                print("🔇 silence OK — \(silenceElapsed)s since last activity, sending")
-            } else {
-                print("🔇 no activity timestamp — sending")
-            }
-
+            // Whisper-only autosend: gate removed. The transcript-stability check
+            // above is the sole "user is done talking" signal. Fan/wind/AC
+            // ambient noise no longer blocks sending. Downside: a mid-sentence
+            // pause longer than `adaptiveVoiceAutoSendDelay()` will send
+            // prematurely — fall back to the audio gate (adaptive noise floor)
+            // if this becomes a problem.
+            print("🔇 whisper-only autosend — transcript stable, sending")
             submitVoiceRecording()
         }
     }

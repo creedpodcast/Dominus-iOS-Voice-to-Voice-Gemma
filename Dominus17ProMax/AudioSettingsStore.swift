@@ -24,25 +24,6 @@ final class AudioSettingsStore: ObservableObject {
         static let selectedVoiceIdentifier = "speech.selectedVoiceIdentifier"
         static let speechRate = "speech.rate"
         static let speechPitch = "speech.pitch"
-        static let voiceEngine = "speech.voiceEngine"
-        static let kokoroVoice = "speech.kokoroVoice"
-    }
-
-    /// Which TTS backend drives spoken AI responses. `.system` uses Apple's
-    /// AVSpeechSynthesizer (always available). `.kokoro` uses on-device Kokoro
-    /// 82M via Core ML — requires the Kokoro Swift package to be linked and a
-    /// voice file to be available on disk. If Kokoro can't initialise the app
-    /// falls back to .system automatically.
-    enum VoiceEngine: String, CaseIterable, Identifiable {
-        case system
-        case kokoro
-        var id: String { rawValue }
-        var displayName: String {
-            switch self {
-            case .system: return "System (Apple)"
-            case .kokoro: return "Kokoro 82M"
-            }
-        }
     }
 
     private enum Defaults {
@@ -172,17 +153,6 @@ final class AudioSettingsStore: ObservableObject {
         didSet { save(clampSpeechPitch(speechPitch), forKey: Keys.speechPitch) }
     }
 
-    /// Which TTS backend SpeechManager routes through.
-    @Published var voiceEngine: VoiceEngine {
-        didSet { defaults.set(voiceEngine.rawValue, forKey: Keys.voiceEngine) }
-    }
-
-    /// Voice name passed to Kokoro's pipeline (e.g. "af_heart", "am_michael").
-    /// Ignored when `voiceEngine == .system`.
-    @Published var kokoroVoice: String {
-        didSet { defaults.set(kokoroVoice, forKey: Keys.kokoroVoice) }
-    }
-
     @Published var selectedVoiceIdentifier: String? {
         didSet {
             if let id = selectedVoiceIdentifier {
@@ -230,9 +200,6 @@ final class AudioSettingsStore: ObservableObject {
         selectedVoiceIdentifier = defaults.string(forKey: Keys.selectedVoiceIdentifier)
         speechRate = Self.loadSpeechRate(defaults: defaults)
         speechPitch = Self.loadSpeechPitch(defaults: defaults)
-        voiceEngine = (defaults.string(forKey: Keys.voiceEngine)
-            .flatMap(VoiceEngine.init(rawValue:))) ?? .system
-        kokoroVoice = defaults.string(forKey: Keys.kokoroVoice) ?? "af_heart"
     }
 
     /// Apply a pinch-to-zoom delta to the orb scale, clamped to the allowed
@@ -258,8 +225,6 @@ final class AudioSettingsStore: ObservableObject {
         selectedVoiceIdentifier = nil
         speechRate = Defaults.speechRate
         speechPitch = Defaults.speechPitch
-        voiceEngine = .system
-        kokoroVoice = "af_heart"
     }
 
     func voiceModeVolume(for resourceName: String) -> Double {

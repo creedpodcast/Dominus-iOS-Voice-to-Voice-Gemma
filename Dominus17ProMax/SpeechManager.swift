@@ -78,47 +78,9 @@ final class SpeechManager: NSObject, ObservableObject {
     /// Fires once when ALL queued utterances have finished playing.
     var onAllSpeechFinished: (() -> Void)?
 
-    private var kokoroBridges: Set<AnyCancellable> = []
-
     override init() {
         super.init()
         preferredVoice = resolvePreferredVoice()
-        // Mirror Kokoro's state into our @Published flags so existing
-        // observers (orb visualiser, listening-resume gates) work the same
-        // way regardless of which backend is producing audio.
-        let kokoro = KokoroTTSEngine.shared
-        kokoro.onAllSpeechFinished = { [weak self] in
-            self?.onAllSpeechFinished?()
-        }
-        kokoro.$isSpeaking
-            .sink { [weak self] speaking in
-                guard let self,
-                      AudioSettingsStore.shared.voiceEngine == .kokoro else { return }
-                self.isSpeaking = speaking
-            }
-            .store(in: &kokoroBridges)
-        kokoro.$isStartingPlayback
-            .sink { [weak self] starting in
-                guard let self,
-                      AudioSettingsStore.shared.voiceEngine == .kokoro else { return }
-                self.isStartingPlayback = starting
-            }
-            .store(in: &kokoroBridges)
-        kokoro.$ttsAmplitude
-            .sink { [weak self] amp in
-                guard let self,
-                      AudioSettingsStore.shared.voiceEngine == .kokoro else { return }
-                self.ttsAmplitude = amp
-            }
-            .store(in: &kokoroBridges)
-    }
-
-    /// True when the user has chosen Kokoro AND the pipeline is actually
-    /// available. Reads from AudioSettingsStore on every call so a settings
-    /// toggle takes effect immediately on the next utterance.
-    private var useKokoro: Bool {
-        AudioSettingsStore.shared.voiceEngine == .kokoro &&
-            KokoroTTSEngine.shared.isAvailable
     }
 
     /// Re-resolve the preferred voice from settings + installed voice list.
@@ -160,9 +122,6 @@ final class SpeechManager: NSObject, ObservableObject {
             preferredVoice = resolvePreferredVoice()
         }
         prepareAudioSessionForSpeech()
-        if AudioSettingsStore.shared.voiceEngine == .kokoro {
-            KokoroTTSEngine.shared.prepareForVoiceMode()
-        }
     }
 
     /// Pre-load the AVSpeechSynthesizer voice file at app launch so the very first
@@ -188,10 +147,6 @@ final class SpeechManager: NSObject, ObservableObject {
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             _ = warmupSynth   // keep alive until here
         }
-
-        if AudioSettingsStore.shared.voiceEngine == .kokoro {
-            KokoroTTSEngine.shared.prewarmVoice()
-        }
     }
 
     func enqueue(_ text: String) {
@@ -199,14 +154,6 @@ final class SpeechManager: NSObject, ObservableObject {
         guard hasSpeakableContent(cleaned) else { return }
 
         prepareAudioSessionForSpeech()
-
-        if useKokoro {
-            KokoroTTSEngine.shared.enqueue(
-                cleaned,
-                voice: AudioSettingsStore.shared.kokoroVoice
-            )
-            return
-        }
 
         let utt    = AVSpeechUtterance(string: cleaned)
         utt.rate   = currentSpeechRate()
@@ -243,7 +190,6 @@ final class SpeechManager: NSObject, ObservableObject {
         if playerNode.isPlaying {
             playerNode.stop()
         }
-        KokoroTTSEngine.shared.stopAndClear()
     }
 
     // MARK: - Engine pipeline

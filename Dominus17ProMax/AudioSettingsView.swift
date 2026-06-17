@@ -54,41 +54,19 @@ struct AudioSettingsView: View {
                 }
 
                 Section {
-                    Picker(selection: $settings.voiceEngine) {
-                        ForEach(AudioSettingsStore.VoiceEngine.allCases) { engine in
-                            Text(engine.displayName).tag(engine)
-                        }
+                    NavigationLink {
+                        VoicePickerScreen()
                     } label: {
-                        Label("Voice engine", systemImage: "waveform.path.ecg")
-                    }
-
-                    if settings.voiceEngine == .system {
-                        NavigationLink {
-                            VoicePickerScreen()
-                        } label: {
-                            HStack {
-                                Label("AI voice", systemImage: "person.wave.2")
-                                Spacer()
-                                Text(currentVoiceDisplayName())
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
-                            }
-                        }
-                    } else {
-                        Picker(selection: $settings.kokoroVoice) {
-                            ForEach(KokoroVoiceCatalog.voices, id: \.id) { v in
-                                Text(v.displayName).tag(v.id)
-                            }
-                        } label: {
-                            Label("Kokoro voice", systemImage: "person.wave.2")
+                        HStack {
+                            Label("AI voice", systemImage: "person.wave.2")
+                            Spacer()
+                            Text(currentVoiceDisplayName())
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
                         }
                     }
                 } footer: {
-                    if settings.voiceEngine == .system {
-                        Text("Open to browse every English voice installed on this device, preview, and adjust speed and pitch.")
-                    } else {
-                        Text("Kokoro 82M runs on-device via the Apple Neural Engine. First use downloads the chosen voice (~few MB) into app storage.")
-                    }
+                    Text("Open to browse every English voice installed on this device, preview, and adjust speed and pitch.")
                 }
 
                 Section {
@@ -261,31 +239,6 @@ struct AudioSettingsView: View {
         }
         return "\(minutes)m \(remainder)s"
     }
-}
-
-// MARK: - Kokoro voice catalog
-
-/// Curated subset of the 54 Kokoro voices — the ones that work well for an
-/// English-speaking AI assistant. The `id` is the voice name passed to
-/// `KPipeline.synthesize(text:voice:)`; the display name is what the user
-/// sees in the picker. To expose more voices, add them here.
-enum KokoroVoiceCatalog {
-    struct Voice {
-        let id: String
-        let displayName: String
-    }
-    static let voices: [Voice] = [
-        Voice(id: "af_heart",   displayName: "Heart (US, female)"),
-        Voice(id: "af_bella",   displayName: "Bella (US, female)"),
-        Voice(id: "af_nicole",  displayName: "Nicole (US, female)"),
-        Voice(id: "af_sarah",   displayName: "Sarah (US, female)"),
-        Voice(id: "am_michael", displayName: "Michael (US, male)"),
-        Voice(id: "am_adam",    displayName: "Adam (US, male)"),
-        Voice(id: "am_eric",    displayName: "Eric (US, male)"),
-        Voice(id: "bf_emma",    displayName: "Emma (UK, female)"),
-        Voice(id: "bm_george",  displayName: "George (UK, male)"),
-        Voice(id: "bm_lewis",   displayName: "Lewis (UK, male)")
-    ]
 }
 
 // MARK: - Voice picker screen
