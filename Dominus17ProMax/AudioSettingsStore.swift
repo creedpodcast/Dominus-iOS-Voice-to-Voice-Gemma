@@ -24,6 +24,8 @@ final class AudioSettingsStore: ObservableObject {
         static let selectedVoiceIdentifier = "speech.selectedVoiceIdentifier"
         static let speechRate = "speech.rate"
         static let speechPitch = "speech.pitch"
+        static let userResponseConcludedVolume = "audio.userResponseConcludedVolume"
+        static let aiResponseConcludedVolume   = "audio.aiResponseConcludedVolume"
     }
 
     private enum Defaults {
@@ -54,6 +56,10 @@ final class AudioSettingsStore: ObservableObject {
         // 1.05 brightens the voice just enough to fix the "all voices sound deep"
         // complaint without making them sound artificial.
         static let speechPitch: Double = 1.05
+        // Match the existing voice-mode cue defaults so the new "round
+        // conclusion" cues are audible but don't clip over the AI's voice.
+        static let userResponseConcludedVolume = 0.35
+        static let aiResponseConcludedVolume   = 0.35
     }
 
     // Apple's documented bounds for AVSpeechUtterance.
@@ -83,6 +89,18 @@ final class AudioSettingsStore: ObservableObject {
 
     @Published var voiceModeDeactivationVolume: Double {
         didSet { save(clamp(voiceModeDeactivationVolume), forKey: Keys.voiceModeDeactivationVolume) }
+    }
+
+    /// Volume of UserVoiceResponseConcluded.wav — plays right after the user's
+    /// transcribed message is sent, before the AI speaks.
+    @Published var userResponseConcludedVolume: Double {
+        didSet { save(clamp(userResponseConcludedVolume), forKey: Keys.userResponseConcludedVolume) }
+    }
+
+    /// Volume of AIVoiceResponseConcluded.wav — plays after the AI finishes
+    /// speaking, just before the mic resumes listening.
+    @Published var aiResponseConcludedVolume: Double {
+        didSet { save(clamp(aiResponseConcludedVolume), forKey: Keys.aiResponseConcludedVolume) }
     }
 
     @Published var aiVoiceResponseVolume: Double {
@@ -182,6 +200,8 @@ final class AudioSettingsStore: ObservableObject {
         voiceModeActivationVolume = Self.load(Keys.voiceModeActivationVolume, fallback: Defaults.voiceModeActivationVolume, defaults: defaults)
         voiceModeDeactivationVolume = Self.load(Keys.voiceModeDeactivationVolume, fallback: Defaults.voiceModeDeactivationVolume, defaults: defaults)
         aiVoiceResponseVolume = Self.load(Keys.aiVoiceResponseVolume, fallback: Defaults.aiVoiceResponseVolume, defaults: defaults)
+        userResponseConcludedVolume = Self.load(Keys.userResponseConcludedVolume, fallback: Defaults.userResponseConcludedVolume, defaults: defaults)
+        aiResponseConcludedVolume   = Self.load(Keys.aiResponseConcludedVolume,   fallback: Defaults.aiResponseConcludedVolume,   defaults: defaults)
         voiceModeInactivityTimeout = Self.loadTimeout(Keys.voiceModeInactivityTimeout, fallback: Defaults.voiceModeInactivityTimeout, defaults: defaults)
         hapticsEnabled = defaults.object(forKey: Keys.hapticsEnabled) != nil
             ? defaults.bool(forKey: Keys.hapticsEnabled)
@@ -213,6 +233,8 @@ final class AudioSettingsStore: ObservableObject {
         voiceModeActivationVolume = Defaults.voiceModeActivationVolume
         voiceModeDeactivationVolume = Defaults.voiceModeDeactivationVolume
         aiVoiceResponseVolume = Defaults.aiVoiceResponseVolume
+        userResponseConcludedVolume = Defaults.userResponseConcludedVolume
+        aiResponseConcludedVolume   = Defaults.aiResponseConcludedVolume
         voiceModeInactivityTimeout = Defaults.voiceModeInactivityTimeout
         hapticsEnabled = Defaults.hapticsEnabled
         orbScale = Defaults.orbScale
@@ -233,6 +255,10 @@ final class AudioSettingsStore: ObservableObject {
             return voiceModeActivationVolume
         case "DeactivateVoicetoVoice":
             return voiceModeDeactivationVolume
+        case "UserVoiceResponseConcluded":
+            return userResponseConcludedVolume
+        case "AIVoiceResponseConcluded":
+            return aiResponseConcludedVolume
         default:
             return max(voiceModeActivationVolume, voiceModeDeactivationVolume)
         }

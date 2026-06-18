@@ -54,6 +54,32 @@ struct AudioSettingsView: View {
                 }
 
                 Section {
+                    volumeSlider(
+                        title: "User message sent",
+                        value: $settings.userResponseConcludedVolume
+                    )
+
+                    Button {
+                        playSound(named: "UserVoiceResponseConcluded", volume: settings.userResponseConcludedVolume)
+                    } label: {
+                        Label("Test User Sent Sound", systemImage: "arrow.up.circle")
+                    }
+
+                    volumeSlider(
+                        title: "AI reply finished",
+                        value: $settings.aiResponseConcludedVolume
+                    )
+
+                    Button {
+                        playSound(named: "AIVoiceResponseConcluded", volume: settings.aiResponseConcludedVolume)
+                    } label: {
+                        Label("Test AI Done Sound", systemImage: "checkmark.circle")
+                    }
+                } footer: {
+                    Text("Plays right after you stop talking (while Dominus is thinking) and again when Dominus finishes speaking — just before the mic resumes.")
+                }
+
+                Section {
                     NavigationLink {
                         VoicePickerScreen()
                     } label: {

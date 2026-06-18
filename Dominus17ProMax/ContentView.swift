@@ -103,6 +103,29 @@ struct ContentView: View {
     /// before the orb shows 😴.
     private var sleepyOrbDelay: TimeInterval { 15 }
     @State private var isInterruptRestartPending = false
+
+    /// One-shot guards so the user/AI cue sound effects fire at most once per
+    /// round. The three "AI finished → resume listening" paths are intentional
+    /// safety nets; without this flag they'd each play AIVoiceResponseConcluded
+    /// for the same response. Same idea for the user-message cue if multiple
+    /// send paths fire in quick succession.
+    @State private var didPlayUserConclusionCueThisRound = false
+    @State private var didPlayAIConclusionCueThisRound   = false
+
+    /// Force-resume listening if the normal "AI finished" paths haven't put
+    /// us back in `.listening` this many seconds after generation completes.
+    /// Catches the case where `SpeechManager.isSpeaking` is stuck true
+    /// because the TTS engine errored and the buffer-completion callback
+    /// never fires. Cancelled the moment listening genuinely resumes.
+    @State private var aiTalkingWatchdogTask: Task<Void, Never>?
+    /// How long the speaker must be SILENT (ttsAmplitude near zero) after
+    /// generation has completed before we force-resume listening. Real
+    /// ongoing TTS keeps amplitude active, so a long multi-sentence reply
+    /// never trips this; only a stuck-`isSpeaking`-but-no-audio state does.
+    private let aiTalkingSilenceRequirement: TimeInterval = 3.0
+    /// Below this RMS the speaker is considered idle. Tuned to ignore the
+    /// noise floor inside SpeechManager's amplitude tap.
+    private let aiTalkingSilenceAmplitudeThreshold: Float = 0.02
     @State private var latestVisibleVoiceTranscript = ""
     @State private var latestVisibleVoiceTranscriptUpdatedAt: Date?
     @State private var lastVoiceActivityAt: Date?
@@ -250,8 +273,15 @@ struct ContentView: View {
         .onChange(of: store.isGenerating) { generating in
             guard pttState == .aiTalking else { return }
             guard !isInterruptRestartPending else { return }
+            if !generating {
+                // Arm the watchdog unconditionally so we never sit forever in
+                // .aiTalking if isSpeaking is stuck true (the pre-existing TTS
+                // engine bug). The normal resume paths cancel this if they
+                // win first.
+                armAITalkingWatchdog()
+            }
             if !generating && !SpeechManager.shared.isSpeaking {
-                beginListening()
+                beginListeningAfterAIResponse()
             }
         }
         .onChange(of: store.silentAmbientEventCount) { _ in
@@ -326,7 +356,7 @@ struct ContentView: View {
                 guard self.pttState == .aiTalking else { return } // re-check after sleep
                 guard !self.isInterruptRestartPending else { return }
                 if !self.store.isGenerating {
-                    self.beginListening()
+                    self.beginListeningAfterAIResponse()
                 }
             }
         }
@@ -469,9 +499,82 @@ struct ContentView: View {
         }
     }
 
+    /// Use when the AI has just finished a normal reply and we're auto-
+    /// resuming listening. Plays AIVoiceResponseConcluded fully through the
+    /// speakers BEFORE starting the mic, so Whisper never picks up the cue.
+    /// Re-checks the pttState/interrupt gates after the await — if the user
+    /// taps to interrupt or backgrounds the app during the cue, we bail.
+    private func armAITalkingWatchdog() {
+        aiTalkingWatchdogTask?.cancel()
+        aiTalkingWatchdogTask = Task { @MainActor in
+            // Poll every 250 ms. Track the most recent time the speaker
+            // produced non-trivial audio. Only force-resume once we've gone
+            // `aiTalkingSilenceRequirement` seconds without amplitude — that
+            // means TTS is either done, errored, or otherwise stuck silent.
+            var lastNonSilentAt = Date()
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 250_000_000)
+                guard !Task.isCancelled else { return }
+                guard pttState == .aiTalking, !isInterruptRestartPending else { return }
+
+                // Generation could resume (e.g. memory refinement) — in that
+                // case, suspend the watchdog. It'll be re-armed when
+                // generation flips false again.
+                if store.isGenerating { return }
+
+                if SpeechManager.shared.ttsAmplitude > aiTalkingSilenceAmplitudeThreshold {
+                    lastNonSilentAt = Date()
+                    continue
+                }
+
+                let silentFor = Date().timeIntervalSince(lastNonSilentAt)
+                if silentFor >= aiTalkingSilenceRequirement {
+                    print("⏱ AI-talking watchdog: \(String(format: "%.1f", silentFor))s silent — forcing resume listen")
+                    beginListeningAfterAIResponse()
+                    return
+                }
+            }
+        }
+    }
+
+    private func cancelAITalkingWatchdog() {
+        aiTalkingWatchdogTask?.cancel()
+        aiTalkingWatchdogTask = nil
+    }
+
+    private func beginListeningAfterAIResponse() {
+        // Dedupe: the three "AI finished" paths (onAllSpeechFinished,
+        // isGenerating onChange, handleAISpeakingChange safety net) all call
+        // this. Without the guard the cue would play once per path for the
+        // same AI response. Cleared on the next .aiTalking entry below.
+        guard !didPlayAIConclusionCueThisRound else {
+            beginListening()
+            return
+        }
+        didPlayAIConclusionCueThisRound = true
+        Task { @MainActor in
+            // Must wait the FULL clip duration here: if we start the mic
+            // before the cue finishes playing, Whisper picks up the cue's
+            // tail through the speaker, transcribes it as "speech", and the
+            // conversation ping-pongs.
+            await playVoiceModeSound(
+                named: "AIVoiceResponseConcluded",
+                waitForFullDuration: true
+            )
+            guard pttState == .aiTalking,
+                  !isInterruptRestartPending,
+                  !store.isGenerating else { return }
+            beginListening()
+        }
+    }
+
     private func beginListening() {
         resetVoiceAutoSendState()
+        cancelAITalkingWatchdog()
         isInterruptRestartPending = false
+        // Next user turn — clear the user-cue guard so the next submission
+        // can play its conclusion sound.
+        didPlayUserConclusionCueThisRound = false
         SpeechManager.shared.stopAndClear()
         whisper.startRecording()
         startPulse()
@@ -481,6 +584,9 @@ struct ContentView: View {
     }
 
     private func returnToIdle() {
+        didPlayUserConclusionCueThisRound = false
+        didPlayAIConclusionCueThisRound   = false
+        cancelAITalkingWatchdog()
         resetVoiceAutoSendState()
         cancelListeningSilenceFiller()
         cancelVoiceModeAutoExit()
@@ -519,6 +625,7 @@ struct ContentView: View {
 
     private func interruptAIAndResumeListening() {
         resetVoiceAutoSendState()
+        cancelAITalkingWatchdog()
         isInterruptRestartPending = true
         SpeechManager.shared.stopAndClear()
         store.stopGeneration()
@@ -535,14 +642,11 @@ struct ContentView: View {
     /// silence or pause. These are real sounds (cough, sneeze, typing, etc.)
     /// that should trigger auto-send just like spoken words.
     private func containsActionableAmbientCue(_ transcript: String) -> Bool {
-        let pattern = "(?:\\[[^\\]\\n]{1,48}\\]|\\([^)\\n]{1,48}\\))"
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return false }
-        let range = NSRange(transcript.startIndex..., in: transcript)
-        return regex.matches(in: transcript, range: range).contains { match in
-            guard let r = Range(match.range, in: transcript) else { return false }
-            let cue = transcript[r].lowercased()
-            return !cue.contains("silence") && !cue.contains("pause")
-        }
+        // Delegate to WhisperManager so the silence-cue ignore list lives in
+        // one place. Previously this method had its own narrower filter
+        // ("silence" / "pause" only) that let [Blank_Audio], [No Speech],
+        // etc. through, and the AI would respond to phantom non-sounds.
+        WhisperManager.containsActionableAmbientCue(transcript)
     }
 
     // MARK: - Idle / user-activity orb emoji
@@ -586,7 +690,7 @@ struct ContentView: View {
                       !isInterruptRestartPending,
                       !store.isGenerating,
                       !SpeechManager.shared.isSpeaking else { return }
-                beginListening()
+                beginListeningAfterAIResponse()
             }
         }
 
@@ -967,7 +1071,8 @@ struct ContentView: View {
         }
     }
 
-    private func playVoiceModeSound(named resourceName: String) async {
+    private func playVoiceModeSound(named resourceName: String,
+                                    waitForFullDuration: Bool = false) async {
         guard let url = Bundle.main.url(
             forResource: resourceName,
             withExtension: "wav",
@@ -1006,9 +1111,18 @@ struct ContentView: View {
             player.setVolume(volume, fadeDuration: 0)
             player.play()
             voiceModeSoundPlayer = player
-            // No trailing pad — the greeting must begin the instant the
-            // activation cue ends, with no audible gap between them.
-            let duration = max(0.25, min(player.duration, 1.2))
+            // Default behaviour caps the await at 1.2s so the greeting/AI
+            // voice can start immediately after the activation cue with no
+            // audible gap. For cues that MUST fully finish before the mic
+            // resumes (otherwise Whisper hears the cue's tail and bounces
+            // the conversation), `waitForFullDuration` makes us sleep the
+            // entire clip plus a small drain pad.
+            let duration: TimeInterval
+            if waitForFullDuration {
+                duration = max(0.25, player.duration + 0.20)
+            } else {
+                duration = max(0.25, min(player.duration, 1.2))
+            }
             try? await Task.sleep(nanoseconds: UInt64(duration * 1_000_000_000))
         } catch {
             print("🔇 Failed to play voice mode sound:", error.localizedDescription)
@@ -1104,6 +1218,18 @@ struct ContentView: View {
                 ambientDuration: whisper.lastRecordingDuration
             )
             pttState = .aiTalking
+            // New round — reset the AI conclusion cue guard so it can fire
+            // once when the AI's reply ends.
+            didPlayAIConclusionCueThisRound = false
+            // Fire-and-forget — plays during the Gemma-generation window
+            // before TTS starts. Guard against double-fire from any rapid
+            // re-entry of submitVoiceRecording.
+            if !didPlayUserConclusionCueThisRound {
+                didPlayUserConclusionCueThisRound = true
+                Task { @MainActor in
+                    await playVoiceModeSound(named: "UserVoiceResponseConcluded")
+                }
+            }
         }
     }
 

@@ -782,7 +782,14 @@ final class ChatStore: ObservableObject {
 
             // Final UI flush — always write the complete text so the last
             // few tokens (which may not have hit the batch boundary) are shown.
-            let finalDisplayText = stripRoboticOpener(cleanLlamaArtifacts(assistantText))
+            // In VOICE MODE only, `enforceSingleEmoji` keeps the first emoji
+            // and strips the rest — the orb reveals one glyph at a time, and
+            // the system prompt asks for one-per-reply but the model often
+            // ignores that. Text mode keeps multi-emoji replies intact.
+            let cleanedText = stripRoboticOpener(cleanLlamaArtifacts(assistantText))
+            let finalDisplayText = shouldSpeakReply
+                ? enforceSingleEmoji(in: cleanedText)
+                : cleanedText
             conversations[convoIndex].messages[assistantIndex] = ChatMessage(
                 id: assistantID,
                 role: .assistant,
@@ -1139,6 +1146,31 @@ final class ChatStore: ObservableObject {
     /// Strip filler openers ("Sure!", "Certainly,", "Of course!" etc.) from the very
     /// start of a response. Only fires when the opener is followed by more content so
     /// a one-word acknowledgement ("Sure.") that IS the full answer is left intact.
+    /// Keep only the FIRST emoji the model emitted and drop every subsequent
+    /// one. The system prompt asks for "one emoji per response" but the model
+    /// frequently emits two or three; this is the deterministic enforcement
+    /// pass. Whitespace around the dropped emoji is collapsed so the final
+    /// text reads cleanly (no double-spaces, no orphan punctuation).
+    private func enforceSingleEmoji(in text: String) -> String {
+        var seenFirst = false
+        var result = ""
+        for char in text {
+            if OrbEmojiScanner.isEmojiCharacter(char) {
+                if !seenFirst {
+                    seenFirst = true
+                    result.append(char)
+                }
+                // skip every emoji after the first
+            } else {
+                result.append(char)
+            }
+        }
+        // Collapse runs of whitespace that the strip might have created.
+        return result
+            .replacingOccurrences(of: "  +", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     private func stripRoboticOpener(_ text: String) -> String {
         let pattern = #"^(?i)(Sure|Certainly|Of course|Absolutely|Definitely|No problem|Great)[!,.]?\s+"#
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return text }

@@ -56,6 +56,10 @@ enum OrbEmojiScanner {
     /// True if `character` is a full emoji (presented as a pictograph).
     /// Excludes ASCII digits/letters that incidentally carry an emoji property
     /// without the presentation flag (e.g. plain `0`-`9`).
+    static func isEmojiCharacter(_ character: Character) -> Bool {
+        isOrbEmoji(character)
+    }
+
     private static func isOrbEmoji(_ character: Character) -> Bool {
         let scalars = character.unicodeScalars
         guard let first = scalars.first else { return false }

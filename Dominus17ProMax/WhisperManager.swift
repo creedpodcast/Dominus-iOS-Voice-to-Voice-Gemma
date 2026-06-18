@@ -339,9 +339,17 @@ final class WhisperManager: ObservableObject {
     }
 
     private static func isActionableAmbientCueLabel(_ rawLabel: String) -> Bool {
+        // Normalise: lowercase, trim outer punctuation, then collapse
+        // underscores/hyphens/extra whitespace into single spaces so
+        // "[Blank_Audio]", "(blank-audio)", "[ BLANK AUDIO ]" all reduce to
+        // "blank audio" before substring matching.
         let key = rawLabel
             .lowercased()
             .trimmingCharacters(in: CharacterSet(charactersIn: "[]().,:;!?-_ \n\t"))
+            .replacingOccurrences(of: "_", with: " ")
+            .replacingOccurrences(of: "-", with: " ")
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespaces)
 
         guard !key.isEmpty else { return false }
         let ignoredSilenceCues = [
@@ -352,7 +360,8 @@ final class WhisperManager: ObservableObject {
             "quiet",
             "no speech",
             "no sound",
-            "blank audio"
+            "blank audio",
+            "blank"
         ]
         return !ignoredSilenceCues.contains { key.contains($0) }
     }
