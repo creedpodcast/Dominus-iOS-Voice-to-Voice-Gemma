@@ -1,268 +1,475 @@
-# Dominus — On-Device iOS Voice-to-Voice AI
+# Dominus
 
-Dominus is a fully local, privacy-first AI assistant for iPhone. No internet connection required. No data leaves your device. Everything — model inference, speech recognition, text-to-speech, and memory — runs entirely on-device.
+Dominus is a local-first iOS assistant built in SwiftUI. It runs a quantized Gemma 2B model through SwiftLlama, records and transcribes voice with WhisperKit, uses a bundled Silero VAD Core ML model for speech endpointing, speaks through an Apple TTS audio pipeline, and stores conversations, profile facts, and memory data on device.
 
----
-
-## What It Does
-
-Talk to an AI that talks back. Tap once to speak, then pause — Dominus watches Whisper partials, Silero VAD speech activity, and adaptive background noise so it sends after speech ends without letting room noise hold the turn hostage. Tap at any point while the AI is speaking to cut it off and speak again. Fully on-device, fully private.
-
----
+The current local Xcode project is the source of truth for this document.
 
 ## Current State
 
-### Working
-- **Push-to-talk (PTT) voice-to-voice conversation**
-  - Tap mic → speak → transcript stabilizes after speech ends → AI responds with text + voice
-  - Auto-send separates speech from raw sound: recent Silero VAD speech blocks sending, raw background noise only gets a short grace period, and continuing sequences like counting/alphabet get a slightly longer endpoint delay
-  - Tap again while listening to manually send before the timer fires
-  - Tap during AI response → interrupts voice and generation, waits briefly for audio to drain, then starts listening again
-  - Full-screen black voice surface hides the chat title, chat log, transcript field, and input bar while the orb is active
-  - Orb color reflects state: gray when idle, green while user speaks, red while AI speaks
-  - Processing states appear as status pills on the black voice screen
-  - TTS auto-enables during voice turns, restores your previous setting after
-- **Grounded, human-feel responses**
-  - System prompt instructs Dominus to answer only what was asked, admit uncertainty rather than guess, and match response length to question length
-  - Short questions get short answers; longer questions get appropriately longer ones
-  - Robotic openers ("Sure!", "Certainly!", "Of course!") are stripped automatically before text is displayed or spoken
-  - Noise turns ("ok", "yeah", "uh huh") are filtered out of LLM history before inference so they don't inflate context or shift tone
-- **Instant response start** — the first token always renders immediately when it arrives; subsequent tokens batch every 6 to keep the main thread free for typing and scrolling during generation. Thinking fillers are cancelled automatically if the model responds in under 1.5 seconds so they never talk over a fast answer.
-- **Fast Speech Mode** — rabbit toggle for low-latency turns. Fast mode skips RAG, rolling summaries, ambient context, voice greetings, and thinking fillers; it keeps only the base prompt, compact profile, latest user message, and a tiny recent-history slice capped at ~5% of the context window so short follow-ups still have an anchor. Replies use lower-temperature generation and a faster word-by-word reveal.
-- **Speculative RAG** — memory retrieval starts 300 ms after the user pauses typing, so by the time send is tapped the relevant memories are already loaded and generation begins without waiting for embedding lookup.
-- **Haptic feedback** — medium tap on send (text and voice), light tap when the AI's first token arrives. Toggle on/off in Audio settings.
-- **Pipeline pre-warming at launch** — all four cold-start costs (LLM inference graph, audio session, STT recognizer, TTS voice file, keyboard) are paid behind the loading screen in parallel; the app becomes interactive only when every component is ready
-- **Full-screen loading splash on launch** — blocks interaction until both Gemma and Whisper are fully ready; shows live progress bars per component
-- **Startup ready sound** — plays a bundled local sound effect once the loading screen finishes and both models are ready
-- **Audio settings** — sidebar audio controls let the user adjust and test startup, voice-mode activation, voice-mode deactivation, AI voice-response volume, and voice-mode inactivity timeout independently
-- **In-use status indicators** — floating pill appears whenever the app is processing in the background (transcribing, thinking, generating)
-- **WhisperKit on-device STT + Silero VAD endpointing** — accurate Whisper-based transcription with live preview while recording, plus local neural speech detection so auto-send waits for speech to end instead of reacting to every raw mic sound
-- **Smarter ambient awareness** — Whisper non-speech markers such as `[coughing]`, `[sneezing]`, `(keyboard typing)`, and `[laughter]` are now promoted to visible user messages in voice mode so Dominus reacts naturally (e.g. "bless you" on a sneeze) and the user sees what the model is reacting to. Each sound type has its own per-chat cooldown — sneezes 3 turns, coughs 6, laughter 5, default 10, typing essentially silenced — so reactions never feel canned. Repeated sounds are grouped with a count in the hidden ambient context so Dominus can check in briefly if you've been coughing repeatedly. In text mode, bracket markers are stripped from user messages so the chat history stays clean.
-- **Stable live voice transcript** — live preview keeps the best partial transcript during a recording, so a brief pause to think no longer erases previously transcribed words.
-- **Voice punctuation cleanup** — dictated words such as "period", "comma", and "question mark" are converted into punctuation pauses before voice text is sent or spoken aloud.
-- **Male TTS voice** — prefers Evan (Enhanced), falls back to Reed, Nathan, Tom, etc.
-- **Loud, clear voice output** — TTS bypasses `AVSpeechSynthesizer`'s default 1.0 volume ceiling by rendering raw PCM via `synth.write`, applying a ×2.5 vDSP pre-gain (~+8 dB above stock Apple TTS), and catching peaks with Apple's built-in peak-limiter audio unit. Session uses `.playback` + `.spokenAudio` (same path Audible and ChatGPT voice use) and `WhisperManager` flips it back to `.playAndRecord` for recording. The boost is **speaker-only** — headphones, AirPods, Bluetooth, CarPlay, and AirPlay all bypass the gain stage and keep the existing 0.48 safety cap on `utt.volume`, so private-listening loudness is unchanged.
-- **Voice-mode greetings** — when the user opens voice mode, Dominus speaks a short local greeting before listening begins. Two pools: a first-time pool ("How can I help you?", "What are we working on today?", etc.) for the very first voice session in a chat this app launch, and a returning pool ("What's up?", "Good to have you back.", etc.) once that chat has had a prior voice session. Per-chat tracking is in-memory only — quitting the app resets it.
-- **Halftone emoji orb** — voice mode's orb is now a thick-stroked black disc with a colored glow (green while listening, red while the AI speaks) that pulses to real TTS / mic amplitude. Inside, a dot-field renders the AI's emojis as a pointillist halftone with an exclusion halo around the silhouette, and the surrounding dots breathe with a gentle radial wave. Pulse expands the visible disc to reveal more dots, never resizing the emoji itself. Glyph transitions punch through a brief static glitch before settling. AI emojis appear at a 3.5 s minimum per emoji, persist 10 s after the AI stops, then clear to the pure dot-field. State-aware activity face (🙂 user speaking, 🤔 3+ sentences, 🧐 5+, 👀 silence check-in, 😴 dozing) drops in over the field. Orb size, halftone enable, dot color, density, and emoji coverage are all live-tunable in Audio Settings via a full-screen mock of the voice-mode screen — drag a slider, watch the actual orb respond.
-- **Voice-only emoji directive** — a "Use emojis in voice mode" toggle lives in your profile under "How Dominus Should Talk." When on, an end-of-response emoji instruction is injected into the profile block during voice turns only — text mode is untouched.
-- **Bluetooth/AirPods voice routing** — voice mode supports Bluetooth and wired headphone output/input, handles headset mic sample-rate changes, and keeps TTS at a safer headphone volume
-- **Headphone volume safety warning** — while voice mode is active, Dominus watches headphone/Bluetooth system volume and shows a persistent dismissible warning if volume is very high or very low
-- **Half-duplex voice with no echo** — orb stays green until *every* queued TTS sentence has fully drained from the speaker (350 ms hardware grace included), then flips to listening — the mic never picks up the AI's tail
-- **Sentence-complete TTS chunking** — sentences fire to TTS the instant their punctuation lands, never mid-sentence; only true runaways (>300 chars) ever get cut
-- **Voice thinking fillers** — while Gemma is preparing a voice response, Dominus can speak short local filler phrases such as quick greetings, light thinking sounds, or deeper-thinking phrases without adding them to the LLM prompt or chat log
-- **Smart voice idle timer** — inactivity only counts during true silence; the timer resets to zero while the user is speaking or while the AI is speaking, so neither side triggers an early exit
-- **Voice inactivity check-in (once per session)** — if no user speech is detected for the configured timeout, Dominus speaks a single check-in ("Are you still there?") and then exits voice mode; the check-in never loops
-- **Voice-mode entry/exit cues** — local sounds play during voice-mode entry and exit without blocking the first recording; voice mode exits after the selected listening-only inactivity timeout without renewed user activity
-- **Per-message action bar on AI replies** — Copy (clipboard, ✓ flash confirms), Share (system share sheet), and Speaker button under every assistant bubble. Tap the speaker to hear any past response read aloud; tap it again to stop mid-playback. Speaker icon swaps to a stop icon while that specific message is playing so state is always visible.
-- **Tappable context ring → inspector** — tap the context usage ring in the chat header to open a sheet showing every section of the assembled LLM context (system prompt, profile, rolling summary, memories, raw turns) with token counts; helps verify what Dominus actually sees each turn
-- **Selectable bubble text** — long-press any message (user or AI) to select and copy partial text.
-- **Input field auto-clears on send** — text field empties the moment the send button is tapped; no manual deletion required before typing the next message.
-- **Larger action icons and context ring** — per-message action icons at 18 pt and the context usage ring at 40 × 40 pt for readability at any text size; the ring mirrors the same rolling prompt-trim estimate used before sending context to Gemma.
-- **Cinematic response streaming** — text chat still streams from Gemma in real time, but assistant bubbles reveal response chunks with a soft blurred ghost/fade treatment instead of harsh token-by-token typing.
-- **Stable response scroll behavior** — when a new assistant response starts, chat scrolls to the top of the AI bubble once, then stops following the reveal so the user can scroll freely while text unfolds.
-- **Conversation compaction** — turns that age out of the 10-turn raw context window are summarised by a side-channel LLM call (temperature 0.3, max 400 chars). The rolling summary is appended to every system prompt so prior context is always reachable without burning the main token budget. Compaction runs only when the model is idle, never during active generation.
-- **Memory Journal** — one editable long-term memory page where users can view, add, edit, delete, and summarize approved memories without separate memory titles
-- **Memory suggestions** — Dominus can detect possible memories, show Yes/No controls, accept spoken/text confirmation, and show darkened "Added to Memory" / "Forgot Memory" status bubbles in the chat
-- RAG long-term memory (semantic search + keyword fallback) — retrieves from the Memory Journal and current-chat summaries while filtering memory status bubbles out of the LLM prompt
-- **Rich memory records** — saved memories track topics, entities, meaning signals, emotional tone, importance, recurrence, source IDs, and generated semantic context for less literal recall
-- **Multiple memory embeddings** — each memory can carry literal, topical, emotional, preference, and identity/style vectors; retrieval uses the strongest matching meaning angle
-- **Context-aware "remember this" flow** — deictic memory requests ask Gemma to summarize what should be remembered from recent turns, then show the interpreted memory as a Yes/No suggestion before journal storage
-- **Diverse memory recall** — broad questions such as "what do you remember about me?" use category diversity, importance boosts, and recent-recall penalties so Dominus avoids repeating the same facts
-- **Multi-signal memory retrieval** — scoring blends semantic, keyword, entity, topic, recency, profile, and active-conversation signals so retrieval reflects the user's profile and the live conversation, not just literal phrasing
-- **Memory retrieval trace** — Memory Journal shows why recent memory candidates were retrieved, including semantic score, matched semantic aspect, keyword score, entity/topic/recency/profile/active-conversation boosts, importance boost, repetition penalty, final score, source, and category
-- **AI-managed memory cleanup** — saved memories are first normalized into Creed-focused facts, then Gemma refines messy entries into concise third-person summaries in the background when the app is idle
-- LLM-generated chat titles (after 5 user turns or on chat exit) and absolute-date timestamps in the sidebar
-- User profile with auto-extraction ("my name is X" → stored as fact) **plus an editable Profile sheet** (person.circle button) for manual facts and a free-text "How should Dominus talk to you?" persona prompt
-- Multiple conversation threads (create, rename, delete, switch)
-- Generation interrupt (send new message cancels current response)
-- Stop button (cancel generation without sending)
-- Raw SwiftLlama generation errors are logged to Xcode instead of appearing as assistant chat bubbles
-- Echo cancellation via `.videoChat` audio session (hardware AEC) + half-duplex software gating
-- Llama artifact filtering (strips template tokens from output)
+Dominus currently supports:
 
-### Planned
-- [ ] Context window increase (2048 → 4096)
-- [ ] Memory retrieval clamping (prevent context overflow)
-- [ ] Core ML TTS (custom voice via Neural Engine — no synthesis gaps)
+- On-device chat with streaming Gemma responses.
+- Push-to-talk voice-to-voice mode with automatic send after the user stops speaking.
+- WhisperKit live transcript preview and final transcription.
+- Silero VAD speech detection layered over raw microphone activity.
+- Background-noise tolerance so room noise does not hold the turn forever.
+- Sequence-aware endpointing so counting, alphabet tests, and long utterances are less likely to be cut off.
+- Sentence-by-sentence TTS while the model streams.
+- High-gain speaker TTS through `AVSpeechSynthesizer.write`, `AVAudioEngine`, vDSP gain, and a peak limiter.
+- Route-aware voice volume for speaker, headphones, AirPods, Bluetooth, CarPlay, and AirPlay.
+- A full-screen voice orb with mic/TTS amplitude, emoji display, idle faces, and inactivity states.
+- Conversation threads with create, rename, delete, switch, generated titles, and local disk persistence.
+- A context ring and context inspector showing the assembled model prompt.
+- User profile facts and persona instructions injected into every prompt.
+- A Memory Journal for long-term saved memories, plus current-chat recall and memory traces.
+- Local startup, voice-entry, voice-exit, user-finished, and AI-finished sound effects.
+- Audio settings for sound volumes, haptics, voice selection, speech rate, speech pitch, inactivity timeout, and orb appearance.
 
----
+## Privacy Model
 
-## Loading System
+Runtime inference is local. Gemma, Whisper transcription, Silero VAD, Apple TTS, profile storage, conversation storage, and memory storage all run on the device.
 
-Every component that requires time to initialize shows a dedicated progress indicator so the user always knows what the app is doing.
+Network access can still be needed during development or first setup for Swift Package resolution and for any model assets WhisperKit needs to fetch/cache. Once assets are present, the app logic is designed around on-device execution rather than cloud APIs.
 
-### App Launch
-A full-screen splash covers the app until both models are ready:
+## Build And Run
 
-| Bar | What it tracks |
-|---|---|
-| `cpu.fill` · Language Model | Gemma 2B Q4_K_M loading into memory via llama.cpp |
-| `waveform` · Voice Recognition | WhisperKit base-English model loading (~145 MB) |
+Open the Xcode project:
 
-Both bars animate a left-to-right fill with a live percentage. The app becomes interactive only when both hit 100% **and** all four pipeline components (LLM inference graph, audio session, STT recognizer, TTS voice) have been pre-warmed in parallel.
-
-### During Use
-A small floating pill appears at the top of the screen whenever the app is processing:
-
-| State | Pill |
-|---|---|
-| User tapped send in voice mode | `waveform` · Transcribing your speech… |
-| AI generating, TTS not started yet | `brain` · Thinking… |
-| AI generating in text mode | `cpu` · Generating… |
-
-Voice mode may also speak a short local thinking filler while Gemma prepares the real response. These fillers are generated by Swift orchestration only; they are not part of the LLM prompt and are not saved into the chat log.
-
-The pill slides in from the top and disappears automatically when the operation completes.
-
-### Background Return
-If the app is foregrounded after a long background session and either model needs to reload, the splash screen reappears with live progress until ready.
-
----
-
-## How Voice Works (PTT Flow)
-
-```
-[idle]  — waveform icon (gray)
-  ↓ tap
-[listening]  — full-screen black voice surface + waveform icon (green)
-  ↓ transcript stable + no recent speech activity, or tap again to send manually
-[transcribing] — "Transcribing your speech…" pill appears
-  ↓ Whisper done
-[AI talking] — "Thinking…" pill → waveform icon (red) as TTS begins
-  ↓ AI finishes naturally
-[listening]  — waveform icon (green)
+```text
+Dominus17ProMax.xcodeproj
 ```
 
-The same single button controls every step. No hold-to-talk. Auto-send starts from transcript stability, then gates on local speech activity. Raw sound alone only delays briefly; if Silero VAD does not classify it as speech, Dominus sends instead of waiting forever. Empty recordings restart listening instead of returning to text mode.
+Build and run from Xcode. This repository is not set up with a supported CLI build flow.
 
----
+Required local app resources:
 
-## Architecture
+- `Dominus17ProMax/gemma-2-2b-it-Q4_K_M.gguf` - Gemma 2 2B IT Q4_K_M model, about 1.6 GB.
+- `Dominus17ProMax/SileroVADModel.mlpackage` - bundled Core ML VAD model.
+- `Dominus17ProMax/SoundEffects/*.wav` - local cue sounds.
+- Swift packages from `Package.resolved`.
 
-### Model
-| Component | Details |
-|---|---|
-| LLM | Gemma 2 2B IT Q4_K_M (GGUF) |
-| Inference engine | [SwiftLlama](https://github.com/pgorzelany/swift-llama-cpp) v1.2.0 (llama.cpp wrapper) |
-| Context window | 2048 tokens |
-| Batch size | 512 |
-| GPU acceleration | Metal (on-device) |
-| Temperature | 0.7 (main chat) · 0.3–0.4 (side-channel: titles, summaries) |
+The Xcode project uses a file-system synchronized app group for `Dominus17ProMax/`, so source and resource files in that folder are picked up by the project without hand-maintaining every file entry in `project.pbxproj`.
 
-### Response quality
-| Behaviour | Details |
-|---|---|
-| Grounded system prompt | Dominus answers only what was asked; admits uncertainty rather than guessing; matches length to the question |
-| Length cap | Response length is bounded by the user's input word count: ≤5 words → 200 chars, 6-15 → 500, 16-40 → 1200, >40 → uncapped |
-| Robotic opener strip | Opening phrases like "Sure!", "Certainly!", "Of course!" are removed before text is shown or spoken |
-| Noise turn filter | Low-signal turns ("ok", "yeah", "uh huh") are dropped from LLM history before inference |
+## Package Pins
 
-### Voice
-| Component | Details |
-|---|---|
-| Speech-to-Text | WhisperKit (on-device Whisper base-English, ~145 MB) |
-| Hidden ambient cues | Bracketed or parenthesized non-speech markers are stripped from visible text, stored as per-chat ambient events, and injected only as hidden context when relevant |
-| Text-to-Speech | `AVSpeechSynthesizer.speak()` + delegate (Apple Neural Engine, fully local) |
-| TTS voice | Evan Enhanced (male, en-US) — falls back to best available |
-| Input mode | Push-to-talk with auto-send after transcript stability and local VAD speech-silence checks; raw background noise only gets a short grace window |
-| Voice UI | Full-screen black orb surface while voice mode is active; orb is gray (idle), green (user speaking), red (AI speaking) |
-| Thinking fillers | Local `ThinkingFillerManager` chooses restrained voice-only filler phrases based on greetings, short prompts, complex prompts, follow-ups, and long delays |
-| Smart idle timer | 1-second ticker that only advances during true silence; resets to zero while the user or AI is speaking |
-| Inactivity check-in | One check-in fires per voice session after the configured silence timeout; after speaking it, voice mode exits — no loop |
-| Auto-exit | Voice mode exits automatically after the configured inactivity timeout plays the deactivation cue |
-| Interrupt | Button tap stops generation + TTS immediately, then restarts STT after a short audio-drain grace period |
-| Audio session | `AVAudioSession` `.videoChat` / `.voiceChat` voice routing with `.allowBluetooth`, `.allowBluetoothA2DP`, and `.defaultToSpeaker` so AirPods, Bluetooth headsets, wired headphones, and speaker routes work without per-device code |
-| Bluetooth input stability | Mic taps use the active hardware input format and resample dynamically, preventing headset sample-rate changes (16-24 kHz vs 48 kHz) from crashing recording |
-| Audio settings | Startup cue, voice-mode activation cue, voice-mode deactivation cue, AI voice response volume, and voice-mode inactivity timeout can each be adjusted in-app |
-| Headphone safety | TTS volume is route-aware: user-controlled AI voice volume still keeps a lower app-level cap for headphones/Bluetooth, plus persistent high/low system-volume warnings during voice mode |
-| Half-duplex gating | `outstandingUtterances` counter tracks every queued sentence; mic engine stays off until counter hits zero + 350 ms hardware drain |
-| Streaming TTS | Spoken sentence-by-sentence as tokens arrive — `preUtteranceDelay`/`postUtteranceDelay` set to 0 so Apple cross-fades sentences with no gap |
-| Haptic feedback | Medium tap on send (text and voice mode); light tap when AI's first token arrives. Respects user toggle in Audio settings. |
+`Dominus17ProMax.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved` currently pins:
 
-### Context management
-| Component | Details |
-|---|---|
-| Rolling window | Regular mode keeps up to 4 recent turns (8 messages), then trims toward a 25% context target while preserving at least 3 turns when needed |
-| Fast Speech context | Fast mode skips full history/RAG/summary blocks and keeps only a tiny recent-history slice capped at ~5% of the 2048-token window |
-| Conversation compaction | Turns that age out of the regular raw window are summarised by a side-channel LLM call (temperature 0.3, max 400 chars); summary is injected into the system prompt as "Earlier in this conversation:" so prior context is always reachable without burning token budget |
-| Compaction timing | Runs only when the model is idle (not generating); append-only so older summaries are never discarded |
-| Dual storage | Compacted summaries are also written to RAG so retrieval can surface them when relevant |
-| Context inspector | Tap the context ring in the chat header to see every assembled section (system prompt, profile, rolling summary, memories, raw turns) with token counts |
-| Speculative RAG | Memory retrieval fires 300 ms after typing pauses so the result is ready before send; `_send()` uses the cache on an exact query match and skips retrieval entirely |
-| Token batching | SwiftUI message re-render fires every 6 tokens to keep the main thread free; first token always renders immediately so the response feels instant |
+| Package | Source | Version / Revision |
+|---|---|---|
+| `swift-llama-cpp` | `https://github.com/pgorzelany/swift-llama-cpp` | `1.2.0`, revision `5496bc7c9820f04bba7268dc8a271235deae436d` |
+| `WhisperKit` | `https://github.com/argmaxinc/WhisperKit` | branch `main`, revision `80d96762fa727f816ffceab76a6529cd12c2726f` |
+| `swift-argument-parser` | `https://github.com/apple/swift-argument-parser.git` | `1.7.1`, transitive |
 
-### Memory Journal + RAG
-| Component | Details |
-|---|---|
-| Vector embeddings | `NLEmbedding.sentenceEmbedding` — Apple built-in 512-dim model; memory records can store rich-context plus literal, topical, emotional, preference, and identity/style aspect embeddings |
-| Similarity | vDSP cosine similarity (hardware-accelerated) |
-| Storage | SwiftData (on-device persistence for memory records, metadata, and embeddings) |
-| Memory Journal | Single user-facing long-term memory surface with editable description-first entries |
-| Memory suggestions | Conversation-scoped candidates that can be accepted into the Memory Journal or dismissed; "remember this/that/it" asks Gemma to interpret recent turns before showing the suggestion |
-| Retrieval | Memory Journal entries and current-chat summaries are scored, filtered, and injected only when relevant |
-| Diverse recall | Broad/follow-up memory questions activate exploration mode, balancing semantic relevance with category diversity, importance, and recently-used-memory penalties |
-| Recall history | Recently retrieved memory fingerprints are tracked locally in `UserDefaults` and downranked for a short window so repeated questions can surface different facts |
-| Multi-signal scoring | Final score blends semantic, keyword, entity, topic, recency, profile, and active-conversation signals minus a repetition penalty, so retrieval considers who the user is and what's being discussed right now |
-| Traceability | Memory Journal includes a retrieval trace with source, category, semantic score, matched semantic aspect, keyword score, entity/topic/recency/profile/active-conversation boosts, importance boost, repetition penalty, and final score |
-| Normalization | Common first-person memory phrases are converted into Creed-focused facts before storage; idle Gemma refinement rewrites long or messy memories into compact third-person summaries |
-| File memory groundwork | `MemoryScope.file` is reserved for future chunked file indexing: file → chunks → embeddings → searchable candidates |
+Key Xcode settings:
 
-### User Profile
-| Component | Details |
-|---|---|
-| Auto-extraction | Pattern matching on user messages ("my name is X", "I live in Y", etc.) |
-| Storage | SwiftData (`ProfileFact` entity) for facts; `UserDefaults` for persona |
-| Manual editing | `ProfileView` sheet (person.circle button in sidebar) — add/delete facts, swipe to remove, "Clear all" |
-| Persona | Free-text "How should Dominus talk to you?" field (e.g. "Be concise. Use analogies.") |
-| Injection | Facts block + persona block both prepended to every system prompt |
+- Bundle identifier: `com.creed.dominus1`.
+- Deployment target in the project file: `26.5`.
+- Default actor isolation: `MainActor`.
+- Microphone usage description is configured.
+- Speech recognition usage description remains configured, though active STT is WhisperKit rather than the old SFSpeech path.
 
----
+## Runtime Architecture
 
-## App Structure
+Main data flow:
 
-```
-DominusApp/
-├── DominusAppApp.swift              Entry point
-├── ContentView.swift                UI — sidebar, chat view, PTT input bar, status pills
-├── ChatStore.swift                  State — conversations, send(), RAG + profile wiring
-├── GemmaEngine.swift                LLM — model loading with progress, streaming generation
-├── SpeechManager.swift              TTS — AVSpeechSynthesizer, male voice selection
-├── SpeechRecognitionManager.swift   VAD — amplitude monitoring during AI speech
-├── WhisperManager.swift             STT — WhisperKit on-device transcription with progress
-├── LoadingView.swift                SplashLoadingView + LoadingBarView + StatusPillView
-├── VoiceOrb.swift                   Animated voice orb overlay (PTT visual feedback)
-├── ThinkingFillerManager.swift      Voice-only local filler orchestration while Gemma prepares responses
-├── AudioSettingsStore.swift         Saved per-sound volume preferences
-├── AudioSettingsView.swift          In-app audio sliders and preview buttons
-├── SoundEffects/                    Bundled local UI audio, including the startup-ready sound
-├── MemoryView.swift                 Memory Journal UI — suggested memories plus editable long-term entries
-├── Memory/
-│   ├── MemoryEmbedder.swift         NLEmbedding vectorisation + cosine similarity
-│   ├── MemoryExtractor.swift        Deterministic memory extraction, categorization, and first-person normalization
-│   ├── MemorySummaryBuilder.swift   Compact memory summaries for chat bubbles, manual entries, and conversation compaction
-│   ├── MemoryStore.swift            SwiftData persistence, embeddings, and memory records
-│   ├── MemoryTraceStore.swift       Observable retrieval trace for memory scoring/debug visibility
-│   └── MemoryRetriever.swift        remember(), retrieve(), diverse scoring, recall history, candidate accept/delete interface
-└── Profile/
-    ├── ProfileStore.swift           Fact extraction, persona, storage, system prompt injection
-    ├── ProfileView.swift            Editable profile sheet — facts list + persona text field
-    └── UserProfile.swift            SwiftData ProfileFact entity
+```text
+ContentView
+  -> ChatStore
+  -> GemmaEngine
+  -> SwiftLlama / LlamaService
 ```
 
----
+Voice flow:
 
-## Device Requirements
+```text
+ContentView voice state
+  -> WhisperManager records and transcribes
+  -> SileroVAD classifies speech activity
+  -> ChatStore sends the turn to Gemma
+  -> SpeechManager speaks streamed response chunks
+  -> ContentView returns to listening when TTS and cue audio drain
+```
 
-| Requirement | Details |
-|---|---|
-| Device | iPhone 13 Pro Max or newer recommended |
-| RAM | 6 GB unified memory (model uses ~1.5 GB + KV cache) |
-| iOS | 17.0+ |
-| Storage | ~1.5 GB for Gemma model + ~150 MB for Whisper model |
+Core roles:
 
----
+- `ContentView` owns the visible app workflow: sidebar, chat, input, push-to-talk state, voice auto-send, warmup, overlays, status pills, and voice-mode routing.
+- `ChatStore` is the conversation source of truth. It owns send/cancel, prompt assembly, response streaming, title generation, context trimming, memory wiring, profile wiring, and disk persistence.
+- `GemmaEngine` wraps a persistent `LlamaService` instance and streams tokens from the bundled GGUF model.
+- `WhisperManager` owns AVAudioEngine recording, live transcript passes, final transcription, raw sound activity, adaptive noise floor, and Silero VAD feeding.
+- `SileroVAD` wraps the bundled Core ML model and tracks recurrent VAD state.
+- `SpeechManager` owns TTS, route-aware gain, sound effects, voice selection, queue drain, and the shared audio engine used by speech and cue sounds.
 
-## Known Issues
+## Voice Endpointing
 
-- **Context window** — 2048 tokens can overflow when system prompt + profile + memories + history are large. Fix: increase to 4096.
-- **Live transcript delay** — WhisperKit live preview runs every second; first preview requires at least 0.5s of audio. Final transcript on send is always complete.
+The current voice fix is a middle ground between two bad extremes:
+
+- Sending too early while the user is still talking.
+- Never sending because the mic keeps hearing background noise.
+
+Dominus solves this by separating speech from sound.
+
+`WhisperManager` publishes:
+
+- `lastSpeechActivityAt` from Silero VAD. This means actual likely speech.
+- `lastSoundActivityAt` from raw microphone level over an adaptive noise floor. This means something audible happened, but not necessarily speech.
+- `audioLevel` for orb animation.
+- `transcript` for live preview.
+
+`ContentView` auto-send uses:
+
+| Constant | Value | Purpose |
+|---|---:|---|
+| `defaultVoiceAutoSendDelay` | `1.35s` | Normal transcript-stability delay. |
+| `fastVoiceAutoSendDelay` | `0.95s` | Faster send when punctuation suggests a clear ending. |
+| `shortVoiceAutoSendDelay` | `1.05s` | Short prompt / empty visible transcript delay. |
+| `sequenceVoiceAutoSendDelay` | `1.65s` | Longer delay for alphabet/counting/continuing sequences. |
+| `voiceSpeechSilenceRequirement` | `0.95s` | Required silence after real VAD speech. |
+| `rawSoundOnlyMaxHoldSeconds` | `0.9s` | Maximum hold for raw noise that Silero does not classify as speech. |
+| `hardSendAfterContentSilenceSeconds` | `3.0s` | Forces send when content exists but Whisper keeps trickling tiny noise changes. |
+| `substantialGrowthWordThreshold` | `2 words` | Marks real transcript growth versus one-word hallucination noise. |
+
+How send is decided:
+
+1. Wait for the visible transcript to stop changing for the adaptive delay.
+2. If Silero VAD saw recent speech, wait only the remaining required speech silence.
+3. If there is only raw noise, hold briefly.
+4. If raw noise keeps happening without VAD speech, ignore it and send.
+5. If the transcript still grows by meaningful chunks, restart the timer.
+6. If it only jitters with tiny changes for too long after real content, hard-send.
+
+This is the practical middle ground used by mature voice systems: endpoint on speech activity, not microphone activity, while keeping a bounded grace window for uncertain audio.
+
+## Whisper And VAD
+
+`WhisperManager`:
+
+- Loads `WhisperKit(model: "openai_whisper-base.en")`.
+- Uses `DecodingOptions(noSpeechThreshold: 0.7, chunkingStrategy: .vad)`.
+- Starts an AVAudioEngine input tap with the active hardware format.
+- Keeps raw samples for final transcription.
+- Runs live transcription every `1.0s` while recording.
+- Resamples audio to 16 kHz mono for Whisper.
+- Preserves the best live transcript so brief pauses do not erase the preview.
+- Offers `stopAndTranscribe()` for final transcription and `stopRecordingWithoutTranscribing()` for fast/manual paths.
+
+`SileroVAD`:
+
+- Loads `SileroVADModel.mlpackage`.
+- Uses Core ML compute units `.all`.
+- Scores 16 kHz chunks of `576` samples.
+- Keeps LSTM state tensors between chunks.
+- Uses a speech threshold of `0.5`.
+
+The `576` sample size matters. The bundled model expects `1 x 576`; feeding `512` samples makes VAD scoring fail and breaks endpointing.
+
+## Audio And TTS
+
+`SpeechManager` uses a high-gain local TTS pipeline:
+
+```text
+AVSpeechSynthesizer.write
+  -> PCM buffers
+  -> vDSP gain when using built-in speaker
+  -> AVAudioPlayerNode
+  -> peak limiter
+  -> output
+```
+
+Current behavior:
+
+- Voice mode locks the audio session to `.playAndRecord`, mode `.default`.
+- Session options are `.defaultToSpeaker`, `.allowBluetooth`, and `.allowBluetoothA2DP`.
+- The same audio engine plays TTS and sound effects, avoiding competing hardware activations.
+- Speaker output gets the boosted TTS path.
+- Private listening routes bypass the extra gain and keep safer volume behavior.
+- `outstandingUtterances` tracks queued speech.
+- `onAllSpeechFinished` fires only after queued speech drains.
+- AI-finished cue audio can wait for full duration so the mic does not capture its tail.
+
+Do not casually add separate `setCategory` or `setActive` calls from new audio code. Repeated session changes can cause volume HUD flashes, route resets, clipped tails, or broken voice-mode timing.
+
+## Push-To-Talk State Machine
+
+The core state enum in `ContentView` is:
+
+```text
+idle -> listening -> aiTalking -> listening
+```
+
+User controls:
+
+- Tap while idle: enter voice mode.
+- Tap while listening: send manually.
+- Tap while AI is talking: interrupt generation/TTS and restart listening after a short drain.
+- Mute/exit controls stop recording and return to text mode.
+
+Voice mode also includes:
+
+- Entry and return greetings from `VoiceModeGreetings`.
+- One voice inactivity check-in per session.
+- True-silence idle timer that pauses while the user or AI is speaking.
+- Headphone volume warnings.
+- Orb emoji clearing and idle/sleep states.
+
+Voice latency fillers exist in `ThinkingFillerManager`, but current latency testing disables them with `voiceLatencyTestingDisablesFillers = true` in the active flow.
+
+## Generation Pipeline
+
+`ChatStore._send()` does the main work:
+
+1. Cleans ambient cue markers and visible user text.
+2. Appends the user message.
+3. Handles memory undo phrases like "forget that".
+4. Builds profile context from `ProfileStore`.
+5. Retrieves current-chat memory only when the latest message asks for recall.
+6. Adds recent context cache, optional rolling summary, memory context, and ambient context.
+7. Filters low-signal turns.
+8. Trims the LLM history.
+9. Captures a context snapshot for the inspector.
+10. Streams Gemma tokens.
+11. Renders the first token immediately, then batches UI updates every 4 tokens.
+12. Sends complete TTS sentences as they arrive.
+13. Stores the exchange into current-chat memory.
+14. Schedules title generation and memory maintenance when appropriate.
+
+Gemma settings:
+
+| Setting | Current Value |
+|---|---:|
+| Model resource | `gemma-2-2b-it-Q4_K_M.gguf` |
+| Engine | SwiftLlama / llama.cpp |
+| Batch size | `512` |
+| Max token count | `2048` |
+| GPU | `true` |
+| Main chat temperature | `0.7` |
+| Main chat seed | `42` |
+| Side-channel temperature | usually `0.3` to `0.4` |
+
+Response length is softly capped by prompt size:
+
+| User input length | Soft response cap |
+|---|---:|
+| 0-5 words | `200` chars |
+| 6-15 words | `500` chars |
+| 16-40 words | `1200` chars |
+| 41+ words | uncapped |
+
+The cap only stops at a sentence boundary, so normal responses are not cut mid-word.
+
+## Context Strategy
+
+The app uses a small on-device context budget intentionally.
+
+Current `ChatStore` constants:
+
+| Constant | Value |
+|---|---:|
+| `maxTurnsToKeep` | `3` |
+| `minTurnsToKeep` | `2` |
+| `targetContextUsage` | `0.10` |
+| `approximateContextTokenLimit` | `2048` |
+
+The prompt is built as:
+
+```text
+system identity
++ user profile/persona
++ recent deterministic conversation context
++ current-chat rolling summary when recall is requested
++ current-chat retrieved memory when recall is requested
++ ambient context when relevant
++ recent raw turns
+```
+
+Important current behavior:
+
+- Raw history keeps up to 3 recent turns before trimming.
+- If the estimate exceeds the target, older raw turns are dropped down toward the 2-turn minimum.
+- Low-signal turns such as "ok", "yeah", and "thanks" can be removed from LLM history.
+- Older messages are summarized into compact current-chat notes.
+- The context inspector shows exactly what was assembled for the latest turn.
+
+## Memory System
+
+The memory system has two different roles:
+
+- Long-term Memory Journal: user-visible saved memories stored locally.
+- Current-chat recall: conversation-specific exchanges, notes, and summaries that can be retrieved into the prompt when the user asks to recall this chat.
+
+Current prompt injection is intentionally conservative: `MemoryRetriever.retrieve()` returns current-chat context. Cross-chat long-term retrieval is not automatically injected into every prompt; stable cross-chat user information belongs in `ProfileStore`.
+
+Memory components:
+
+- `MemoryStore` uses SwiftData with a local `DominusMemory.store`.
+- `MemoryRecord` stores content, kind, scope, category, metadata, and embeddings.
+- `MemoryHubRecord` stores category-level summaries.
+- `MemoryEmbedder` uses Apple's `NLEmbedding.sentenceEmbedding(for: .english)`.
+- Cosine similarity uses Accelerate/vDSP.
+- Keyword fallback is used when embeddings are unavailable.
+- `MemoryRetriever` scores candidates using semantic, keyword, entity, topic, recency, importance, profile, active-conversation, diversity, and repetition signals.
+- `MemoryTraceStore` exposes retrieval traces for UI/debug visibility.
+- `MemoryExtractor` normalizes and atomizes user memory text.
+- `MemorySummaryBuilder` produces compact display and storage summaries.
+
+The Memory Journal UI supports:
+
+- Search.
+- Sort order.
+- Date filtering.
+- Add memory.
+- Edit memory.
+- Delete memory.
+- AI summary/refinement for long or messy entries.
+- Accept/delete for candidate records.
+
+## Profile System
+
+`ProfileStore` stores stable user context separately from chat memory.
+
+It supports:
+
+- Structured fields for preferred name, role/work, app purpose, goals, and behavior preferences.
+- A free-text persona field for how Dominus should speak.
+- A voice-only emoji preference.
+- SwiftData persistence for facts.
+- UserDefaults persistence for persona and voice emoji preference.
+
+The profile block is prepended to every prompt. In voice mode, if voice emojis are enabled, the profile block adds an instruction to use one emoji per response for the orb.
+
+## UI Surface
+
+Major UI pieces:
+
+- Sidebar: conversations, profile, memory, audio settings.
+- Chat view: streamed bubbles, selectable text, copy/share/speak actions, generation stop.
+- Input bar: text send and PTT entry.
+- Context ring: estimated prompt pressure and tap-to-open inspector.
+- Loading splash: model and voice readiness.
+- Voice overlay: black full-screen orb surface with state-dependent controls.
+- Audio settings: volumes, haptics, voice picker, speech rate/pitch, orb scale, halftone controls.
+- Memory Journal: long-term memory management.
+- Profile sheet: stable user facts and persona.
+
+## File Map
+
+```text
+Dominus17ProMax/
+  DominusAppApp.swift
+    App entry point.
+
+  ContentView.swift
+    Main SwiftUI app, sidebar, chat, input, voice state, endpointing,
+    warmup, context inspector, orb overlay wiring, and PTT controls.
+
+  ChatStore.swift
+    Conversation source of truth, send/cancel pipeline, prompt assembly,
+    streaming, context trimming, current-chat memory, profile integration,
+    title generation, ambient cues, and persistence.
+
+  GemmaEngine.swift
+    Persistent SwiftLlama model wrapper for bundled Gemma GGUF.
+
+  WhisperManager.swift
+    WhisperKit loading, AVAudioEngine recording, live/final transcription,
+    adaptive raw sound tracking, and Silero VAD feeding.
+
+  SileroVAD.swift
+    Core ML wrapper for the bundled Silero VAD model.
+
+  SpeechManager.swift
+    TTS, high-gain speaker path, route safety, sound effects, queue drain,
+    message playback, and audio session handling.
+
+  AudioSettingsStore.swift
+    UserDefaults-backed audio, voice, haptics, and orb preferences.
+
+  AudioSettingsView.swift
+    Settings UI for sound volumes, voice selection, speech controls, and orb controls.
+
+  LoadingView.swift
+    Launch splash and progress/status views.
+
+  VoiceOrb.swift
+    Full-screen voice overlay and orb state presentation.
+
+  EmojiOrb.swift
+  HalftoneEmojiView.swift
+  OrbEmojiScanner.swift
+  OrbSizeAdjustView.swift
+    Emoji/halftone orb rendering, emoji extraction, and orb preview/adjustment.
+
+  ThinkingFillerManager.swift
+    Local voice filler phrase scheduler. Present but disabled in active latency testing.
+
+  VoiceModeGreetings.swift
+    Local entry/return greeting phrase pools.
+
+  MemoryView.swift
+    Memory Journal UI.
+
+  Memory/
+    MemoryStore.swift
+    MemoryRetriever.swift
+    MemoryEmbedder.swift
+    MemoryExtractor.swift
+    MemorySummaryBuilder.swift
+    MemoryTraceStore.swift
+
+  Profile/
+    ProfileStore.swift
+    ProfileView.swift
+    UserProfile.swift
+
+  SoundEffects/
+    AppLoadedSoundEffect.wav
+    ActivateVoicetoVoice.wav
+    DeactivateVoicetoVoice.wav
+    UserVoiceResponseConcluded.wav
+    AIVoiceResponseConcluded.wav
+    xAIxVoiceResponseConcluded.wav
+
+  SileroVADModel.mlpackage/
+    Data/com.apple.CoreML/model.mlmodel
+    Data/com.apple.CoreML/weights/weight.bin
+    Manifest.json
+
+  Assets.xcassets/
+    App icon and accent color assets.
+
+  gemma-2-2b-it-Q4_K_M.gguf
+    Bundled local LLM model.
+```
+
+Other repository folders:
+
+- `Archive/` contains old or reference voice work, including the prior SFSpeech recognizer file. It is not the active STT path.
+- `Build Stack Notes/` contains historical architecture/build notes.
+- `Packages/kokoro-swift/` is a local untracked Kokoro TTS experiment and is not referenced by the current Xcode project.
+
+## Persistence
+
+Local persisted data:
+
+- Conversations: `ChatStore` saves `conversations.json` under the app documents directory.
+- Memory records: SwiftData store named `DominusMemory.store`.
+- Profile facts: SwiftData model for `ProfileFact`.
+- Profile persona and voice emoji preference: UserDefaults.
+- Audio/orb/speech settings: UserDefaults.
+- Recall/repetition bookkeeping: UserDefaults where applicable.
+
+## Known Constraints
+
+- The 2048 token limit is intentional for current device thermal/performance behavior.
+- Do not replace the persistent `GemmaEngine.llama` with a fresh llama instance per turn.
+- Keep `ChatStore`, `GemmaEngine`, `WhisperManager`, and `SpeechManager` on the main actor unless the app architecture is deliberately changed.
+- Be careful with audio session ownership. Voice mode depends on one coordinated `.playAndRecord` session and one shared speech/SFX engine.
+- Whisper live partials can jitter; endpointing must use VAD speech activity plus bounded raw-noise grace, not transcript stability alone.
+- Silero VAD input must stay at the bundled model's expected `576` sample chunk size.
+- Cross-chat long-term memories are currently not injected automatically into every LLM turn.
+- The project should be built from Xcode, not from an unsupported command-line build path.
+
+## Git And Project Hygiene Notes
+
+Machine-generated files such as `.DS_Store`, Xcode `xcuserdata`, SwiftPM build folders, and the local `Packages/` experiment are ignored by the root `.gitignore`. Existing tracked machine-local files were removed from the Git index as part of this documentation cleanup while remaining available on disk.
+
+There is currently no configured Git remote in the local repository, so local commits do not automatically update GitHub until an `origin` remote and working GitHub authentication are restored.

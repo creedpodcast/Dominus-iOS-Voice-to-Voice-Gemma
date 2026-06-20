@@ -1,0 +1,14 @@
+# macOS
+.DS_Store
+
+# Xcode user-local state
+xcuserdata/
+*.xcuserstate
+DerivedData/
+
+# SwiftPM / local package workspaces
+.build/
+.swiftpm/
+
+# Local experiments not referenced by the current Xcode project
+Packages/

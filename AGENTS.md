@@ -1,74 +1,144 @@
 # AGENTS.md
 
-This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
+This file gives coding agents the current project assumptions for Dominus.
 
 ## Project Overview
 
-**Dominus** is an iOS app — a fully on-device AI assistant built in SwiftUI. It runs a quantized Gemma 2B model locally via `SwiftLlama` (llama.cpp wrapper), has a voice-to-voice PTT mode, long-term RAG memory, and a user profile system. No API calls, no cloud — everything runs on device.
+Dominus is a SwiftUI iOS app for a fully local AI assistant. It runs a bundled Gemma 2 2B IT Q4_K_M GGUF model through `SwiftLlama`, uses WhisperKit for on-device STT, uses a bundled Silero VAD Core ML model for speech endpointing, speaks with Apple TTS through a custom `AVAudioEngine` path, and stores conversations, profile facts, and memory data locally.
+
+The current local Xcode project is the source of truth.
 
 ## Building
 
-This is an Xcode project. Build and run via Xcode only — there are no CLI build commands. Open `DominusApp.xcodeproj`. The model file (`gemma-2-2b-it-Q4_K_M.gguf`) must be present in the bundle for inference to work.
+Build and run from Xcode only. Open:
+
+```text
+Dominus17ProMax.xcodeproj
+```
+
+There is no supported CLI build command for this repository.
+
+Required app resources:
+
+- `Dominus17ProMax/gemma-2-2b-it-Q4_K_M.gguf`
+- `Dominus17ProMax/SileroVADModel.mlpackage`
+- `Dominus17ProMax/SoundEffects/*.wav`
+- Swift packages pinned by `Dominus17ProMax.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved`
 
 ## Architecture
 
-### Data flow
-`ContentView` → `ChatStore` → `GemmaEngine` → `SwiftLlama (LlamaService)`
+Main data flow:
 
-- **`ChatStore`** is the single source of truth for conversations, generation state, and model loading. All UI binds to it. It owns the generation pipeline end-to-end.
-- **`GemmaEngine`** wraps `LlamaService`. It holds a persistent `llama` instance (reused across turns for KV cache continuity) and streams tokens back to `ChatStore`.
-- **`LlamaService`** (SwiftLlama package) — not modified directly.
+```text
+ContentView -> ChatStore -> GemmaEngine -> SwiftLlama / LlamaService
+```
 
-### Context window strategy
-Each generation builds the prompt as: `[system prompt + user profile + RAG memories] + [last N messages]`. `trimLLMHistory()` in `ChatStore` enforces the token budget. Key constants:
-- `maxTurnsToKeep = 10` → 20 messages in the rolling window
-- `maxTokenCount = 2048` in `GemmaEngine` — Gemma's practical on-device limit (thermal constraint)
-- The `ContextRingView` in `ContentView` estimates token usage live (chars ÷ 4) and shows a green/yellow/red ring in the header
+Voice flow:
 
-### Memory system (RAG)
-Three files in `Memory/`:
-- `MemoryStore` — SQLite-backed persistence via CoreData or flat JSON (stores content + embedding vectors)
-- `MemoryEmbedder` — wraps Apple's `NLEmbedding` for semantic vectors; keyword fallback when unavailable
-- `MemoryRetriever` — cosine similarity search (semantic) or word-overlap scoring (keyword fallback); top-5 results injected into every system prompt
+```text
+ContentView voice state
+  -> WhisperManager records/transcribes
+  -> SileroVAD detects speech activity
+  -> ChatStore sends to Gemma
+  -> SpeechManager speaks streamed TTS
+  -> ContentView resumes listening after TTS/cue drain
+```
 
-### User profile
-`ProfileStore` auto-extracts personal facts from user messages and injects them as a structured block at the top of every system prompt, before RAG memories.
+Core responsibilities:
 
-### Voice pipeline
-Three independent managers — they do not call each other:
+- `ContentView` owns the SwiftUI shell, sidebar, chat UI, push-to-talk state, voice auto-send endpointing, warmup, status pills, orb overlay, and user interaction.
+- `ChatStore` is the single source of truth for conversations, generation state, prompt assembly, context trimming, current-chat memory, profile wiring, title generation, persistence, and cancellation.
+- `GemmaEngine` owns the persistent `LlamaService` instance and streams from the bundled GGUF model.
+- `WhisperManager` owns WhisperKit loading, AVAudioEngine recording, live/final transcription, adaptive raw-sound tracking, and VAD feeding.
+- `SileroVAD` wraps the bundled Core ML model and scores 16 kHz `576`-sample chunks.
+- `SpeechManager` owns TTS, sound effects, route-aware gain, queue drain, message playback, and the coordinated voice-mode audio session.
 
-| Class | Role |
-|---|---|
-| `SpeechRecognitionManager` | STT via `SFSpeechRecognizer`. Publishes `transcript`, `audioLevel`, `isListening`. Has VAD (amplitude monitor) for detecting user speech while AI talks. |
-| `SpeechManager` | TTS via `AVSpeechSynthesizer`. Queued chunk-by-chunk playback. Fires `onAllSpeechFinished` when queue drains. |
-| `VoiceOrbOverlay` / `VoiceOrb` | SwiftUI overlay shown during PTT. Three ripple rings + amplitude-reactive core. Defined in `VoiceOrb.swift`. |
+## Current Voice Endpointing
 
-PTT state machine lives in `ContentView` as `PTTState` enum: `.idle → .listening → .aiTalking → .listening → ...`
+Do not treat all microphone activity as user speech. The current fix separates:
 
-The audio session is owned by `SpeechRecognitionManager.setupVoiceSession()` using `.playAndRecord` / `.voiceChat` mode (echo cancellation). `SpeechManager` deliberately does NOT set its own audio session — it piggybacks on the existing one to prevent echo and choppy audio.
+- `lastSpeechActivityAt`: real speech activity from Silero VAD.
+- `lastSoundActivityAt`: raw sound over the adaptive noise floor.
 
-TTS is streamed sentence-by-sentence: `ChatStore._send()` buffers tokens until a sentence boundary or 80-char threshold, then calls `SpeechManager.enqueue()`.
+`ContentView` waits for transcript stability, then checks VAD speech silence. Recent VAD speech blocks sending. Raw sound without VAD speech only gets a short grace period, then the app sends so background noise cannot hold the turn forever.
 
-### Known STT limitation
-`SFSpeechRecognizer` with on-device recognition has a ~2-3 second silence timeout and a 60-second hard session cap enforced by iOS — these cannot be disabled. Multiple workarounds were attempted (prefix accumulation, session restart with transcript preservation) but the transcript still clears in some race conditions. **The planned fix is to replace `SFSpeechRecognizer` with WhisperKit** on the `feature/whisper-stt` branch. WhisperKit records raw audio continuously with `AVAudioEngine` and transcribes on-demand when the user taps send — no session timeouts.
+Important constants in `ContentView`:
 
-## Branch Map
+- `defaultVoiceAutoSendDelay = 1.35`
+- `fastVoiceAutoSendDelay = 0.95`
+- `shortVoiceAutoSendDelay = 1.05`
+- `sequenceVoiceAutoSendDelay = 1.65`
+- `voiceSpeechSilenceRequirement = 0.95`
+- `rawSoundOnlyMaxHoldSeconds = 0.9`
+- `hardSendAfterContentSilenceSeconds = 3.0`
+- `substantialGrowthWordThreshold = 2`
 
-| Branch | Status | Purpose |
-|---|---|---|
-| `main` | ✅ Stable | Persistent KV cache, context ring, voice orb, 20-message rolling window |
-| `feature/whisper-stt` | 🚧 In progress | Replace `SFSpeechRecognizer` with WhisperKit for session-free STT |
-| `fix/voice-transcript-and-input-ux` | ⚠️ Abandoned | Multiple attempts to fix transcript clearing — did not fully resolve |
-| `feature/persistent-kv-cache-main` | ✅ Merged | Origin of KV cache + context ring work |
+Continuing sequences such as counting or alphabet tests use the longer sequence delay.
+
+## Context Strategy
+
+`GemmaEngine` uses:
+
+- `batchSize = 512`
+- `maxTokenCount = 2048`
+- `useGPU = true`
+
+`ChatStore` currently uses:
+
+- `maxTurnsToKeep = 3`
+- `minTurnsToKeep = 2`
+- `targetContextUsage = 0.10`
+- `approximateContextTokenLimit = 2048`
+
+Prompt shape:
+
+```text
+system identity
++ profile/persona
++ recent deterministic context
++ current-chat summary/memory when recall is requested
++ ambient context when relevant
++ recent raw turns
+```
+
+Current-chat memory retrieval is gated by recall-style prompts such as "earlier", "remember when", or "summarize this chat". Cross-chat long-term memory is not automatically injected into every prompt; stable cross-chat user context belongs in `ProfileStore`.
+
+## Memory And Profile
+
+- `MemoryStore` uses SwiftData with `DominusMemory.store`.
+- `MemoryEmbedder` uses Apple's `NLEmbedding.sentenceEmbedding(for: .english)` with vDSP cosine similarity.
+- `MemoryRetriever.retrieve()` currently returns current-chat context for prompt injection.
+- `MemoryView` is the user-facing Memory Journal for long-term saved memories.
+- `ProfileStore` stores stable user facts and persona instructions and injects them into every prompt.
+
+## Audio Constraints
+
+Voice mode depends on a coordinated `.playAndRecord` session with mode `.default` and options:
+
+```swift
+[.defaultToSpeaker, .allowBluetooth, .allowBluetoothA2DP]
+```
+
+Do not add casual `setCategory` or `setActive` calls in new audio code. Repeated session changes can cause route resets, volume HUD flashes, clipped cue tails, or broken turn timing.
+
+`SpeechManager` uses `AVSpeechSynthesizer.write`, not `speak()`, so it can apply speaker-only gain and peak limiting through `AVAudioEngine`.
+
+## Active Vs Archived Voice Code
+
+Active STT is `WhisperManager` plus `SileroVAD`. The old SFSpeech recognizer lives under `Archive/SpeechRecognitionManager.swift` and is not the current app path.
 
 ## Key Constraints
 
-- **Thermal**: 8192 token context caused noticeable heat. `maxTokenCount = 2048` is the practical on-device limit for Gemma 2B Q4_K_M.
-- **KV cache**: `GemmaEngine.streamChat()` reuses `self.llama` across turns. SwiftLlama's `initializeCompletion()` detects shared token prefixes and skips reprocessing them. Do not revert to `freshLlama` per generation.
-- **Audio session**: There is exactly one `AVAudioSession` active during voice mode. Do not call `setCategory` from `SpeechManager` — it will break echo cancellation and cause choppy TTS.
-- **Main actor**: `ChatStore`, `GemmaEngine`, `SpeechRecognitionManager`, and `SpeechManager` are all `@MainActor`. Do not dispatch to background threads for UI state.
+- Keep the persistent `GemmaEngine.llama`; do not recreate the model per turn.
+- Keep `ChatStore`, `GemmaEngine`, `WhisperManager`, and `SpeechManager` main-actor aligned unless the architecture is deliberately changed.
+- Keep Silero VAD input at `576` samples at 16 kHz.
+- Keep endpointing based on VAD speech activity plus bounded raw-noise grace, not transcript stability alone.
+- Respect the 2048-token context budget unless thermal/performance testing supports a change.
+- Build and run through Xcode.
 
-## Package Dependencies
+## Repository Notes
 
-- `swift-llama-cpp` v1.2.0 — `https://github.com/pgorzelany/swift-llama-cpp` (pinned in `Package.resolved`)
-- WhisperKit — to be added via Xcode: **File → Add Package Dependencies** → `https://github.com/argmaxinc/WhisperKit`
+- `Archive/` contains historical/reference code.
+- `Build Stack Notes/` contains old architecture/build notes.
+- `Packages/kokoro-swift/` is a local untracked Kokoro TTS experiment and is not referenced by the current Xcode project.
+- Machine-generated files such as `.DS_Store`, Xcode `xcuserdata`, SwiftPM build folders, and the local `Packages/` experiment are ignored by the root `.gitignore`.
