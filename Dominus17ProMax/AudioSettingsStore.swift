@@ -2,6 +2,7 @@ import Foundation
 import Combine
 import SwiftUI
 import UIKit
+import AVFoundation
 
 @MainActor
 final class AudioSettingsStore: ObservableObject {
@@ -29,38 +30,32 @@ final class AudioSettingsStore: ObservableObject {
     }
 
     private enum Defaults {
-        static let startupSoundVolume = 0.10
-        static let voiceModeActivationVolume = 0.35
-        static let voiceModeDeactivationVolume = 0.35
-        static let aiVoiceResponseVolume = 1.0
+        static let startupSoundVolume = 0.05
+        static let voiceModeActivationVolume = 0.07
+        static let voiceModeDeactivationVolume = 0.03
+        static let aiVoiceResponseVolume = 0.50
         static let voiceModeInactivityTimeout = 60.0
         static let hapticsEnabled = true
-        static let orbScale = 1.0
+        static let orbScale = 1.74
         static let halftoneEnabled = true
         // Default dot color: pure white (clean halftone over any emoji).
         static let halftoneDotRed:   Double = 1.0
         static let halftoneDotGreen: Double = 1.0
         static let halftoneDotBlue:  Double = 1.0
-        // Default density: medium grid (about 22 dots per side).
-        static let halftoneDensity:  Double = 0.36
-        // Default coverage: matches the visible disc size used pre-bug
-        // (0.72 of disc / 1.30 of halftone canvas ≈ 0.55).
-        static let halftoneEmojiCoverage: Double = 0.55
-        // 0.52 ≈ slightly faster than Apple's 0.5 default — most users want a touch
-        // more pace than the OS default, and this matches what feels natural with
-        // Premium voices on iPhone.
-        // 0.55 is noticeably brisker than Apple's 0.5 default — closer to how a
-        // person talks in a casual conversation. The slider can push it higher if
-        // the user wants it faster still.
-        static let speechRate: Double = 0.55
+        static let halftoneDensity:  Double = 1.0
+        static let halftoneEmojiCoverage: Double = 0.80
+        // 44% on the exposed 0.35...0.80 speed slider.
+        static let speechRate: Double = 0.548
         // 1.05 brightens the voice just enough to fix the "all voices sound deep"
         // complaint without making them sound artificial.
         static let speechPitch: Double = 1.05
-        // Match the existing voice-mode cue defaults so the new "round
-        // conclusion" cues are audible but don't clip over the AI's voice.
-        static let userResponseConcludedVolume = 0.35
-        static let aiResponseConcludedVolume   = 0.35
+        static let userResponseConcludedVolume = 0.08
+        static let aiResponseConcludedVolume   = 0.14
     }
+
+    static let defaultVoiceName = "Zoe"
+    static let defaultVoiceLanguage = "en-US"
+    static let defaultVoiceLabel = "Zoe (Premium)"
 
     // Apple's documented bounds for AVSpeechUtterance.
     // We expose 0.30…0.70 to the user; the full 0.0…1.0 range includes
@@ -78,6 +73,12 @@ final class AudioSettingsStore: ObservableObject {
     static let voiceModeInactivityTimeoutStep = 30.0
     static let minimumOrbScale = 0.6
     static let maximumOrbScale = 2.4
+
+    static var defaultSpeechRate: Double { Defaults.speechRate }
+    static var defaultSpeechPitch: Double { Defaults.speechPitch }
+    static var defaultOrbScale: Double { Defaults.orbScale }
+    static var defaultHalftoneDensity: Double { Defaults.halftoneDensity }
+    static var defaultHalftoneEmojiCoverage: Double { Defaults.halftoneEmojiCoverage }
 
     @Published var startupSoundVolume: Double {
         didSet { save(clamp(startupSoundVolume), forKey: Keys.startupSoundVolume) }
@@ -122,8 +123,8 @@ final class AudioSettingsStore: ObservableObject {
         didSet { defaults.set(hapticsEnabled, forKey: Keys.hapticsEnabled) }
     }
 
-    /// User-controlled size multiplier for the voice-mode orb. 1.0 = default
-    /// size; range [0.6, 2.4]. Adjusted by pinch-to-zoom on the orb itself.
+    /// User-controlled size multiplier for the voice-mode orb. Default is
+    /// 1.74; range [0.6, 2.4]. Adjusted by pinch-to-zoom on the orb itself.
     @Published var orbScale: Double {
         didSet { save(clampOrbScale(orbScale), forKey: Keys.orbScale) }
     }
@@ -159,8 +160,8 @@ final class AudioSettingsStore: ObservableObject {
 
     /// Stable identifier for the user-chosen `AVSpeechSynthesisVoice`. nil = auto-pick.
     /// SpeechManager reads this on init and after every change; if the identifier no
-    /// longer resolves (user uninstalled the voice in iOS Settings), the fallback
-    /// male-English picker takes over automatically.
+    /// longer resolves (user uninstalled the voice in iOS Settings), the app
+    /// default voice/fallback picker takes over automatically.
     /// AVSpeechUtterance.rate — perceived speed. Clamped to the public range.
     @Published var speechRate: Double {
         didSet { save(clampSpeechRate(speechRate), forKey: Keys.speechRate) }
@@ -247,6 +248,34 @@ final class AudioSettingsStore: ObservableObject {
         selectedVoiceIdentifier = nil
         speechRate = Defaults.speechRate
         speechPitch = Defaults.speechPitch
+    }
+
+    func resetOrbAppearanceToDefaults() {
+        orbScale = Defaults.orbScale
+        halftoneEnabled  = Defaults.halftoneEnabled
+        halftoneDotRed   = Defaults.halftoneDotRed
+        halftoneDotGreen = Defaults.halftoneDotGreen
+        halftoneDotBlue  = Defaults.halftoneDotBlue
+        halftoneDensity  = Defaults.halftoneDensity
+        halftoneEmojiCoverage = Defaults.halftoneEmojiCoverage
+    }
+
+    static func defaultVoice() -> AVSpeechSynthesisVoice? {
+        let voices = AVSpeechSynthesisVoice.speechVoices()
+        if let premiumZoe = voices.first(where: {
+            $0.language == defaultVoiceLanguage
+                && $0.name.localizedCaseInsensitiveCompare(defaultVoiceName) == .orderedSame
+                && $0.quality == .premium
+        }) {
+            return premiumZoe
+        }
+        if let zoe = voices.first(where: {
+            $0.language.hasPrefix("en")
+                && $0.name.localizedCaseInsensitiveCompare(defaultVoiceName) == .orderedSame
+        }) {
+            return zoe
+        }
+        return nil
     }
 
     func voiceModeVolume(for resourceName: String) -> Double {

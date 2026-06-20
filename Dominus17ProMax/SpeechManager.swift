@@ -48,6 +48,14 @@ final class SpeechManager: NSObject, ObservableObject {
     /// above what AVSpeechSynthesizer outputs on its own. The limiter prevents
     /// the extra gain from clipping on loud syllables.
     private let speechGain: Float = 2.5
+    /// Hard app-level caps for close/private listening routes. iOS system
+    /// volume is user-controlled, so we protect ears by lowering Dominus audio
+    /// before it reaches Bluetooth/headphones instead of trying to move the
+    /// hardware volume slider.
+    private let protectedSpeechVolumeCap: Float = 0.204
+    private let protectedSpeechMaxEffectiveVolume: Float = 0.153
+    private let protectedSFXVolumeCap: Float = 0.1785
+    private let protectedSFXMaxEffectiveVolume: Float = 0.1275
 
     // MARK: - Bookkeeping
 
@@ -98,15 +106,19 @@ final class SpeechManager: NSObject, ObservableObject {
         preferredVoice = resolvePreferredVoice()
     }
 
-    /// Honor the user's pinned voice when it's installed; otherwise fall back to
-    /// the male-English auto-picker. Returning nil here is safe — callers cope
-    /// with `AVSpeechSynthesisVoice(language: "en-US")`.
+    /// Honor the user's pinned voice when it's installed; otherwise use the
+    /// app default voice, Zoe Premium when available. Returning nil here is
+    /// safe — callers cope with `AVSpeechSynthesisVoice(language: "en-US")`.
     private func resolvePreferredVoice() -> AVSpeechSynthesisVoice? {
         if let id = AudioSettingsStore.shared.selectedVoiceIdentifier,
            let v = AVSpeechSynthesisVoice(identifier: id) {
             return v
         }
-        return pickMaleEnglishVoice()
+        if let defaultVoice = AudioSettingsStore.defaultVoice() {
+            print("🎙 Default voice selected:", defaultVoice.name, "|", defaultVoice.language, "| quality:", defaultVoice.quality.rawValue)
+            return defaultVoice
+        }
+        return pickFallbackEnglishVoice()
     }
 
     /// Clamp to Apple's documented `AVSpeechUtterance.rate` bounds so a stale
@@ -191,7 +203,7 @@ final class SpeechManager: NSObject, ObservableObject {
         let utt    = AVSpeechUtterance(string: cleaned)
         utt.rate   = currentSpeechRate()
         utt.pitchMultiplier = currentSpeechPitch()
-        utt.volume = safeSpeechVolume()
+        utt.volume = speechUtteranceVolume()
         utt.voice  = preferredVoice ?? AVSpeechSynthesisVoice(language: "en-US")
         utt.preUtteranceDelay  = 0
         utt.postUtteranceDelay = 0
@@ -268,7 +280,7 @@ final class SpeechManager: NSObject, ObservableObject {
             }
         }
 
-        sfxPlayerNode.volume = volume
+        sfxPlayerNode.volume = safeSFXVolume(volume)
 
         let fileDuration = file.fileFormat.sampleRate > 0
             ? Double(file.length) / file.fileFormat.sampleRate
@@ -299,6 +311,10 @@ final class SpeechManager: NSObject, ObservableObject {
             let cap = max(0.25, min(fileDuration, 1.2))
             try? await Task.sleep(nanoseconds: UInt64(cap * 1_000_000_000))
         }
+    }
+
+    func safeEffectVolume(_ requestedVolume: Float) -> Float {
+        safeSFXVolume(requestedVolume)
     }
 
     private func attachSFXNodeIfNeeded(format: AVAudioFormat) {
@@ -364,11 +380,10 @@ final class SpeechManager: NSObject, ObservableObject {
         configureEngineIfNeeded(with: buffer.format)
         guard engineConfigured, audioEngine.isRunning else { return }
 
-        // Apply the gain boost ONLY when output is the built-in speaker.
-        // Headphones, AirPods, and Bluetooth keep their existing safety cap
-        // (handled by `safeSpeechVolume()` on `utt.volume`) and receive no
-        // extra boost — they are listened to up close and must not be louder
-        // than Apple's default.
+        // Apply the gain boost only when output is the built-in speaker.
+        // Protected routes such as headphones, AirPods, Bluetooth, car audio,
+        // and AirPlay use this same per-buffer path as a live safety attenuator,
+        // so turning system volume up mid-sentence still lowers Dominus audio.
         let gain = currentSpeechGain()
         if gain != 1.0 {
             applyGain(gain, to: buffer)
@@ -405,27 +420,10 @@ final class SpeechManager: NSObject, ObservableObject {
     }
 
     /// Per-route speech gain. Returns the full `speechGain` boost only when
-    /// the user is listening on the device's built-in speaker. For headphones,
-    /// AirPods, and Bluetooth output (any "private listening" route), returns
-    /// 1.0 — no boost, so the headphone safety cap on `utt.volume` is the
-    /// only thing controlling level. Output is then identical to stock Apple
-    /// TTS, which is what the user expects when wearing headphones.
+    /// the user is listening on the device's built-in speaker. Protected
+    /// routes return a live safety attenuation instead of a boost.
     private func currentSpeechGain() -> Float {
-        let route = AVAudioSession.sharedInstance().currentRoute
-        let isPrivateListening = route.outputs.contains { output in
-            switch output.portType {
-            case .headphones,
-                 .bluetoothA2DP,
-                 .bluetoothHFP,
-                 .bluetoothLE,
-                 .carAudio,
-                 .airPlay:
-                return true
-            default:
-                return false
-            }
-        }
-        return isPrivateListening ? 1.0 : speechGain
+        isProtectedListeningRoute ? safeSpeechVolume() : speechGain
     }
 
     /// Multiply every sample in every channel of `buffer` by `gain` using vDSP.
@@ -562,23 +560,53 @@ final class SpeechManager: NSObject, ObservableObject {
         }
     }
 
+    private func speechUtteranceVolume() -> Float {
+        let userVolume = clampUnit(Float(AudioSettingsStore.shared.aiVoiceResponseVolume))
+        return isProtectedListeningRoute ? 1.0 : userVolume
+    }
+
     private func safeSpeechVolume() -> Float {
-        let route = AVAudioSession.sharedInstance().currentRoute
-        let isPrivateListening = route.outputs.contains { output in
+        let userVolume = clampUnit(Float(AudioSettingsStore.shared.aiVoiceResponseVolume))
+        guard isProtectedListeningRoute else { return userVolume }
+        return userVolume * protectedRouteCap(
+            baseCap: protectedSpeechVolumeCap,
+            maxEffectiveVolume: protectedSpeechMaxEffectiveVolume
+        )
+    }
+
+    private func safeSFXVolume(_ requestedVolume: Float) -> Float {
+        let requestedVolume = clampUnit(requestedVolume)
+        guard isProtectedListeningRoute else { return requestedVolume }
+        return requestedVolume * protectedRouteCap(
+            baseCap: protectedSFXVolumeCap,
+            maxEffectiveVolume: protectedSFXMaxEffectiveVolume
+        )
+    }
+
+    private func protectedRouteCap(baseCap: Float, maxEffectiveVolume: Float) -> Float {
+        let systemVolume = max(0.05, AVAudioSession.sharedInstance().outputVolume)
+        let dynamicCap = maxEffectiveVolume / systemVolume
+        return clampUnit(min(baseCap, dynamicCap))
+    }
+
+    private var isProtectedListeningRoute: Bool {
+        AVAudioSession.sharedInstance().currentRoute.outputs.contains { output in
             switch output.portType {
             case .headphones,
                  .bluetoothA2DP,
                  .bluetoothHFP,
-                 .bluetoothLE:
+                 .bluetoothLE,
+                 .carAudio,
+                 .airPlay:
                 return true
             default:
                 return false
             }
         }
+    }
 
-        let routeCap: Float = isPrivateListening ? 0.48 : 1.0
-        let userVolume = Float(AudioSettingsStore.shared.aiVoiceResponseVolume)
-        return min(1.0, max(0.0, routeCap * userVolume))
+    private func clampUnit(_ value: Float) -> Float {
+        min(1.0, max(0.0, value))
     }
 
     // MARK: - Completion tracking
@@ -706,7 +734,7 @@ final class SpeechManager: NSObject, ObservableObject {
 
     // MARK: - Voice selection
 
-    private func pickMaleEnglishVoice() -> AVSpeechSynthesisVoice? {
+    private func pickFallbackEnglishVoice() -> AVSpeechSynthesisVoice? {
         let allVoices = AVSpeechSynthesisVoice.speechVoices()
 
         let english = allVoices.filter { $0.language.hasPrefix("en") }

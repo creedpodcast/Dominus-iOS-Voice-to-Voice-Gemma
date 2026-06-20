@@ -188,6 +188,27 @@ Current behavior:
 
 Do not casually add separate `setCategory` or `setActive` calls from new audio code. Repeated session changes can cause volume HUD flashes, route resets, clipped tails, or broken voice-mode timing.
 
+Default audio/orb settings:
+
+| Setting | Default |
+|---|---:|
+| Startup sound | `5%` |
+| Voice mode activation | `7%` |
+| Voice mode deactivation | `3%` |
+| User message sent | `8%` |
+| AI reply finished | `14%` |
+| AI voice | `Zoe (Premium)` when installed |
+| AI voice response | `50%` |
+| AI voice speed | `44%` |
+| AI voice pitch | `1.05x` |
+| Voice activity timeout | `1 min` |
+| Orb size | `174%` |
+| Halftone dots | white |
+| Halftone density | `100%` |
+| Emoji size | `80%` |
+
+Protected routes such as headphones, AirPods, Bluetooth, car audio, and AirPlay never receive the boosted speaker path. Their TTS and sound-effect volume is scaled inside a safe app-level cap, while still respecting the user's in-app volume sliders.
+
 ## Push-To-Talk State Machine
 
 The core state enum in `ContentView` is:

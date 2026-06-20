@@ -99,9 +99,9 @@ struct OrbSizeAdjustView: View {
                     .tint(.white)
 
                     Button {
-                        audioSettings.orbScale = 1.0
+                        audioSettings.resetOrbAppearanceToDefaults()
                     } label: {
-                        Label("Reset to default size", systemImage: "arrow.counterclockwise")
+                        Label("Restore orb defaults", systemImage: "arrow.counterclockwise")
                             .font(.footnote.weight(.medium))
                     }
                     .buttonStyle(.bordered)

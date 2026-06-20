@@ -23,8 +23,8 @@ private enum HeadphoneVolumeWarning: Equatable {
 
     var message: String {
         switch self {
-        case .high: return "Headphone volume is high"
-        case .low:  return "Headphone volume is very low"
+        case .high: return "Listening volume is high"
+        case .low:  return "Listening volume is very low"
         }
     }
 }
@@ -1243,7 +1243,7 @@ struct ContentView: View {
 
         do {
             let player = try AVAudioPlayer(contentsOf: url)
-            let volume = Float(audioSettings.startupSoundVolume)
+            let volume = SpeechManager.shared.safeEffectVolume(Float(audioSettings.startupSoundVolume))
             player.volume = volume
             player.prepareToPlay()
             player.setVolume(volume, fadeDuration: 0)
@@ -1303,7 +1303,9 @@ struct ContentView: View {
             case .headphones,
                  .bluetoothA2DP,
                  .bluetoothHFP,
-                 .bluetoothLE:
+                 .bluetoothLE,
+                 .carAudio,
+                 .airPlay:
                 return true
             default:
                 return false

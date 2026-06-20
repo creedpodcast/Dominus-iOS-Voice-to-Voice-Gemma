@@ -172,8 +172,9 @@ struct AudioSettingsView: View {
                 Section {
                     Button(role: .destructive) {
                         settings.resetToDefaults()
+                        SpeechManager.shared.refreshPreferredVoice()
                     } label: {
-                        Label("Reset Audio Defaults", systemImage: "arrow.counterclockwise")
+                        Label("Restore Default Settings", systemImage: "arrow.counterclockwise")
                     }
                 }
             }
@@ -195,9 +196,12 @@ struct AudioSettingsView: View {
     private func currentVoiceDisplayName() -> String {
         if let id = settings.selectedVoiceIdentifier,
            let v = AVSpeechSynthesisVoice(identifier: id) {
-            return v.name
+            return speechVoiceDisplayName(v)
         }
-        return "Auto"
+        if let defaultVoice = AudioSettingsStore.defaultVoice() {
+            return speechVoiceDisplayName(defaultVoice)
+        }
+        return AudioSettingsStore.defaultVoiceLabel
     }
 
     private func volumeSlider(title: String, value: Binding<Double>) -> some View {
@@ -238,7 +242,7 @@ struct AudioSettingsView: View {
             try AVAudioSession.sharedInstance().setActive(true, options: [])
 
             let player = try AVAudioPlayer(contentsOf: url)
-            let clampedVolume = Float(min(1.0, max(0.0, volume)))
+            let clampedVolume = SpeechManager.shared.safeEffectVolume(Float(min(1.0, max(0.0, volume))))
             player.volume = clampedVolume
             player.prepareToPlay()
             player.setVolume(clampedVolume, fadeDuration: 0)
@@ -298,8 +302,8 @@ struct VoicePickerScreen: View {
                 }
 
                 Button(role: .destructive) {
-                    settings.speechRate = 0.55
-                    settings.speechPitch = 1.05
+                    settings.speechRate = AudioSettingsStore.defaultSpeechRate
+                    settings.speechPitch = AudioSettingsStore.defaultSpeechPitch
                 } label: {
                     Label("Reset speed & pitch", systemImage: "arrow.counterclockwise")
                 }
@@ -341,7 +345,7 @@ struct VoicePickerScreen: View {
     private func autoVoiceRow() -> some View {
         let isSelected = settings.selectedVoiceIdentifier == nil
         return HStack {
-            Label("Auto (recommended)", systemImage: "wand.and.stars")
+            Label("Default: \(AudioSettingsStore.defaultVoiceLabel)", systemImage: "wand.and.stars")
             Spacer()
             if isSelected {
                 Image(systemName: "checkmark").foregroundStyle(.tint)
@@ -476,3 +480,15 @@ struct VoicePickerScreen: View {
     }
 }
 
+private func speechVoiceDisplayName(_ voice: AVSpeechSynthesisVoice) -> String {
+    let quality: String
+    switch voice.quality {
+    case .premium:
+        quality = "Premium"
+    case .enhanced:
+        quality = "Enhanced"
+    default:
+        quality = "Standard"
+    }
+    return "\(voice.name) (\(quality))"
+}
