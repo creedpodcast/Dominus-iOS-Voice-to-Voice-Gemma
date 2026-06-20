@@ -31,6 +31,14 @@ final class SpeechManager: NSObject, ObservableObject {
     private let audioEngine = AVAudioEngine()
     private let playerNode  = AVAudioPlayerNode()
     private var limiter: AVAudioUnitEffect?
+
+    /// Second player node attached to the same engine for SFX (activation
+    /// cue, conclusion cues, etc.). Routes directly to the main mixer —
+    /// bypasses the TTS gain stage and limiter so cue files play at their
+    /// authored level. Lives in the same engine so SFX and TTS share the
+    /// audio render thread and never compete for hardware access.
+    private let sfxPlayerNode = AVAudioPlayerNode()
+    private var sfxAttached = false
     /// Format used when wiring the engine. Determined from the very first
     /// synthesizer buffer and then reused for every subsequent connection.
     private var engineFormat: AVAudioFormat?
@@ -121,7 +129,32 @@ final class SpeechManager: NSObject, ObservableObject {
         if preferredVoice == nil {
             preferredVoice = resolvePreferredVoice()
         }
-        prepareAudioSessionForSpeech()
+        lockVoiceModeSession()
+    }
+
+    /// "Phone call" lockdown for the audio session — set once at voice
+    /// mode entry and not touched again until exit. Forces .playAndRecord
+    /// + .default with options that interrupt other apps' audio (Spotify,
+    /// podcasts, etc. get paused), and explicitly activates the session.
+    /// All downstream callers (`prepareAudioSessionForSpeech`,
+    /// `WhisperManager.setupAudioSession`, `playSFX`) detect this state is
+    /// already correct and do nothing — eliminating the volume-HUD blip
+    /// between turns.
+    func lockVoiceModeSession() {
+        let session = AVAudioSession.sharedInstance()
+        do {
+            try session.setCategory(
+                .playAndRecord,
+                mode: .default,
+                // Absence of .mixWithOthers / .duckOthers means iOS treats
+                // this session as exclusive: other apps' audio gets
+                // interrupted (paused) the way iOS does for Phone/FaceTime.
+                options: [.defaultToSpeaker, .allowBluetooth, .allowBluetoothA2DP]
+            )
+            try session.setActive(true, options: .notifyOthersOnDeactivation)
+        } catch {
+            print("❌ Voice-mode session lock failed:", error.localizedDescription)
+        }
     }
 
     /// Pre-load the AVSpeechSynthesizer voice file at app launch so the very first
@@ -178,6 +211,108 @@ final class SpeechManager: NSObject, ObservableObject {
         enqueue(text)
     }
 
+    /// Play a bundled SFX wav through the SAME audio engine as TTS so the
+    /// two never compete for hardware access. Replaces the prior
+    /// AVAudioPlayer + setActive(true) path that caused mid-conversation
+    /// volume blips and could clip the AI voice's tail.
+    ///
+    /// - waitForFullDuration: when true, awaits the full clip length plus a
+    ///   small drain pad — used by the AI-conclusion cue so the mic never
+    ///   captures its tail. When false, awaits at most ~1.2s so the next
+    ///   audio event (greeting TTS) can start back-to-back without a gap.
+    func playSFX(named name: String,
+                 volume: Float,
+                 waitForFullDuration: Bool = false) async {
+        guard let url = Bundle.main.url(
+            forResource: name,
+            withExtension: "wav",
+            subdirectory: "SoundEffects"
+        ) ?? Bundle.main.url(
+            forResource: name,
+            withExtension: "wav"
+        ) else {
+            print("🔇 SFX not found:", name)
+            return
+        }
+
+        guard let file = try? AVAudioFile(forReading: url) else {
+            print("🔇 SFX file open failed:", name)
+            return
+        }
+        let format = file.processingFormat
+        guard let buffer = AVAudioPCMBuffer(
+            pcmFormat: format,
+            frameCapacity: AVAudioFrameCount(file.length)
+        ) else {
+            print("🔇 SFX buffer alloc failed:", name)
+            return
+        }
+        do {
+            try file.read(into: buffer)
+        } catch {
+            print("🔇 SFX read failed:", error.localizedDescription)
+            return
+        }
+
+        attachSFXNodeIfNeeded(format: format)
+        // SFX node can run before any TTS has played — make sure the
+        // engine itself is going. We deliberately do NOT call
+        // `setActive(true)` here: the voice-mode session is already
+        // locked from entry. A redundant activation here causes iOS to
+        // re-evaluate routing, which produces the volume HUD blip the
+        // user sees between cues.
+        if !audioEngine.isRunning {
+            do { try audioEngine.start() } catch {
+                print("🔇 SFX engine start failed:", error.localizedDescription)
+                return
+            }
+        }
+
+        sfxPlayerNode.volume = volume
+
+        let fileDuration = file.fileFormat.sampleRate > 0
+            ? Double(file.length) / file.fileFormat.sampleRate
+            : 0
+
+        if waitForFullDuration {
+            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                sfxPlayerNode.scheduleBuffer(
+                    buffer,
+                    at: nil,
+                    options: [],
+                    completionCallbackType: .dataPlayedBack
+                ) { _ in cont.resume() }
+                if !sfxPlayerNode.isPlaying { sfxPlayerNode.play() }
+            }
+            // Drain pad before returning. The .dataPlayedBack callback
+            // fires when the buffer is consumed by the hardware, but the
+            // sound waves keep bouncing around the room for another
+            // ~300–400 ms in a typical environment. Without this pad,
+            // the mic activates while that reverb tail is still audible,
+            // and Whisper transcribes it as phantom user speech. 450 ms
+            // is enough for normal indoor rooms (small reverb), short
+            // enough that the turn-around feels snappy.
+            try? await Task.sleep(nanoseconds: 450_000_000)
+        } else {
+            sfxPlayerNode.scheduleBuffer(buffer, at: nil, options: [], completionHandler: nil)
+            if !sfxPlayerNode.isPlaying { sfxPlayerNode.play() }
+            let cap = max(0.25, min(fileDuration, 1.2))
+            try? await Task.sleep(nanoseconds: UInt64(cap * 1_000_000_000))
+        }
+    }
+
+    private func attachSFXNodeIfNeeded(format: AVAudioFormat) {
+        guard !sfxAttached else { return }
+        audioEngine.attach(sfxPlayerNode)
+        // Route SFX directly to the main mixer (bypasses the TTS gain
+        // limiter chain — cue files are mastered at their target level).
+        // mainMixerNode handles sample-rate conversion automatically, so
+        // cues authored at different sample rates than the TTS pipeline
+        // are fine.
+        audioEngine.connect(sfxPlayerNode, to: audioEngine.mainMixerNode, format: format)
+        sfxAttached = true
+    }
+
     func stopAndClear() {
         ThinkingFillerManager.shared.cancelScheduling()
         outstandingUtterances = 0
@@ -189,6 +324,9 @@ final class SpeechManager: NSObject, ObservableObject {
         synth.stopSpeaking(at: .immediate)
         if playerNode.isPlaying {
             playerNode.stop()
+        }
+        if sfxPlayerNode.isPlaying {
+            sfxPlayerNode.stop()
         }
     }
 
@@ -402,25 +540,25 @@ final class SpeechManager: NSObject, ObservableObject {
     }
 
     private func prepareAudioSessionForSpeech() {
+        // Idempotent. Inside voice mode the category/mode/active state are
+        // set once at entry (via lockVoiceModeSession) and not touched
+        // again — every redundant setCategory / setActive triggers iOS to
+        // re-evaluate routing, which is the volume HUD blip the user sees
+        // between turns. Only do real work if iOS has somehow taken the
+        // session out from under us.
         let session = AVAudioSession.sharedInstance()
-        do {
-            // Use `.playback` (not `.playAndRecord`) while the AI is speaking.
-            // `.playAndRecord` is a conversational category and iOS attenuates
-            // its output ~6-10 dB below `.playback` even with `.spokenAudio`
-            // mode. `.playback` uses the loud audiobook/media path — same as
-            // Audible, Spotify, and ChatGPT voice. When the user starts
-            // talking again, `WhisperManager.setupAudioSession()` flips the
-            // category back to `.playAndRecord` for recording. The mic is off
-            // during AI speech, so voice barge-in is disabled — the user
-            // interrupts by tapping the orb.
-            try session.setCategory(
-                .playback,
-                mode: .spokenAudio,
-                options: [.duckOthers]
-            )
-            try session.setActive(true, options: .notifyOthersOnDeactivation)
-        } catch {
-            print("❌ TTS audio session setup failed:", error.localizedDescription)
+        let needsCategory = session.category != .playAndRecord || session.mode != .default
+        if needsCategory {
+            do {
+                try session.setCategory(
+                    .playAndRecord,
+                    mode: .default,
+                    options: [.defaultToSpeaker, .allowBluetooth, .allowBluetoothA2DP]
+                )
+                try session.setActive(true, options: .notifyOthersOnDeactivation)
+            } catch {
+                print("❌ TTS audio session setup failed:", error.localizedDescription)
+            }
         }
     }
 

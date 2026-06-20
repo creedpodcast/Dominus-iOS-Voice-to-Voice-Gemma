@@ -6,7 +6,7 @@ Dominus is a fully local, privacy-first AI assistant for iPhone. No internet con
 
 ## What It Does
 
-Talk to an AI that talks back. Tap once to speak, then pause — after real words are transcribed and the transcript has been stable for 1.5 seconds, Dominus sends the message automatically and responds with text and voice simultaneously. Tap at any point while the AI is speaking to cut it off and speak again. Fully on-device, fully private.
+Talk to an AI that talks back. Tap once to speak, then pause — Dominus watches Whisper partials, Silero VAD speech activity, and adaptive background noise so it sends after speech ends without letting room noise hold the turn hostage. Tap at any point while the AI is speaking to cut it off and speak again. Fully on-device, fully private.
 
 ---
 
@@ -14,8 +14,8 @@ Talk to an AI that talks back. Tap once to speak, then pause — after real word
 
 ### Working
 - **Push-to-talk (PTT) voice-to-voice conversation**
-  - Tap mic → speak → transcript stable for 1.5 seconds → AI responds with text + voice
-  - Mute button and ambient noise do not block auto-send — only transcript stability matters
+  - Tap mic → speak → transcript stabilizes after speech ends → AI responds with text + voice
+  - Auto-send separates speech from raw sound: recent Silero VAD speech blocks sending, raw background noise only gets a short grace period, and continuing sequences like counting/alphabet get a slightly longer endpoint delay
   - Tap again while listening to manually send before the timer fires
   - Tap during AI response → interrupts voice and generation, waits briefly for audio to drain, then starts listening again
   - Full-screen black voice surface hides the chat title, chat log, transcript field, and input bar while the orb is active
@@ -36,7 +36,7 @@ Talk to an AI that talks back. Tap once to speak, then pause — after real word
 - **Startup ready sound** — plays a bundled local sound effect once the loading screen finishes and both models are ready
 - **Audio settings** — sidebar audio controls let the user adjust and test startup, voice-mode activation, voice-mode deactivation, AI voice-response volume, and voice-mode inactivity timeout independently
 - **In-use status indicators** — floating pill appears whenever the app is processing in the background (transcribing, thinking, generating)
-- **WhisperKit on-device STT** — accurate Whisper-based transcription with live preview while recording
+- **WhisperKit on-device STT + Silero VAD endpointing** — accurate Whisper-based transcription with live preview while recording, plus local neural speech detection so auto-send waits for speech to end instead of reacting to every raw mic sound
 - **Smarter ambient awareness** — Whisper non-speech markers such as `[coughing]`, `[sneezing]`, `(keyboard typing)`, and `[laughter]` are now promoted to visible user messages in voice mode so Dominus reacts naturally (e.g. "bless you" on a sneeze) and the user sees what the model is reacting to. Each sound type has its own per-chat cooldown — sneezes 3 turns, coughs 6, laughter 5, default 10, typing essentially silenced — so reactions never feel canned. Repeated sounds are grouped with a count in the hidden ambient context so Dominus can check in briefly if you've been coughing repeatedly. In text mode, bracket markers are stripped from user messages so the chat history stays clean.
 - **Stable live voice transcript** — live preview keeps the best partial transcript during a recording, so a brief pause to think no longer erases previously transcribed words.
 - **Voice punctuation cleanup** — dictated words such as "period", "comma", and "question mark" are converted into punctuation pauses before voice text is sent or spoken aloud.
@@ -83,7 +83,6 @@ Talk to an AI that talks back. Tap once to speak, then pause — after real word
 ### Planned
 - [ ] Context window increase (2048 → 4096)
 - [ ] Memory retrieval clamping (prevent context overflow)
-- [ ] Silero VAD for optional auto-send on silence
 - [ ] Core ML TTS (custom voice via Neural Engine — no synthesis gaps)
 
 ---
@@ -126,7 +125,7 @@ If the app is foregrounded after a long background session and either model need
 [idle]  — waveform icon (gray)
   ↓ tap
 [listening]  — full-screen black voice surface + waveform icon (green)
-  ↓ transcript stable for 1.5 seconds (unconditional), or tap again to send manually
+  ↓ transcript stable + no recent speech activity, or tap again to send manually
 [transcribing] — "Transcribing your speech…" pill appears
   ↓ Whisper done
 [AI talking] — "Thinking…" pill → waveform icon (red) as TTS begins
@@ -134,7 +133,7 @@ If the app is foregrounded after a long background session and either model need
 [listening]  — waveform icon (green)
 ```
 
-The same single button controls every step. No hold-to-talk. Auto-send fires after 2 seconds of transcript stability — mute state and ambient noise do not affect the timer. Empty recordings restart listening instead of returning to text mode.
+The same single button controls every step. No hold-to-talk. Auto-send starts from transcript stability, then gates on local speech activity. Raw sound alone only delays briefly; if Silero VAD does not classify it as speech, Dominus sends instead of waiting forever. Empty recordings restart listening instead of returning to text mode.
 
 ---
 
@@ -165,7 +164,7 @@ The same single button controls every step. No hold-to-talk. Auto-send fires aft
 | Hidden ambient cues | Bracketed or parenthesized non-speech markers are stripped from visible text, stored as per-chat ambient events, and injected only as hidden context when relevant |
 | Text-to-Speech | `AVSpeechSynthesizer.speak()` + delegate (Apple Neural Engine, fully local) |
 | TTS voice | Evan Enhanced (male, en-US) — falls back to best available |
-| Input mode | Push-to-talk with auto-send after 1.5 seconds of transcript stability (mute/noise do not block) |
+| Input mode | Push-to-talk with auto-send after transcript stability and local VAD speech-silence checks; raw background noise only gets a short grace window |
 | Voice UI | Full-screen black orb surface while voice mode is active; orb is gray (idle), green (user speaking), red (AI speaking) |
 | Thinking fillers | Local `ThinkingFillerManager` chooses restrained voice-only filler phrases based on greetings, short prompts, complex prompts, follow-ups, and long delays |
 | Smart idle timer | 1-second ticker that only advances during true silence; resets to zero while the user or AI is speaking |

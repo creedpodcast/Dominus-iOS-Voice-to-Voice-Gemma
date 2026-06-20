@@ -127,13 +127,33 @@ struct ContentView: View {
     /// noise floor inside SpeechManager's amplitude tap.
     private let aiTalkingSilenceAmplitudeThreshold: Float = 0.02
     @State private var latestVisibleVoiceTranscript = ""
+
+    /// Last time the visible transcript grew by enough new words to be
+    /// "substantial" — i.e., almost certainly real continued speech rather
+    /// than Whisper hallucinating one phantom word from background noise.
+    /// Used by the hard-send cap below.
+    @State private var lastSubstantialGrowthAt: Date?
+
+    /// How many new words must appear at once for an update to count as
+    /// "substantial growth" (a strong signal the user is still talking).
+    /// Tuned for normal speech: typical Whisper chunks land 2–4 words at a
+    /// time; hallucinations from noise typically add 0 or 1 word.
+    private let substantialGrowthWordThreshold: Int = 2
+
+    /// If the visible transcript has had real content but no substantial
+    /// growth for this long, force-send even if Whisper is still trickling
+    /// in single phantom words from background noise.
+    private let hardSendAfterContentSilenceSeconds: TimeInterval = 3.0
     @State private var latestVisibleVoiceTranscriptUpdatedAt: Date?
-    @State private var lastVoiceActivityAt: Date?
+    @State private var lastVoiceSpeechActivityAt: Date?
+    @State private var rawSoundOnlyBlockStartedAt: Date?
     @State private var headphoneVolumeWarning: HeadphoneVolumeWarning?
     @State private var dismissedHeadphoneVolumeWarning: HeadphoneVolumeWarning?
     @State private var volumeMonitorTask: Task<Void, Never>?
     @State private var appLoadedSoundPlayer: AVAudioPlayer?
-    @State private var voiceModeSoundPlayer: AVAudioPlayer?
+    // voiceModeSoundPlayer removed — SFX now route through
+    // SpeechManager.shared.playSFX which uses the same AVAudioEngine as
+    // TTS. See `playVoiceModeSound` below.
     @State private var isVoiceModeTransitioning = false
     @State private var hasPlayedAppLoadedSound = false
     /// True once the silence filler ("you still there?") has fired this session.
@@ -149,20 +169,25 @@ struct ContentView: View {
     /// Resets to 0 whenever activity resumes.
     @State private var voiceIdleSeconds: TimeInterval = 0
 
-    // Tuned for whisper-only autosend: the gate is now "transcript hasn't
-    // changed for X seconds". Whisper itself updates the transcript every
-    // ~0.5–1.0s, so X must stay above ~1.0s — anything lower fires in the
-    // natural gap between Whisper's own chunks and cuts the user off
-    // mid-sentence.
-    private let defaultVoiceAutoSendDelay: TimeInterval = 1.0
-    private let fastVoiceAutoSendDelay: TimeInterval = 1.0
-    private let shortVoiceAutoSendDelay: TimeInterval = 1.0
-    private let voiceActivityGraceDelay: TimeInterval = 0.8
-    /// Minimum continuous mic silence required before auto-send fires.
+    // Endpointing starts from "transcript hasn't changed for X seconds";
+    // the later gate checks whether that stable transcript is also past
+    // recent speech. Whisper itself updates the transcript every ~0.5–1.0s,
+    // so X must stay above ~1.0s — anything lower fires in the natural gap
+    // between Whisper's own chunks and cuts the user off mid-sentence.
+    private let defaultVoiceAutoSendDelay: TimeInterval = 1.35
+    private let fastVoiceAutoSendDelay: TimeInterval = 0.95
+    private let shortVoiceAutoSendDelay: TimeInterval = 1.05
+    private let sequenceVoiceAutoSendDelay: TimeInterval = 1.65
+
+    /// Minimum continuous speech silence required before auto-send fires.
     /// The transcript can plateau mid-sentence (Whisper passes are 1s apart),
-    /// so we also gate on raw audio level. If the mic detected sound within
+    /// so we also gate on VAD speech. If the mic detected speech within
     /// this window, we re-arm the timer instead of sending.
-    private let voiceAutoSendSilenceRequirement: TimeInterval = 1.2
+    private let voiceSpeechSilenceRequirement: TimeInterval = 0.95
+    /// Raw sound is only a short grace signal. If noise keeps happening but
+    /// Silero does not classify it as speech, autosend may continue after
+    /// this hold instead of waiting forever.
+    private let rawSoundOnlyMaxHoldSeconds: TimeInterval = 0.9
     private let voiceLatencyTestingDisablesFillers = true
     private let listeningSilenceFillerDelay: TimeInterval = 20
     private let listeningSilenceFillers = [
@@ -310,8 +335,8 @@ struct ContentView: View {
                 scheduleWarmPipelineRefresh()
             }
         }
-        .onChange(of: whisper.lastAudioActivityAt) { activityAt in
-            handleListeningAudioActivity(activityAt)
+        .onChange(of: whisper.lastSpeechActivityAt) { activityAt in
+            handleListeningSpeechActivity(activityAt)
         }
         .onChange(of: audioSettings.voiceModeInactivityTimeout) { _ in
             guard pttState == .listening else { return }
@@ -394,12 +419,20 @@ struct ContentView: View {
         case .idle:
             voiceWasEnabled    = store.voiceEnabled
             store.voiceEnabled = true
+            // Fresh voice-mode session starts unmuted, even if the last
+            // session ended muted. Mute is sticky WITHIN a session
+            // (across turns) but not across sessions.
+            whisper.isMicMuted = false
             SpeechManager.shared.stopAndClear()
-            // Do NOT call SpeechManager.prepareForVoiceMode() here — it flips
-            // the audio session to .playback + .spokenAudio before the
-            // activation cue plays, which makes the cue play through the loud
-            // TTS session even after playVoiceModeSound tries to revert. The
-            // greeting's enqueue() will set up the speech session itself.
+            // Set the session to .playAndRecord + .default up front so the
+            // activation cue, greeting TTS, and listening recording all share
+            // one category. (Previously this call was skipped because the
+            // pipeline used .playback for TTS and .playAndRecord for
+            // recording, so switching here would have caused a category
+            // flip mid-cue. With the single-category ChatGPT-style model,
+            // this is now the right thing to do — it locks the volume bus
+            // for the whole voice session before the first audible event.)
+            SpeechManager.shared.prepareForVoiceMode()
             startVolumeMonitoring()
             isVoiceModeTransitioning = false
 
@@ -530,7 +563,17 @@ struct ContentView: View {
                 let silentFor = Date().timeIntervalSince(lastNonSilentAt)
                 if silentFor >= aiTalkingSilenceRequirement {
                     print("⏱ AI-talking watchdog: \(String(format: "%.1f", silentFor))s silent — forcing resume listen")
-                    beginListeningAfterAIResponse()
+                    // If the cue already played (dedupe flag set) but
+                    // we're still in .aiTalking, the cue task must have
+                    // failed to resume. Go straight to beginListening
+                    // bypassing the dedupe so we recover. If the cue
+                    // hasn't played yet, defer to the normal cue+resume
+                    // path.
+                    if didPlayAIConclusionCueThisRound {
+                        beginListening()
+                    } else {
+                        beginListeningAfterAIResponse()
+                    }
                     return
                 }
             }
@@ -543,14 +586,18 @@ struct ContentView: View {
     }
 
     private func beginListeningAfterAIResponse() {
-        // Dedupe: the three "AI finished" paths (onAllSpeechFinished,
-        // isGenerating onChange, handleAISpeakingChange safety net) all call
-        // this. Without the guard the cue would play once per path for the
-        // same AI response. Cleared on the next .aiTalking entry below.
-        guard !didPlayAIConclusionCueThisRound else {
-            beginListening()
-            return
-        }
+        // Bail entirely on re-entry. The three "AI finished" paths
+        // (onAllSpeechFinished, isGenerating onChange,
+        // handleAISpeakingChange safety net) often fire within ~50 ms of
+        // each other on later turns when generation is fast. The
+        // dedupe used to "fall through" to beginListening() on the
+        // second caller — but beginListening() calls stopAndClear(),
+        // which stops the sfxPlayerNode mid-play and made the SFX
+        // disappear after a few turns. Now: the FIRST caller owns the
+        // entire cue+resume sequence; everyone else bails. If the
+        // first caller's task somehow fails to resume listening, the
+        // amplitude watchdog catches it.
+        guard !didPlayAIConclusionCueThisRound else { return }
         didPlayAIConclusionCueThisRound = true
         Task { @MainActor in
             // Must wait the FULL clip duration here: if we start the mic
@@ -596,8 +643,17 @@ struct ContentView: View {
         isInterruptRestartPending = false
         stopPulse()
         whisper.cancelRecording()
-        // WhisperManager stopped its engine — safe to fully deactivate audio session
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        // Phone-call style: voice mode owned the audio exclusively. On
+        // exit, deactivate the session so other audio apps (Spotify,
+        // podcasts) can resume their playback. iOS sends them a
+        // notification (`.notifyOthersOnDeactivation`) that wakes them
+        // up. The next voice-mode entry calls `lockVoiceModeSession`
+        // again — which is the user-intended "I'm starting a voice
+        // call" moment where the brief bus shift is acceptable.
+        try? AVAudioSession.sharedInstance().setActive(
+            false,
+            options: .notifyOthersOnDeactivation
+        )
         store.voiceEnabled = voiceWasEnabled
         pttState = .idle
     }
@@ -804,16 +860,40 @@ struct ContentView: View {
             return
         }
 
-        if !visibleTranscript.isEmpty, visibleTranscript != latestVisibleVoiceTranscript {
+        let visibleChanged = !visibleTranscript.isEmpty && visibleTranscript != latestVisibleVoiceTranscript
+
+        if visibleChanged {
+            let prevWords = wordCount(of: latestVisibleVoiceTranscript)
+            let newWords  = wordCount(of: visibleTranscript)
+            // Substantial growth = real speech continuing. Treat the FIRST
+            // ever non-empty content as substantial too, so the hard-send
+            // cap doesn't fire immediately on a one-word utterance.
+            if lastSubstantialGrowthAt == nil ||
+               newWords - prevWords >= substantialGrowthWordThreshold {
+                lastSubstantialGrowthAt = Date()
+            }
             latestVisibleVoiceTranscript = visibleTranscript
             latestVisibleVoiceTranscriptUpdatedAt = Date()
+            rawSoundOnlyBlockStartedAt = nil
             scheduleVoiceSpeculativeRetrieval(for: visibleTranscript)
         }
         cancelListeningSilenceFiller()
-        if lastVoiceActivityAt == nil {
-            lastVoiceActivityAt = whisper.lastAudioActivityAt ?? Date()
+        if lastVoiceSpeechActivityAt == nil, let speechAt = whisper.lastSpeechActivityAt {
+            lastVoiceSpeechActivityAt = speechAt
         }
-        scheduleVoiceAutoSend()
+
+        // Timer-reset rule: only ACTUAL WORDS reset the autosend timer.
+        // Bracket cues ([keyboard_typing], [cough], [sneeze], etc.) still
+        // ride along in `spoken` and get sent to the AI when the timer
+        // eventually fires (see submitVoiceRecording), but they no longer
+        // hold the conversation hostage by perpetually resetting it. The
+        // first time the timer is armed at all (when content first
+        // appears — visible words OR ambient cues), we still schedule so
+        // a pure cough/sneeze utterance can send.
+        let isFirstSchedule = voiceAutoSendTask == nil
+        if visibleChanged || isFirstSchedule {
+            scheduleVoiceAutoSend()
+        }
     }
 
     private func scheduleVoiceSpeculativeRetrieval(for transcript: String) {
@@ -828,34 +908,42 @@ struct ContentView: View {
         }
     }
 
-    private func handleListeningAudioActivity(_ activityAt: Date?) {
+    private func handleListeningSpeechActivity(_ activityAt: Date?) {
         guard pttState == .listening, !whisper.isMicMuted else { return }
         guard let activityAt else { return }
-        lastVoiceActivityAt = activityAt
-        // Re-arm the auto-send timer on EVERY mic activity event, even when the
+        lastVoiceSpeechActivityAt = activityAt
+        rawSoundOnlyBlockStartedAt = nil
+        // Re-arm the auto-send timer on every speech event, even when the
         // transcript is already non-empty. The transcript can plateau mid-sentence
         // while Whisper waits for its next 1s pass — if we don't reschedule on
-        // raw audio, the timer can fire while the user is still actively talking.
+        // speech, the timer can fire while the user is still actively talking.
         // submitVoiceRecording() also handles the empty-transcript case (ambient
         // sounds like cough/sneeze) by going back to listening if there's nothing
         // to send.
         scheduleVoiceAutoSend()
     }
 
-    private func scheduleVoiceAutoSend() {
+    private struct EndpointBlocker {
+        let message: String
+        let retryDelay: TimeInterval
+    }
+
+    private func scheduleVoiceAutoSend(retryDelay: TimeInterval? = nil) {
         let transcriptSnapshot = latestVisibleVoiceTranscript
         let rawSnapshot = whisper.liveTranscript
-        let delay = adaptiveVoiceAutoSendDelay(for: transcriptSnapshot, rawTranscript: rawSnapshot)
+        let delay = retryDelay ?? adaptiveVoiceAutoSendDelay(for: transcriptSnapshot, rawTranscript: rawSnapshot)
         voiceAutoSendTask?.cancel()
         voiceAutoSendTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             guard !Task.isCancelled, pttState == .listening else { return }
 
-            // Diagnostic: if you see "⏱ autosend FIRED" but no "🔇 silence OK"
-            // or "🔊 audio active", the build doesn't have the silence-gate fix
-            // and ContentView wasn't recompiled. If you see "🔊 audio active" but
-            // a send happens anyway, there's a second send path we missed.
-            print("⏱ autosend FIRED — delay=\(delay)s, transcript='\(transcriptSnapshot)', lastAudioActivityAt=\(String(describing: whisper.lastAudioActivityAt))")
+            print("⏱ autosend FIRED — delay=\(delay)s, transcript='\(transcriptSnapshot)', lastSpeechAt=\(String(describing: whisper.lastSpeechActivityAt)), lastSoundAt=\(String(describing: whisper.lastSoundActivityAt)), noiseFloor=\(String(format: "%.3f", whisper.adaptiveNoiseFloor))")
+
+            if let blocker = endpointBlocker() {
+                print(blocker.message)
+                scheduleVoiceAutoSend(retryDelay: blocker.retryDelay)
+                return
+            }
 
             // If the VISIBLE transcript is still growing, the user is still
             // speaking — wait again. We deliberately do NOT compare the raw
@@ -863,21 +951,69 @@ struct ContentView: View {
             // emits ([BLANK_AUDIO], [BREATHING], cough, typing, blowing into
             // the mic, etc.), which would block autosend forever in noisy
             // environments. The visible transcript already strips those.
+            //
+            // Hard-send cap: even when the visible transcript is mutating,
+            // if no SUBSTANTIAL growth (≥N new words) has happened for the
+            // hardSend window, that means Whisper is just trickling phantom
+            // words from background noise. Force-send so the user isn't
+            // held hostage by a noisy room.
             if latestVisibleVoiceTranscript != transcriptSnapshot {
+                if let last = lastSubstantialGrowthAt,
+                   !latestVisibleVoiceTranscript.isEmpty,
+                   Date().timeIntervalSince(last) >= hardSendAfterContentSilenceSeconds {
+                    print("🚀 hard-send cap: \(String(format: "%.1f", Date().timeIntervalSince(last)))s since last substantial growth — sending despite transcript jitter")
+                    submitVoiceRecording()
+                    return
+                }
                 print("📝 visible transcript still growing — rescheduling")
                 scheduleVoiceAutoSend()
                 return
             }
 
-            // Whisper-only autosend: gate removed. The transcript-stability check
-            // above is the sole "user is done talking" signal. Fan/wind/AC
-            // ambient noise no longer blocks sending. Downside: a mid-sentence
-            // pause longer than `adaptiveVoiceAutoSendDelay()` will send
-            // prematurely — fall back to the audio gate (adaptive noise floor)
-            // if this becomes a problem.
-            print("🔇 whisper-only autosend — transcript stable, sending")
+            print("🔇 endpoint complete — transcript stable and no recent speech, sending")
             submitVoiceRecording()
         }
+    }
+
+    private func endpointBlocker() -> EndpointBlocker? {
+        let now = Date()
+        if let lastSpeech = whisper.lastSpeechActivityAt ?? lastVoiceSpeechActivityAt {
+            let silentFor = now.timeIntervalSince(lastSpeech)
+            if silentFor < voiceSpeechSilenceRequirement {
+                rawSoundOnlyBlockStartedAt = nil
+                let remaining = voiceSpeechSilenceRequirement - silentFor
+                return EndpointBlocker(
+                    message: "🗣 speech active \(String(format: "%.2f", silentFor))s ago — waiting for \(voiceSpeechSilenceRequirement)s speech silence",
+                    retryDelay: max(0.12, remaining + 0.05)
+                )
+            }
+        }
+
+        guard let lastSound = whisper.lastSoundActivityAt else {
+            rawSoundOnlyBlockStartedAt = nil
+            return nil
+        }
+
+        let soundQuietFor = now.timeIntervalSince(lastSound)
+        guard soundQuietFor < voiceSpeechSilenceRequirement else {
+            rawSoundOnlyBlockStartedAt = nil
+            return nil
+        }
+
+        let startedAt = rawSoundOnlyBlockStartedAt ?? now
+        rawSoundOnlyBlockStartedAt = startedAt
+        let rawSoundHeldFor = now.timeIntervalSince(startedAt)
+        if rawSoundHeldFor < rawSoundOnlyMaxHoldSeconds {
+            let remaining = rawSoundOnlyMaxHoldSeconds - rawSoundHeldFor
+            return EndpointBlocker(
+                message: "🔊 raw sound without VAD speech — grace \(String(format: "%.2f", rawSoundHeldFor))/\(rawSoundOnlyMaxHoldSeconds)s",
+                retryDelay: max(0.12, remaining + 0.05)
+            )
+        }
+
+        rawSoundOnlyBlockStartedAt = nil
+        print("🌫 ignoring raw-only noise after \(String(format: "%.2f", rawSoundHeldFor))s without VAD speech")
+        return nil
     }
 
     private func adaptiveVoiceAutoSendDelay(for visibleTranscript: String, rawTranscript: String) -> TimeInterval {
@@ -886,6 +1022,10 @@ struct ContentView: View {
         let hasAmbientSound = containsActionableAmbientCue(rawTranscript)
         guard !visible.isEmpty else {
             return hasAmbientSound ? defaultVoiceAutoSendDelay : shortVoiceAutoSendDelay
+        }
+
+        if looksLikeContinuingSequence(visible) {
+            return sequenceVoiceAutoSendDelay
         }
 
         let wordCount = visible.split(whereSeparator: { $0.isWhitespace }).count
@@ -1016,7 +1156,50 @@ struct ContentView: View {
         cancelVoiceSpeculativeRetrieval()
         latestVisibleVoiceTranscript = ""
         latestVisibleVoiceTranscriptUpdatedAt = nil
-        lastVoiceActivityAt = nil
+        lastVoiceSpeechActivityAt = nil
+        lastSubstantialGrowthAt = nil
+        rawSoundOnlyBlockStartedAt = nil
+    }
+
+    private func wordCount(of text: String) -> Int {
+        text.split(whereSeparator: { $0.isWhitespace }).count
+    }
+
+    private func looksLikeContinuingSequence(_ text: String) -> Bool {
+        let alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        let lettersOnly = text.uppercased().unicodeScalars
+            .filter { $0.value >= 65 && $0.value <= 90 }
+            .map { String($0) }
+            .joined()
+        if lettersOnly.count >= 3,
+           lettersOnly.count < alphabet.count,
+           alphabet.hasPrefix(lettersOnly) {
+            return true
+        }
+
+        let tokens = text
+            .lowercased()
+            .split { !$0.isLetter && !$0.isNumber }
+            .map(String.init)
+        guard tokens.count >= 3 else { return false }
+
+        let numberWords: [String: Int] = [
+            "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4,
+            "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9,
+            "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13,
+            "fourteen": 14, "fifteen": 15, "sixteen": 16,
+            "seventeen": 17, "eighteen": 18, "nineteen": 19,
+            "twenty": 20
+        ]
+        let numbers = tokens.compactMap { token -> Int? in
+            if let value = Int(token) { return value }
+            return numberWords[token]
+        }
+        guard numbers.count == tokens.count else { return false }
+
+        let sequentialPairs = zip(numbers, numbers.dropFirst()).filter { $0.1 == $0.0 + 1 }.count
+        let repeatedPairs = zip(numbers, numbers.dropFirst()).filter { $0.1 == $0.0 }.count
+        return sequentialPairs >= 2 || repeatedPairs >= 1 || numbers.count >= 4
     }
 
     // MARK: - Headphone volume warnings
@@ -1071,62 +1254,20 @@ struct ContentView: View {
         }
     }
 
+    /// Thin shim — actual playback now routes through `SpeechManager`'s
+    /// shared `AVAudioEngine` so SFX and AI voice share one render thread
+    /// and audio session. The previous implementation used `AVAudioPlayer`
+    /// (a separate audio path) and reset the audio session on every cue,
+    /// which competed with the TTS engine for hardware access and caused
+    /// micro-cutouts in the AI voice between cues.
     private func playVoiceModeSound(named resourceName: String,
                                     waitForFullDuration: Bool = false) async {
-        guard let url = Bundle.main.url(
-            forResource: resourceName,
-            withExtension: "wav",
-            subdirectory: "SoundEffects"
-        ) ?? Bundle.main.url(
-            forResource: resourceName,
-            withExtension: "wav"
-        ) else {
-            print("🔇 Voice mode sound not found:", resourceName)
-            return
-        }
-
-        do {
-            do {
-                // Always play voice-mode cues through the same loud session the
-                // greeting / AI voice uses (.playback + .spokenAudio). Flipping
-                // to .voiceChat just for the cue made it noticeably quieter
-                // than the speech it sits next to. The cue's own volume slider
-                // (voiceModeActivationVolume / voiceModeDeactivationVolume in
-                // Audio Settings) still controls its level relative to the AI
-                // voice — adjust there if it ever feels too loud.
-                try AVAudioSession.sharedInstance().setCategory(
-                    .playback,
-                    mode: .spokenAudio,
-                    options: [.duckOthers]
-                )
-                try AVAudioSession.sharedInstance().setActive(true, options: [])
-            } catch {
-                print("🔇 Voice mode sound session setup failed:", error.localizedDescription)
-            }
-
-            let player = try AVAudioPlayer(contentsOf: url)
-            let volume = Float(audioSettings.voiceModeVolume(for: resourceName))
-            player.volume = volume
-            player.prepareToPlay()
-            player.setVolume(volume, fadeDuration: 0)
-            player.play()
-            voiceModeSoundPlayer = player
-            // Default behaviour caps the await at 1.2s so the greeting/AI
-            // voice can start immediately after the activation cue with no
-            // audible gap. For cues that MUST fully finish before the mic
-            // resumes (otherwise Whisper hears the cue's tail and bounces
-            // the conversation), `waitForFullDuration` makes us sleep the
-            // entire clip plus a small drain pad.
-            let duration: TimeInterval
-            if waitForFullDuration {
-                duration = max(0.25, player.duration + 0.20)
-            } else {
-                duration = max(0.25, min(player.duration, 1.2))
-            }
-            try? await Task.sleep(nanoseconds: UInt64(duration * 1_000_000_000))
-        } catch {
-            print("🔇 Failed to play voice mode sound:", error.localizedDescription)
-        }
+        let volume = Float(audioSettings.voiceModeVolume(for: resourceName))
+        await SpeechManager.shared.playSFX(
+            named: resourceName,
+            volume: volume,
+            waitForFullDuration: waitForFullDuration
+        )
     }
 
     private func updateHeadphoneVolumeWarning() {

@@ -36,7 +36,12 @@ final class WhisperManager: ObservableObject {
     @Published var modelStatus:     String = "Whisper not loaded"
     @Published var liveTranscript:  String = ""
     @Published var lastRecordingDuration: TimeInterval = 0
+    @Published private(set) var lastSpeechActivityAt: Date?
+    /// Compatibility signal for older call sites. This now tracks speech-like
+    /// activity, not every raw mic sound.
     @Published var lastAudioActivityAt: Date?
+    private(set) var lastSoundActivityAt: Date?
+    private(set) var adaptiveNoiseFloor: Float = 0.012
 
     // MARK: - Private
 
@@ -47,7 +52,43 @@ final class WhisperManager: ObservableObject {
     private var recordingStartedAt: Date?
     private var bestLiveTranscript: String = ""
     private var bestRawLiveTranscript: String = ""
-    private let voiceActivityLevelThreshold: Float = 0.035
+    private let minimumSoundActivityLevel: Float = 0.02
+    private let soundActivityNoiseMargin: Float = 0.08
+    private let noiseFloorRiseSmoothing: Float = 0.015
+    private let noiseFloorFallSmoothing: Float = 0.12
+    private let noiseFloorMaxLevel: Float = 0.30
+
+    /// Speech probability threshold for the Silero VAD activity signal.
+    /// 0.5 = balanced default. Bump to 0.6–0.7 for noisier environments
+    /// (suppresses borderline classifications).
+    private let vadSpeechThreshold: Float = 0.5
+
+    /// Accumulates raw mic samples (at hardware native rate) waiting to
+    /// be resampled to 16 kHz and fed to VAD in model-sized chunks.
+    private var vadInputBuffer: [Float] = []
+
+    /// Periodically prints VAD score summaries (peak/avg/threshold-crossing
+    /// rate) so we can tune. Logs once per second to keep the console
+    /// readable. Set `verbose = true` to dump every score.
+    private var vadDiagnostic = VADDiagnostic()
+
+    /// Decoder options applied to every WhisperKit transcribe call.
+    ///
+    /// Two industry-standard noise-rejection layers stacked:
+    ///   - `chunkingStrategy: .vad` — WhisperKit's built-in Voice Activity
+    ///     Detection pre-filter. Discards audio chunks that the VAD model
+    ///     thinks are not speech BEFORE Whisper sees them, so noise can't
+    ///     turn into phantom words.
+    ///   - `noSpeechThreshold: 0.7` (up from default 0.6) — Whisper's own
+    ///     confidence threshold for declaring a segment as silence.
+    ///     Slightly more aggressive than the default; rare cases of
+    ///     dropping quiet legitimate speech are caught by the VAD layer.
+    private static let tunedDecodingOptions: DecodingOptions = {
+        DecodingOptions(
+            noSpeechThreshold: 0.7,
+            chunkingStrategy: .vad
+        )
+    }()
 
     private var liveTimer:               Timer?
     private var isRunningLivePass:       Bool  = false
@@ -104,6 +145,10 @@ final class WhisperManager: ObservableObject {
         setupAudioSession()
         _ = audioEngine.inputNode.inputFormat(forBus: 0)
         audioEngine.prepare()
+        // Load the VAD model on app warmup so the first voice-mode
+        // session doesn't pay the cold compile cost. The model file is
+        // tiny (~900 KB) and compiles in well under 100 ms on A19 Pro.
+        SileroVAD.shared.loadIfNeeded()
     }
 
     /// Runs the WhisperKit transcription graph once against a buffer of silence so
@@ -114,7 +159,10 @@ final class WhisperManager: ObservableObject {
         // 0.5s of silence at 16 kHz — Whisper's native input rate.
         let silentSamples = [Float](repeating: 0, count: 8_000)
         do {
-            _ = try await whisper.transcribe(audioArray: silentSamples)
+            _ = try await whisper.transcribe(
+                audioArray: silentSamples,
+                decodeOptions: Self.tunedDecodingOptions
+            )
         } catch {
             print("⚠️ Whisper prewarm failed:", error.localizedDescription)
         }
@@ -124,8 +172,17 @@ final class WhisperManager: ObservableObject {
         guard !isRecording else { return }
         isStartingRecording = true
         recordedSamples = []
-        isMicMuted = false   // every fresh recording cycle starts unmuted
+        // Mute is STICKY — deliberately not reset here. If the user tapped
+        // mute while listening, it stays muted across the AI's reply and
+        // back into the next listening cycle. The only way mute clears is
+        // an explicit tap (in ContentView's onToggleMicMute) or a fresh
+        // voice-mode entry (handlePTTTap case .idle resets it).
+        vadInputBuffer.removeAll(keepingCapacity: true)
+        SileroVAD.shared.resetState()
+        SileroVAD.shared.loadIfNeeded()
         lastRecordingDuration = 0
+        lastSpeechActivityAt = nil
+        lastSoundActivityAt = nil
         lastAudioActivityAt = nil
         liveTranscript = ""
         bestLiveTranscript = ""
@@ -155,6 +212,8 @@ final class WhisperManager: ObservableObject {
             vDSP_measqv(samples, 1, &rms, vDSP_Length(count))
             let level = min(sqrt(rms) / 0.05, 1.0)
 
+            let bufferSampleRate = buffer.format.sampleRate
+
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 if self.isMicMuted {
@@ -164,11 +223,15 @@ final class WhisperManager: ObservableObject {
                     return
                 }
                 self.audioLevel       = level
-                if level >= self.voiceActivityLevelThreshold {
-                    self.lastAudioActivityAt = Date()
-                }
-                self.nativeSampleRate = buffer.format.sampleRate
+                self.nativeSampleRate = bufferSampleRate
                 self.recordedSamples += samples
+                self.observeRawAudioLevel(level)
+
+                // Neural VAD: accumulate samples, resample to 16 kHz,
+                // score model-sized chunks. It complements the raw RMS fallback
+                // above so autosend has both a speech model and a direct mic
+                // activity signal.
+                self.feedVADAndUpdateActivity(samples, sourceRate: bufferSampleRate)
             }
         }
 
@@ -210,7 +273,10 @@ final class WhisperManager: ObservableObject {
 
         let samples16k = resampleTo16k(snapshot, from: nativeSampleRate)
         do {
-            let results = try await whisper.transcribe(audioArray: samples16k)
+            let results = try await whisper.transcribe(
+                audioArray: samples16k,
+                decodeOptions: Self.tunedDecodingOptions
+            )
             let text = results
                 .compactMap { $0.text }
                 .joined(separator: " ")
@@ -237,6 +303,8 @@ final class WhisperManager: ObservableObject {
         isRecording    = false
         isTranscribing = true
         audioLevel     = 0
+        lastSpeechActivityAt = nil
+        lastSoundActivityAt = nil
         lastAudioActivityAt = nil
 
         defer {
@@ -254,7 +322,10 @@ final class WhisperManager: ObservableObject {
         let samples16k = resampleTo16k(recordedSamples, from: nativeSampleRate)
 
         do {
-            let results = try await whisper.transcribe(audioArray: samples16k)
+            let results = try await whisper.transcribe(
+                audioArray: samples16k,
+                decodeOptions: Self.tunedDecodingOptions
+            )
             let text    = results
                 .compactMap { $0.text }
                 .joined(separator: " ")
@@ -280,6 +351,8 @@ final class WhisperManager: ObservableObject {
         isRecording     = false
         isTranscribing  = false
         audioLevel      = 0
+        lastSpeechActivityAt = nil
+        lastSoundActivityAt = nil
         lastAudioActivityAt = nil
         liveTranscript  = ""
         bestLiveTranscript = ""
@@ -298,6 +371,8 @@ final class WhisperManager: ObservableObject {
         isRecording     = false
         isTranscribing  = false
         audioLevel      = 0
+        lastSpeechActivityAt = nil
+        lastSoundActivityAt = nil
         lastAudioActivityAt = nil
         liveTranscript  = ""
         bestLiveTranscript = ""
@@ -381,15 +456,127 @@ final class WhisperManager: ObservableObject {
 
     private func setupAudioSession() {
         let session = AVAudioSession.sharedInstance()
-        try? session.setCategory(
-            .playAndRecord,
-            mode: .voiceChat,
-            options: [.defaultToSpeaker, .allowBluetooth, .allowBluetoothA2DP]
-        )
-        try? session.setActive(true, options: .notifyOthersOnDeactivation)
+        // Idempotent — the voice-mode session has already been locked
+        // at entry by `SpeechManager.lockVoiceModeSession`. Only call
+        // setCategory / setActive again if iOS has somehow flipped the
+        // session out from under us. Each redundant call is a routing
+        // re-evaluation that produces the volume-HUD blip the user
+        // hears between turns.
+        let needsCategory = session.category != .playAndRecord || session.mode != .default
+        if needsCategory {
+            try? session.setCategory(
+                .playAndRecord,
+                mode: .default,
+                options: [.defaultToSpeaker, .allowBluetooth, .allowBluetoothA2DP]
+            )
+            try? session.setActive(true, options: .notifyOthersOnDeactivation)
+        }
     }
 
     // MARK: - Resampling (linear interpolation)
+
+    private func observeRawAudioLevel(_ level: Float) {
+        let now = Date()
+        let speechRecently = lastSpeechActivityAt.map { now.timeIntervalSince($0) < 1.0 } ?? false
+        if !speechRecently {
+            updateAdaptiveNoiseFloor(with: level)
+        }
+
+        let soundThreshold = max(
+            minimumSoundActivityLevel,
+            adaptiveNoiseFloor + soundActivityNoiseMargin
+        )
+        if level >= soundThreshold {
+            lastSoundActivityAt = now
+        }
+    }
+
+    private func updateAdaptiveNoiseFloor(with level: Float) {
+        let clampedLevel = min(max(level, 0), noiseFloorMaxLevel)
+        let smoothing = clampedLevel > adaptiveNoiseFloor
+            ? noiseFloorRiseSmoothing
+            : noiseFloorFallSmoothing
+        adaptiveNoiseFloor += (clampedLevel - adaptiveNoiseFloor) * smoothing
+    }
+
+    /// Append raw native-rate samples to the VAD input buffer, and any
+    /// time we have enough for one model-sized chunk at 16 kHz, resample and
+    /// score it. A VAD probability above `vadSpeechThreshold` updates
+    /// `lastSpeechActivityAt` — that's the primary endpointing signal.
+    private func feedVADAndUpdateActivity(_ samples: [Float], sourceRate: Double) {
+        // Stay quiet when muted — no point burning inference cycles.
+        guard !isMicMuted else { return }
+        // Append to the rolling native-rate buffer.
+        vadInputBuffer.append(contentsOf: samples)
+
+        // One VAD chunk = 36 ms at 16 kHz = 576 samples post-resample.
+        // The corresponding native count is the same duration at source rate.
+        let nativePerChunk = max(1, Int(sourceRate * Double(SileroVAD.chunkSampleCount) / SileroVAD.sampleRate))
+
+        while vadInputBuffer.count >= nativePerChunk {
+            let nativeChunk = Array(vadInputBuffer.prefix(nativePerChunk))
+            vadInputBuffer.removeFirst(nativePerChunk)
+
+            // Resample → 16 kHz, force-truncate or pad to the model's exact input size.
+            var resampled = resampleTo16k(nativeChunk, from: sourceRate)
+            if resampled.count > SileroVAD.chunkSampleCount {
+                resampled = Array(resampled.prefix(SileroVAD.chunkSampleCount))
+            } else if resampled.count < SileroVAD.chunkSampleCount {
+                resampled += Array(repeating: 0, count: SileroVAD.chunkSampleCount - resampled.count)
+            }
+
+            if let prob = SileroVAD.shared.score(chunk: resampled) {
+                vadDiagnostic.observe(prob: prob, threshold: vadSpeechThreshold)
+                if prob >= vadSpeechThreshold {
+                    let now = Date()
+                    lastSpeechActivityAt = now
+                    lastAudioActivityAt = now
+                }
+            } else {
+                vadDiagnostic.observeMissingScore()
+            }
+        }
+
+        // Don't let the buffer grow unbounded if something hangs.
+        if vadInputBuffer.count > nativePerChunk * 4 {
+            vadInputBuffer.removeFirst(vadInputBuffer.count - nativePerChunk * 4)
+        }
+    }
+
+    /// Lightweight per-second VAD telemetry. Prints peak score, average
+    /// score, the configured threshold, and the % of chunks that scored
+    /// above it. Lets you tell at a glance whether VAD is reading your
+    /// voice (peak ~0.9+) or barely registering (peak ~0.4).
+    struct VADDiagnostic {
+        var verbose = false
+        private var windowStart: Date = Date()
+        private var samples: [Float] = []
+        private var missing = 0
+
+        mutating func observe(prob: Float, threshold: Float) {
+            samples.append(prob)
+            if verbose {
+                print("VAD prob=\(String(format: "%.2f", prob)) thr=\(threshold)")
+            }
+            flushIfDue(threshold: threshold)
+        }
+        mutating func observeMissingScore() {
+            missing += 1
+            flushIfDue(threshold: 0.0)
+        }
+        private mutating func flushIfDue(threshold: Float) {
+            guard Date().timeIntervalSince(windowStart) >= 1.0 else { return }
+            let total  = samples.count
+            let peak   = samples.max() ?? 0
+            let avg    = samples.isEmpty ? 0 : samples.reduce(0, +) / Float(samples.count)
+            let active = samples.filter { $0 >= threshold }.count
+            let pct    = total > 0 ? Int(100 * Double(active) / Double(total)) : 0
+            print("🧠 VAD/s: peak=\(String(format: "%.2f", peak)) avg=\(String(format: "%.2f", avg)) thr=\(threshold) above=\(pct)% (\(active)/\(total)) missing=\(missing)")
+            samples.removeAll(keepingCapacity: true)
+            missing = 0
+            windowStart = Date()
+        }
+    }
 
     private func resampleTo16k(_ samples: [Float], from inputRate: Double) -> [Float] {
         let targetRate: Double = 16_000
