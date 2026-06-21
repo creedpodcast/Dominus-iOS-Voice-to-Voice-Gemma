@@ -1,8 +1,10 @@
 import Foundation
 import Combine
 import SwiftUI
-import UIKit
 import AVFoundation
+#if canImport(UIKit)
+import UIKit
+#endif
 
 @MainActor
 final class AudioSettingsStore: ObservableObject {
@@ -384,11 +386,15 @@ final class AudioSettingsStore: ObservableObject {
 // MARK: - Color → RGB component bridge
 
 extension Color {
-    /// Pulls the RGB components out via UIColor so we can persist them as
+    /// Pulls the RGB components out via platform color bridge so we can persist them as
     /// three doubles. Falls back to opaque white if extraction fails.
     var uiRGBComponents: (r: Double, g: Double, b: Double) {
         var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+#if canImport(UIKit)
         UIColor(self).getRed(&r, green: &g, blue: &b, alpha: &a)
+#else
+        NSColor(self).getRed(&r, green: &g, blue: &b, alpha: &a)
+#endif
         return (Double(r), Double(g), Double(b))
     }
 }

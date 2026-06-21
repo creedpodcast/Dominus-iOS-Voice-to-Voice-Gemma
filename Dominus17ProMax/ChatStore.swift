@@ -1,7 +1,9 @@
 import Foundation
 import Combine
 import SwiftLlama
+#if canImport(UIKit)
 import UIKit
+#endif
 
 struct Conversation: Identifiable, Codable, Equatable {
     let id: UUID
@@ -712,9 +714,11 @@ final class ChatStore: ObservableObject {
                         ThinkingFillerManager.shared.cancelScheduling()
                     }
                     // Light haptic pulse when the AI starts responding.
+#if !targetEnvironment(macCatalyst)
                     if AudioSettingsStore.shared.hapticsEnabled {
                         UIImpactFeedbackGenerator(style: .light).impactOccurred()
                     }
+#endif
                     // A: always show the first token immediately so the response
                     // feels instant rather than waiting for a full batch to accumulate.
                     let displayText = stripRoboticOpener(cleanLlamaArtifacts(assistantText))

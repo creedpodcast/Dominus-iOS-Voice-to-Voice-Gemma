@@ -156,6 +156,10 @@ struct ContentView: View {
     // TTS. See `playVoiceModeSound` below.
     @State private var isVoiceModeTransitioning = false
     @State private var hasPlayedAppLoadedSound = false
+    /// Keyboard focus for the text composer. Used to keep the cursor in the
+    /// field after a Return-to-send so the user can immediately type again
+    /// (important on Mac where typing is the primary input).
+    @FocusState private var composerFocused: Bool
     /// True once the silence filler ("you still there?") has fired this session.
     /// Prevents it from rescheduling after the AI response and looping.
     @State private var silenceFillerHasPlayed = false
@@ -253,7 +257,7 @@ struct ContentView: View {
         .animation(.easeInOut(duration: 0.5), value: isFullyLoaded)
         .onChange(of: isFullyLoaded) { loaded in
             guard loaded else { return }
-            playAppLoadedSoundIfNeeded()
+            // App-open chime intentionally removed; voice-mode SFX are unaffected.
             prepareVoiceStackForFastEntry()
             scheduleWarmPipelineRefresh()
         }
@@ -517,6 +521,7 @@ struct ContentView: View {
     /// has no delay. Creates a hidden UITextField, makes it first responder to
     /// trigger keyboard load, then immediately resigns and removes it.
     private func prewarmKeyboard() {
+#if !targetEnvironment(macCatalyst)
         guard let window = UIApplication.shared.connectedScenes
             .compactMap({ $0 as? UIWindowScene })
             .first?.windows.first else { return }
@@ -530,6 +535,7 @@ struct ContentView: View {
             dummy.resignFirstResponder()
             dummy.removeFromSuperview()
         }
+#endif
     }
 
     /// Use when the AI has just finished a normal reply and we're auto-
@@ -650,10 +656,7 @@ struct ContentView: View {
         // up. The next voice-mode entry calls `lockVoiceModeSession`
         // again — which is the user-intended "I'm starting a voice
         // call" moment where the brief bus shift is acceptable.
-        try? AVAudioSession.sharedInstance().setActive(
-            false,
-            options: .notifyOthersOnDeactivation
-        )
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         store.voiceEnabled = voiceWasEnabled
         pttState = .idle
     }
@@ -1277,7 +1280,11 @@ struct ContentView: View {
             return
         }
 
+#if !targetEnvironment(macCatalyst)
         let volume = AVAudioSession.sharedInstance().outputVolume
+#else
+        let volume: Float = 0.5
+#endif
         let nextWarning: HeadphoneVolumeWarning?
         if volume > 0.50 {
             nextWarning = .high
@@ -1298,7 +1305,10 @@ struct ContentView: View {
     }
 
     private var isPrivateListeningRoute: Bool {
-        AVAudioSession.sharedInstance().currentRoute.outputs.contains { output in
+#if targetEnvironment(macCatalyst)
+        return false
+#else
+        return AVAudioSession.sharedInstance().currentRoute.outputs.contains { output in
             switch output.portType {
             case .headphones,
                  .bluetoothA2DP,
@@ -1311,6 +1321,29 @@ struct ContentView: View {
                 return false
             }
         }
+#endif
+    }
+
+    /// Sends the typed prompt (Return key or Send button). On Mac, keeps the
+    /// composer focused afterward so the user can immediately type the next
+    /// message without re-clicking the field.
+    private func submitTypedPrompt() {
+        let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        if store.isGenerating && trimmed.isEmpty {
+            store.stopGeneration()
+            return
+        }
+        guard !trimmed.isEmpty else { return }
+        guard store.isLoaded, !store.isLoading else { return }
+#if !targetEnvironment(macCatalyst)
+        if AudioSettingsStore.shared.hapticsEnabled {
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        }
+#endif
+        prompt = ""
+        store.send(trimmed)
+        // Keep the keyboard/cursor active so typing can continue right away.
+        composerFocused = true
     }
 
     private func submitVoiceRecording() {
@@ -1724,6 +1757,9 @@ struct ContentView: View {
                     )
                     .textFieldStyle(.roundedBorder)
                     .disabled(!store.isLoaded)
+                    .focused($composerFocused)
+                    .submitLabel(.send)
+                    .onSubmit { submitTypedPrompt() }
                     .overlay(alignment: .trailing) {
                         if store.isLoading {
                             ProgressView()
@@ -1748,16 +1784,7 @@ struct ContentView: View {
                 // Send / stop button — only shown in idle text mode
                 if pttState == .idle {
                     Button {
-                        let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
-                        if store.isGenerating && trimmed.isEmpty {
-                            store.stopGeneration()
-                        } else if !trimmed.isEmpty {
-                            if AudioSettingsStore.shared.hapticsEnabled {
-                                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                            }
-                            prompt = ""
-                            store.send(trimmed)
-                        }
+                        submitTypedPrompt()
                     } label: {
                         Image(
                             systemName: store.isGenerating
@@ -2120,7 +2147,15 @@ struct ChatBubble: View {
             .foregroundColor(foreground)
             .opacity(isThinkingPlaceholder ? (thinkingPulse ? 0.35 : 0.75) : 1)
             .clipShape(RoundedRectangle(cornerRadius: isMemoryNotice || isThinkingPlaceholder ? 0 : 18, style: .continuous))
-            .frame(maxWidth: UIScreen.main.bounds.width * 0.72, alignment: align)
+            .frame(maxWidth: screenWidth72, alignment: align)
+    }
+
+    private var screenWidth72: CGFloat {
+#if targetEnvironment(macCatalyst)
+        return 480
+#else
+        return UIScreen.main.bounds.width * 0.72
+#endif
     }
 
     private var assistantActions: some View {

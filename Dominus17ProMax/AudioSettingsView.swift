@@ -238,8 +238,10 @@ struct AudioSettingsView: View {
         }
 
         do {
+#if !targetEnvironment(macCatalyst)
             try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [])
             try AVAudioSession.sharedInstance().setActive(true, options: [])
+#endif
 
             let player = try AVAudioPlayer(contentsOf: url)
             let clampedVolume = SpeechManager.shared.safeEffectVolume(Float(min(1.0, max(0.0, volume))))
@@ -335,7 +337,7 @@ struct VoicePickerScreen: View {
         .onAppear { reloadInstalledVoices() }
         .onReceive(
             NotificationCenter.default.publisher(
-                for: UIApplication.willEnterForegroundNotification
+                for: UIScene.willEnterForegroundNotification
             )
         ) { _ in reloadInstalledVoices() }
     }

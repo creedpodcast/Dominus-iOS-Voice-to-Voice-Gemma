@@ -155,14 +155,15 @@ final class SpeechManager: NSObject, ObservableObject {
     func lockVoiceModeSession() {
         let session = AVAudioSession.sharedInstance()
         do {
+#if !targetEnvironment(macCatalyst)
             try session.setCategory(
                 .playAndRecord,
                 mode: .default,
-                // Absence of .mixWithOthers / .duckOthers means iOS treats
-                // this session as exclusive: other apps' audio gets
-                // interrupted (paused) the way iOS does for Phone/FaceTime.
                 options: [.defaultToSpeaker, .allowBluetooth, .allowBluetoothA2DP]
             )
+#else
+            try session.setCategory(.playAndRecord, mode: .default, options: [])
+#endif
             try session.setActive(true, options: .notifyOthersOnDeactivation)
         } catch {
             print("❌ Voice-mode session lock failed:", error.localizedDescription)
@@ -548,11 +549,15 @@ final class SpeechManager: NSObject, ObservableObject {
         let needsCategory = session.category != .playAndRecord || session.mode != .default
         if needsCategory {
             do {
+#if !targetEnvironment(macCatalyst)
                 try session.setCategory(
                     .playAndRecord,
                     mode: .default,
                     options: [.defaultToSpeaker, .allowBluetooth, .allowBluetoothA2DP]
                 )
+#else
+                try session.setCategory(.playAndRecord, mode: .default, options: [])
+#endif
                 try session.setActive(true, options: .notifyOthersOnDeactivation)
             } catch {
                 print("❌ TTS audio session setup failed:", error.localizedDescription)
@@ -584,12 +589,17 @@ final class SpeechManager: NSObject, ObservableObject {
     }
 
     private func protectedRouteCap(baseCap: Float, maxEffectiveVolume: Float) -> Float {
+#if !targetEnvironment(macCatalyst)
         let systemVolume = max(0.05, AVAudioSession.sharedInstance().outputVolume)
         let dynamicCap = maxEffectiveVolume / systemVolume
         return clampUnit(min(baseCap, dynamicCap))
+#else
+        return clampUnit(baseCap)
+#endif
     }
 
     private var isProtectedListeningRoute: Bool {
+#if !targetEnvironment(macCatalyst)
         AVAudioSession.sharedInstance().currentRoute.outputs.contains { output in
             switch output.portType {
             case .headphones,
@@ -603,6 +613,9 @@ final class SpeechManager: NSObject, ObservableObject {
                 return false
             }
         }
+#else
+        return false
+#endif
     }
 
     private func clampUnit(_ value: Float) -> Float {

@@ -170,6 +170,37 @@ final class WhisperManager: ObservableObject {
 
     func startRecording() {
         guard !isRecording else { return }
+
+#if targetEnvironment(macCatalyst)
+        // On Mac, starting the audio engine does NOT reliably trigger the
+        // microphone permission prompt the way it does on iOS. Request it
+        // explicitly: if undetermined, show the prompt and retry once granted;
+        // if denied, bail with a clear log. iPhone path is unchanged (this
+        // whole block compiles out there).
+        switch AVAudioApplication.shared.recordPermission {
+        case .granted:
+            break
+        case .denied:
+            print("❌ WhisperManager: microphone access denied. Enable it in System Settings → Privacy & Security → Microphone.")
+            isStartingRecording = false
+            return
+        case .undetermined:
+            isStartingRecording = false
+            AVAudioApplication.requestRecordPermission { granted in
+                Task { @MainActor in
+                    if granted {
+                        self.startRecording()
+                    } else {
+                        print("❌ WhisperManager: microphone permission was not granted.")
+                    }
+                }
+            }
+            return
+        @unknown default:
+            break
+        }
+#endif
+
         isStartingRecording = true
         recordedSamples = []
         // Mute is STICKY — deliberately not reset here. If the user tapped
@@ -200,6 +231,18 @@ final class WhisperManager: ObservableObject {
 
         let hardwareFormat = inputNode.inputFormat(forBus: 0)
         nativeSampleRate = hardwareFormat.sampleRate
+
+        // On macOS the input format can come back as 0 Hz / 0 channels until
+        // microphone permission is granted or a real input device is bound.
+        // Installing a tap with that format crashes Core Audio, so bail out
+        // cleanly here — the next startRecording() (after permission/device is
+        // ready) will install the tap properly.
+        guard hardwareFormat.sampleRate > 0, hardwareFormat.channelCount > 0 else {
+            isStartingRecording = false
+            recordingStartedAt  = nil
+            print("⚠️ WhisperManager: input format not ready (\(hardwareFormat.sampleRate) Hz, \(hardwareFormat.channelCount) ch) — mic permission or device pending.")
+            return
+        }
 
         inputNode.installTap(onBus: 0, bufferSize: 1024, format: hardwareFormat) { [weak self] buffer, _ in
             guard let data = buffer.floatChannelData?[0] else { return }
@@ -464,11 +507,15 @@ final class WhisperManager: ObservableObject {
         // hears between turns.
         let needsCategory = session.category != .playAndRecord || session.mode != .default
         if needsCategory {
+#if !targetEnvironment(macCatalyst)
             try? session.setCategory(
                 .playAndRecord,
                 mode: .default,
                 options: [.defaultToSpeaker, .allowBluetooth, .allowBluetoothA2DP]
             )
+#else
+            try? session.setCategory(.playAndRecord, mode: .default, options: [])
+#endif
             try? session.setActive(true, options: .notifyOthersOnDeactivation)
         }
     }

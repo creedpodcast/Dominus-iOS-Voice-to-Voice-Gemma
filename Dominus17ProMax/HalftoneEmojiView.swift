@@ -1,5 +1,11 @@
 import SwiftUI
+#if canImport(UIKit)
 import UIKit
+typealias PlatformImage = UIImage
+#else
+import AppKit
+typealias PlatformImage = NSImage
+#endif
 
 /// Halftone dot field that fills the entire orb disc. Three behaviors play
 /// out simultaneously:
@@ -297,7 +303,7 @@ struct HalftoneEmojiView: View {
     // MARK: - Glyph rasterisation
 
     @MainActor
-    private func renderGlyphImage(glyph: String, fontSize: CGFloat, side: CGFloat) -> UIImage {
+    private func renderGlyphImage(glyph: String, fontSize: CGFloat, side: CGFloat) -> PlatformImage {
         let renderer = ImageRenderer(content:
             Text(glyph)
                 .font(.system(size: fontSize))
@@ -305,7 +311,11 @@ struct HalftoneEmojiView: View {
         )
         renderer.scale = 1.0
         renderer.isOpaque = false
+#if canImport(UIKit)
         return renderer.uiImage ?? UIImage()
+#else
+        return renderer.nsImage ?? NSImage()
+#endif
     }
 
     private struct PixelGrid {
@@ -329,7 +339,7 @@ struct HalftoneEmojiView: View {
         }
     }
 
-    private func grayscalePixels(from image: UIImage) -> PixelGrid? {
+    private func grayscalePixels(from image: PlatformImage) -> PixelGrid? {
         guard let cgImage = image.cgImage,
               let provider = cgImage.dataProvider,
               let data = provider.data,

@@ -1,6 +1,8 @@
 # Dominus
 
-Dominus is a local-first iOS assistant built in SwiftUI. It runs a quantized Gemma 2B model through SwiftLlama, records and transcribes voice with WhisperKit, uses a bundled Silero VAD Core ML model for speech endpointing, speaks through an Apple TTS audio pipeline, and stores conversations, profile facts, and memory data on device.
+Dominus is a local-first SwiftUI assistant. It runs a quantized Gemma 2B model through SwiftLlama, records and transcribes voice with WhisperKit, uses a bundled Silero VAD Core ML model for speech endpointing, speaks through an Apple TTS audio pipeline, and stores conversations, profile facts, and memory data on device.
+
+It targets iPhone first and the same codebase also builds and runs on Apple Silicon Macs through Mac Catalyst.
 
 The current local Xcode project is the source of truth for this document.
 
@@ -31,6 +33,22 @@ Runtime inference is local. Gemma, Whisper transcription, Silero VAD, Apple TTS,
 
 Network access can still be needed during development or first setup for Swift Package resolution and for any model assets WhisperKit needs to fetch/cache. Once assets are present, the app logic is designed around on-device execution rather than cloud APIs.
 
+## Platforms And Mac Catalyst
+
+Dominus builds for two destinations from one codebase:
+
+- iPhone (primary).
+- Apple Silicon Mac via Mac Catalyst.
+
+Cross-platform handling lives behind compile-time guards so the iPhone path is unchanged:
+
+- `#if canImport(UIKit)` / `#else import AppKit` bridges. A `PlatformImage` typealias maps to `UIImage` on iOS and `NSImage` on macOS for orb glyph rasterisation, and color component extraction falls back from `UIColor` to `NSColor`.
+- `#if !targetEnvironment(macCatalyst)` guards around iOS-only audio behavior. On Catalyst the voice-mode `AVAudioSession` is configured without the iOS-only `.defaultToSpeaker` / `.allowBluetooth*` options, protected-route volume capping is skipped, and `UIImpactFeedbackGenerator` haptics compile out.
+- macOS microphone access is requested explicitly. Unlike iOS, starting the audio engine on Mac does not reliably trigger the permission prompt, so `WhisperManager` checks `AVAudioApplication.shared.recordPermission`, prompts when undetermined, retries once granted, and bails cleanly if denied. It also guards against the macOS input format reporting `0 Hz / 0 channels` before a device/permission is bound, which would otherwise crash Core Audio on tap install.
+- `Dominus17ProMax/Dominus17ProMax.entitlements` enables `com.apple.security.device.audio-input` for the sandboxed Mac app.
+
+The bundled `llama.xcframework` ships iOS and macOS slices but not a Mac Catalyst slice, so a build-time patch adds one by reusing the macOS slice. `Scripts/patch_llama_xcframework.sh` is intended as a pre-build Run Script phase (above Compile Sources, with "Based on dependency analysis" unchecked) and is idempotent — it no-ops once the framework is already patched.
+
 ## Build And Run
 
 Open the Xcode project:
@@ -41,11 +59,14 @@ Dominus17ProMax.xcodeproj
 
 Build and run from Xcode. This repository is not set up with a supported CLI build flow.
 
+For the Mac Catalyst destination, add `Scripts/patch_llama_xcframework.sh` as a pre-build Run Script phase (see the Mac Catalyst section above) so the `llama.xcframework` gains a Catalyst slice before Compile Sources.
+
 Required local app resources:
 
-- `Dominus17ProMax/gemma-2-2b-it-Q4_K_M.gguf` - Gemma 2 2B IT Q4_K_M model, about 1.6 GB.
+- `Dominus17ProMax/gemma-2-2b-it-Q4_K_M.gguf` - Gemma 2 2B IT Q4_K_M model, about 1.6 GB (tracked via Git LFS).
 - `Dominus17ProMax/SileroVADModel.mlpackage` - bundled Core ML VAD model.
 - `Dominus17ProMax/SoundEffects/*.wav` - local cue sounds.
+- `Dominus17ProMax/Dominus17ProMax.entitlements` - app entitlements (microphone/audio input).
 - Swift packages from `Package.resolved`.
 
 The Xcode project uses a file-system synchronized app group for `Dominus17ProMax/`, so source and resource files in that folder are picked up by the project without hand-maintaining every file entry in `project.pbxproj`.
@@ -458,11 +479,15 @@ Dominus17ProMax/
     App icon and accent color assets.
 
   gemma-2-2b-it-Q4_K_M.gguf
-    Bundled local LLM model.
+    Bundled local LLM model (Git LFS).
+
+  Dominus17ProMax.entitlements
+    App entitlements; enables microphone/audio input for the Mac app.
 ```
 
 Other repository folders:
 
+- `Scripts/` holds build helpers. `patch_llama_xcframework.sh` adds a Mac Catalyst slice to `llama.xcframework` at build time (see the Mac Catalyst section).
 - `Archive/` contains old or reference voice work, including the prior SFSpeech recognizer file. It is not the active STT path.
 - `Build Stack Notes/` contains historical architecture/build notes.
 - `Packages/kokoro-swift/` is a local untracked Kokoro TTS experiment and is not referenced by the current Xcode project.
@@ -493,4 +518,4 @@ Local persisted data:
 
 Machine-generated files such as `.DS_Store`, Xcode `xcuserdata`, SwiftPM build folders, and the local `Packages/` experiment are ignored by the root `.gitignore`. Existing tracked machine-local files were removed from the Git index as part of this documentation cleanup while remaining available on disk.
 
-There is currently no configured Git remote in the local repository, so local commits do not automatically update GitHub until an `origin` remote and working GitHub authentication are restored.
+The repository's `origin` remote is `https://github.com/creedpodcast/Dominus-iOS-Voice-to-Voice-Gemma.git`. The large Gemma GGUF model is tracked with Git LFS.
