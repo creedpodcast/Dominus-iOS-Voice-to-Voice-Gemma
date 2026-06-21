@@ -856,10 +856,15 @@ final class ChatStore: ObservableObject {
             let cleanedAssistant = conversations[convoIndex].messages[assistantIndex].content
             if !cleanedAssistant.isEmpty {
                 if hasVisibleUserText {
+                    // 1-based ordinal of this user turn, for chronological/positional recall.
+                    let turnOrdinal = conversations[convoIndex].messages.filter {
+                        $0.role == .user && !isMemoryStatusMessage($0.content)
+                    }.count
                     MemoryRetriever.shared.remember(
                         conversationID: conversations[convoIndex].id,
                         userText: visibleUserText,
-                        assistantText: cleanedAssistant
+                        assistantText: cleanedAssistant,
+                        turnIndex: turnOrdinal
                     )
                     scheduleConversationMaintenance(for: conversations[convoIndex].id)
                 }

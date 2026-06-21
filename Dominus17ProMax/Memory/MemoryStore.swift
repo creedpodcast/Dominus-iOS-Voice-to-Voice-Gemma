@@ -345,6 +345,10 @@ final class MemoryRecord {
     var importanceScore: Double = 0.45
     var recurrenceCount: Int = 1
     var semanticContext: String = ""
+    /// 1-based ordinal of the user turn this record came from, for chronological
+    /// ordering and positional recall. -1 means unknown (older records predating
+    /// this field, or non-turn records). Default keeps SwiftData migration lightweight.
+    var turnIndex: Int = -1
     var createdAt: Date
     var updatedAt: Date = Date()
 
@@ -358,6 +362,7 @@ final class MemoryRecord {
         content: String,
         embeddingData: Data,
         metadata: MemoryRecordMetadata? = nil,
+        turnIndex: Int = -1,
         createdAt: Date = Date(),
         updatedAt: Date = Date()
     ) {
@@ -381,6 +386,7 @@ final class MemoryRecord {
         self.emotionalToneRaw = resolvedMetadata.emotionalTone
         self.importanceScore = resolvedMetadata.importanceScore
         self.semanticContext = resolvedMetadata.semanticContext
+        self.turnIndex      = turnIndex
         self.createdAt      = createdAt
         self.updatedAt      = updatedAt
     }
@@ -568,7 +574,8 @@ final class MemoryStore {
         sourceID: String? = nil,
         categoryKey: String? = nil,
         content: String,
-        embedding: [Float]?
+        embedding: [Float]?,
+        turnIndex: Int = -1
     ) -> MemoryRecord {
         let metadata = MemoryMetadataBuilder.build(
             content: content,
@@ -587,6 +594,7 @@ final class MemoryStore {
             content: content,
             embeddingData: data,
             metadata: metadata,
+            turnIndex: turnIndex,
             updatedAt: Date()
         )
         context.insert(record)

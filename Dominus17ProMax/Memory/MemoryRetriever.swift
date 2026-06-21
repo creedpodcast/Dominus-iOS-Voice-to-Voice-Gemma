@@ -82,7 +82,7 @@ final class MemoryRetriever {
 
     // MARK: - Store a completed exchange
 
-    func remember(conversationID: UUID, userText: String, assistantText: String) {
+    func remember(conversationID: UUID, userText: String, assistantText: String, turnIndex: Int = -1) {
         let combined = compactExchange(userText: userText, assistantText: assistantText)
         let convID   = conversationID
 
@@ -100,7 +100,8 @@ final class MemoryRetriever {
                     title: "Conversation turn",
                     sourceID: nil,
                     content: combined,
-                    embedding: vec
+                    embedding: vec,
+                    turnIndex: turnIndex
                 )
                 MemoryStore.shared.pruneIfNeeded(conversationID: convID, keepLatest: 160)
                 let total = MemoryStore.shared.fetchAll().count
