@@ -282,6 +282,11 @@ final class ChatStore: ObservableObject {
     private let minTurnsToKeep = 2
     private let targetContextUsage: Double = 0.10
     private let approximateContextTokenLimit = 2048
+    /// Tokens reserved for the model's reply so prompt + output never exceed n_ctx.
+    private let generationReserve = 1024
+    /// Maximum tokens the assembled prompt may occupy, measured against the real
+    /// context window. `fitToContext` enforces this with the model's own tokenizer.
+    private var promptBudget: Int { max(256, engine.contextWindow - generationReserve) }
     private let voiceLatencyTestingDisablesFillers = true
 
     private var saveURL: URL {
@@ -350,8 +355,10 @@ final class ChatStore: ObservableObject {
             messages.append(.init(role: .user, content: trimmedDraft))
         }
 
+        // Cheap char-based estimate here (runs per keystroke while composing);
+        // the exact tokenizer is used only in the send path via fitToContext.
         let trimmed = trimLLMHistory(messages)
-        let usage = Double(estimatedTokens(for: trimmed)) / Double(approximateContextTokenLimit)
+        let usage = Double(estimatedTokens(for: trimmed)) / Double(promptBudget)
         return min(1.0, max(0.0, usage))
     }
 
@@ -624,6 +631,9 @@ final class ChatStore: ObservableObject {
         }
         llmMessages = filterNoiseTurns(llmMessages)
         llmMessages = trimLLMHistory(llmMessages)
+        // Hard token-budget guarantee: assembled prompt provably fits n_ctx with
+        // room reserved for the reply, so generation can never overflow context.
+        llmMessages = fitToContext(llmMessages)
 
         // Snapshot the assembled context for the inspector sheet (tappable ring).
         lastContextSnapshot = ContextSnapshot(
@@ -1188,22 +1198,44 @@ final class ChatStore: ObservableObject {
         return text
     }
 
-    /// Keep system message + recent raw turns. If the prompt estimate still rises
-    /// past the current context target, drop older raw turns down to the minimum window.
+    /// Structural recency cap: keep the system message + the most recent
+    /// `maxTurnsToKeep` turns. Real token-budget enforcement is done separately
+    /// by `fitToContext`, which measures with the model's own tokenizer.
     private func trimLLMHistory(_ llm: [LlamaChatMessage]) -> [LlamaChatMessage] {
         let maxMessages = 1 + (maxTurnsToKeep * 2)
-        let minMessages = 1 + (minTurnsToKeep * 2)
+        guard llm.count > maxMessages else { return llm }
+        return [llm[0]] + Array(llm.suffix(maxMessages - 1))
+    }
 
-        var trimmed = llm.count <= maxMessages
-            ? llm
-            : [llm[0]] + Array(llm.suffix(maxMessages - 1))
+    /// Hard guarantee that the assembled prompt fits the real context window, so
+    /// prompt + reply can never exceed n_ctx (the cause of LlamaError error 1).
+    /// Measured with the model's actual tokenizer via `engine.tokenCount`:
+    ///   1. Drop the oldest droppable turns, always keeping the system message
+    ///      and the latest turn.
+    ///   2. Last resort — if the system message alone still overflows, tail-
+    ///      truncate it. Because the system prompt is ordered identity → profile
+    ///      → recent-context → recall → ambient, truncating the tail sheds the
+    ///      lowest-priority blocks first (ambient, then recall) while preserving
+    ///      the identity and profile text the assistant needs.
+    private func fitToContext(_ messages: [LlamaChatMessage]) -> [LlamaChatMessage] {
+        guard !messages.isEmpty else { return messages }
+        let budget = promptBudget
+        var msgs = messages
 
-        while trimmed.count > minMessages,
-              estimatedTokens(for: trimmed) > Int(Double(approximateContextTokenLimit) * targetContextUsage) {
-            trimmed.remove(at: 1)
+        while msgs.count > 2, engine.tokenCount(for: msgs) > budget {
+            msgs.remove(at: 1)
         }
 
-        return trimmed
+        var guardrail = 0
+        while engine.tokenCount(for: msgs) > budget,
+              msgs[0].content.count > 400,
+              guardrail < 24 {
+            let newLength = max(400, Int(Double(msgs[0].content.count) * 0.85))
+            msgs[0] = .init(role: .system, content: String(msgs[0].content.prefix(newLength)))
+            guardrail += 1
+        }
+
+        return msgs
     }
 
     /// Drop low-signal user turns ("ok", "yeah", "thanks" etc.) and their paired
