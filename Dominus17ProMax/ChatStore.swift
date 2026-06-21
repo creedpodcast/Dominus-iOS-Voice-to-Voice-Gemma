@@ -562,7 +562,11 @@ final class ChatStore: ObservableObject {
             .first(where: { $0.role == .assistant && !isMemoryStatusMessage($0.content) })?
             .content
         let activeConversationContext = activeConversationMemoryContext(in: conversations[convoIndex])
-        let shouldRetrieveCurrentChat = hasVisibleUserText && shouldUseCurrentChatRecall(for: visibleUserText)
+        // Always run retrieval when the user typed something. Retrieval self-gates:
+        // it returns "" unless a candidate clears the semantic threshold, so casual
+        // turns inject nothing. This replaces the brittle keyword-only recall gate,
+        // which silently skipped retrieval whenever the phrasing wasn't anticipated.
+        let shouldRetrieveCurrentChat = hasVisibleUserText
         // Use speculative retrieval result if the query matches exactly; otherwise
         // fall back to a fresh retrieve call. Cache is cleared after each send.
         let memoryContext: String
@@ -595,12 +599,23 @@ final class ChatStore: ObservableObject {
         if !recentContextCache.isEmpty {
             fullSystemPrompt += "\n\nRecent conversation context:\n\(recentContextCache)"
         }
-        // NOTE: The unbounded append-only "Earlier in this conversation:" rolling
-        // summary used to be injected here. It grew without limit and, on recall
-        // turns, overflowed the context window (LlamaError). Out-of-window recall
-        // is now handled entirely by verbatim RAG retrieval (memoryContext below),
-        // which is bounded and budgeted. The rollingSummary field is retained on
-        // Conversation only for backward-compatible decoding of saved chats.
+        // Recall context. Two complementary sources, both grounded so the model
+        // answers from provided turns instead of fabricating:
+        //  - structuralRecall: a verbatim, chronological slice of the actual
+        //    transcript for positional/ordinal questions ("what was the first
+        //    thing I asked?"), where semantic similarity is the wrong tool.
+        //  - memoryContext: semantic RAG matches for topical recall.
+        // (The old unbounded "Earlier in this conversation:" rolling summary that
+        //  used to live here was removed — it caused the context overflow.)
+        let structuralRecall = isStructuralRecallQuery(visibleUserText)
+            ? structuralRecallBlock(for: conversations[convoIndex])
+            : ""
+        if !structuralRecall.isEmpty || !memoryContext.isEmpty {
+            fullSystemPrompt += "\n\n\(recallGroundingInstruction)"
+        }
+        if !structuralRecall.isEmpty {
+            fullSystemPrompt += "\n\n\(structuralRecall)"
+        }
         if !memoryContext.isEmpty {
             fullSystemPrompt += "\n\n\(memoryContext)"
         }
@@ -1696,10 +1711,74 @@ final class ChatStore: ObservableObject {
             "in this chat",
             "this conversation",
             "summarize this chat",
-            "summarize our conversation"
+            "summarize our conversation",
+            "first thing",
+            "the first",
+            "beginning",
+            "start of",
+            "what did i ask",
+            "what did you say",
+            "what did we talk about",
+            "what did we discuss",
+            "recap",
+            "so far"
         ]
 
         return recallPhrases.contains { normalized.contains($0) }
+    }
+
+    /// Grounding directive injected whenever recall context is present, to stop
+    /// the model fabricating answers about earlier turns.
+    private let recallGroundingInstruction =
+        "When the user asks what was said earlier in this conversation, answer using ONLY the verbatim turns and retrieved context provided below. Quote or paraphrase them accurately. If the answer is not in that context, say you don't recall it — do not guess or invent."
+
+    /// Positional / ordinal / whole-conversation recall, where semantic vector
+    /// similarity is the wrong tool (e.g. "what was the FIRST thing I asked?").
+    /// These are answered from the verbatim transcript instead of via RAG.
+    private func isStructuralRecallQuery(_ text: String) -> Bool {
+        let n = text
+            .lowercased()
+            .replacingOccurrences(of: "[^a-z0-9\\s']", with: " ", options: .regularExpression)
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !n.isEmpty else { return false }
+        let phrases = [
+            "first thing", "first question", "first message", "first time",
+            "the first", "what did i first", "what did you first",
+            "beginning", "at the start", "start of", "started this",
+            "when we started", "how did we start", "what did we start",
+            "earlier in this", "earlier you", "earlier i",
+            "what did we talk about", "what have we talked about",
+            "what did we discuss", "what did i ask", "what did you say",
+            "summarize this chat", "summarize our conversation", "recap", "so far"
+        ]
+        return phrases.contains { n.contains($0) }
+    }
+
+    /// Verbatim, chronological slice of the actual conversation, built directly
+    /// from the in-memory transcript (which is persisted in full). Positional
+    /// questions need the *earliest* turns, so this returns the start of the
+    /// conversation, numbered for ordinal reasoning. Bounded here; fitToContext
+    /// still enforces the overall token budget.
+    private func structuralRecallBlock(for conversation: Conversation, maxTurns: Int = 8) -> String {
+        let real = conversation.messages.filter {
+            !isMemoryStatusMessage($0.content) &&
+            !$0.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        guard !real.isEmpty else { return "" }
+        let head = real.prefix(maxTurns)
+        var lines: [String] = []
+        for (offset, message) in head.enumerated() {
+            let who = message.role == .user ? "You" : "Dominus"
+            let oneLine = message.content
+                .replacingOccurrences(of: "\n", with: " ")
+                .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let capped = oneLine.count > 300 ? String(oneLine.prefix(300)) + "…" : oneLine
+            lines.append("\(offset + 1). \(who): \(capped)")
+        }
+        return "Verbatim start of this conversation (chronological, earliest first):\n"
+            + lines.joined(separator: "\n")
     }
 
     /// Auto-title a new conversation from the first user message.
