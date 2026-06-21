@@ -588,13 +588,12 @@ final class ChatStore: ObservableObject {
         if !recentContextCache.isEmpty {
             fullSystemPrompt += "\n\nRecent conversation context:\n\(recentContextCache)"
         }
-        // Older deterministic context notes are useful for recall, but they still
-        // add prompt weight. Keep ordinary turns fast by injecting them only when
-        // the latest user message asks for current-chat context.
-        let rollingSummary = conversations[convoIndex].rollingSummary
-        if shouldRetrieveCurrentChat, !rollingSummary.isEmpty {
-            fullSystemPrompt += "\n\nEarlier in this conversation:\n\(rollingSummary)"
-        }
+        // NOTE: The unbounded append-only "Earlier in this conversation:" rolling
+        // summary used to be injected here. It grew without limit and, on recall
+        // turns, overflowed the context window (LlamaError). Out-of-window recall
+        // is now handled entirely by verbatim RAG retrieval (memoryContext below),
+        // which is bounded and budgeted. The rollingSummary field is retained on
+        // Conversation only for backward-compatible decoding of saved chats.
         if !memoryContext.isEmpty {
             fullSystemPrompt += "\n\n\(memoryContext)"
         }
@@ -1402,44 +1401,15 @@ final class ChatStore: ObservableObject {
             .map { $0.prefix(1).uppercased() + $0.dropFirst() }
     }
 
-    /// Persist compact summaries for messages that are about to live outside the raw prompt window.
-    /// This avoids unbounded context growth while still letting RAG recover older conversation details.
+    /// Disabled. Previously this built the unbounded append-only `rollingSummary`
+    /// and wrote lossy `.conversationSummary` records into the vector store.
+    /// Recall now relies on the verbatim `.conversationExchange` records stored by
+    /// `MemoryRetriever.remember(...)` after every turn — bounded and budgeted —
+    /// so summarizing older turns is redundant and is no longer done. Kept as a
+    /// no-op (still invoked by maintenance) so the call site stays valid and this
+    /// can be re-enabled if a different summarization strategy is ever wanted.
     private func summarizeOlderMessagesIfNeeded(convoIndex: Int) {
-        guard conversations.indices.contains(convoIndex) else { return }
-
-        let rawHistoryLimit = maxTurnsToKeep * 2
-        let messages = conversations[convoIndex].messages
-        let cutoff = max(0, messages.count - rawHistoryLimit)
-        let alreadySummarized = min(conversations[convoIndex].summarizedMessageCount, messages.count)
-
-        // Wait until at least two full turns have aged out before creating a summary chunk.
-        guard cutoff - alreadySummarized >= 4 else { return }
-
-        let slice = Array(messages[alreadySummarized..<cutoff])
-        let convoID = conversations[convoIndex].id
-        let sourceID = "\(alreadySummarized)-\(cutoff)"
-
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            guard let newSummary = self.deterministicRollingSummary(for: slice) else { return }
-            guard let idx = self.conversations.firstIndex(where: { $0.id == convoID }) else { return }
-
-            // Append-only: layer new context notes onto existing ones so older context
-            // is preserved without reprocessing the full history.
-            let existing = self.conversations[idx].rollingSummary
-            self.conversations[idx].rollingSummary = existing.isEmpty
-                ? newSummary
-                : "\(existing)\n\(newSummary)"
-            self.conversations[idx].summarizedMessageCount = cutoff
-
-            // Also store in RAG so retrieval can surface it when relevant.
-            MemoryRetriever.shared.rememberSummary(
-                conversationID: convoID,
-                summary: newSummary,
-                sourceID: sourceID
-            )
-            self.saveToDisk()
-        }
+        // Intentionally empty — see doc comment above.
     }
 
     /// Code-generated context notes for older turns. This deliberately avoids the
