@@ -12,22 +12,14 @@ final class GemmaEngine: ObservableObject {
     private var llama: LlamaService?
     private var progressTask: Task<Void, Never>?
 
-    /// Lightweight, tokenization-only model handle. Loaded with default params
-    /// (n_gpu_layers = 0, mmap), so it shares the GGUF's read-only pages with the
-    /// inference instance instead of duplicating ~1.6 GB. Used purely to count the
-    /// exact tokens of an assembled prompt so context assembly can stay under the
-    /// real window. nil until the inference model has loaded (backend init).
-    private var tokenizer: LlamaModel?
-
     private let modelResourceName: String = "gemma-2-2b-it-Q4_K_M"
     private let modelExtension: String = "gguf"
 
     private let batchSize: UInt32 = 512
-    // Context window (n_ctx). Gemma 2 trained at 8192; 4096 gives the budgeted
-    // prompt assembly real headroom while staying cheap on KV cache (~208 MiB).
-    // Per-token/prefill cost scales with the ACTUAL tokens used, not this cap,
-    // so raising it does not slow ordinary turns.
-    private let maxTokenCount: UInt32 = 4096
+    // Context window (n_ctx). Kept at 2048 (the original value). The budgeted
+    // prompt assembly + fitToContext clamp guarantee the prompt fits this window,
+    // so overflow can't recur regardless of n_ctx.
+    private let maxTokenCount: UInt32 = 2048
     private let useGPU: Bool = true
 
     /// The configured context window (n_ctx) in tokens.
@@ -115,44 +107,22 @@ final class GemmaEngine: ObservableObject {
     func resetModel() {
         stopStagedProgress()
         llama = nil
-        tokenizer = nil
         isLoaded = false
         isLoading = false
         loadProgress = 0.0
         loadStatus = "Idle"
     }
 
-    /// Exact number of tokens the model will see for `messages`, including the
-    /// chat template wrapping and BOS. Falls back to a conservative character
-    /// estimate if the tokenizer is unavailable (e.g. model not yet loaded), so
-    /// callers can always get a usable number without crashing.
+    /// Conservative token estimate for an assembled prompt, used to keep context
+    /// assembly under the window. Deliberately a cheap character heuristic rather
+    /// than the real tokenizer: loading a second model just to count tokens
+    /// duplicated ~1.6 GB on the GPU and blocked the main thread on an 8 GB
+    /// device. ~3 chars/token over-counts vs typical English (~4), so the
+    /// estimate errs high — `fitToContext` then trims to fit, keeping the
+    /// overflow guarantee without the cost of a second model.
     func tokenCount(for messages: [LlamaChatMessage]) -> Int {
-        if let exact = exactTokenCount(for: messages) { return exact }
-        // Fallback: ~4 chars/token is a rough lower bound; round UP and pad so
-        // budget math stays conservative when we can't measure precisely.
         let chars = messages.reduce(0) { $0 + $1.content.count }
-        return max(1, (chars / 3) + 8)
-    }
-
-    /// True exact count via the bundled tokenizer, or nil if it isn't ready.
-    private func exactTokenCount(for messages: [LlamaChatMessage]) -> Int? {
-        guard let model = ensureTokenizer() else { return nil }
-        let prompt = model.applyChatTemplate(to: messages, addAssistant: true)
-        return model.tokenize(text: prompt, addBos: model.shouldAddBos(), special: true).count
-    }
-
-    /// Lazily build the tokenization-only model. Only after the inference model
-    /// has loaded, which guarantees the llama backend is initialized.
-    private func ensureTokenizer() -> LlamaModel? {
-        if let tokenizer { return tokenizer }
-        guard isLoaded,
-              let modelUrl = Bundle.main.url(forResource: modelResourceName, withExtension: modelExtension)
-        else { return nil }
-        tokenizer = LlamaModel(path: modelUrl.path)
-        if tokenizer == nil {
-            print("⚠️ GemmaEngine: tokenizer model failed to load — using estimate fallback.")
-        }
-        return tokenizer
+        return max(1, (chars / 3) + 16)
     }
 
     func streamChat(

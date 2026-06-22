@@ -562,11 +562,15 @@ final class ChatStore: ObservableObject {
             .first(where: { $0.role == .assistant && !isMemoryStatusMessage($0.content) })?
             .content
         let activeConversationContext = activeConversationMemoryContext(in: conversations[convoIndex])
-        // Always run retrieval when the user typed something. Retrieval self-gates:
-        // it returns "" unless a candidate clears the semantic threshold, so casual
-        // turns inject nothing. This replaces the brittle keyword-only recall gate,
-        // which silently skipped retrieval whenever the phrasing wasn't anticipated.
+        // Run retrieval only when the message looks like recall. Running it on
+        // EVERY turn injected a large memory pack into normal questions, forcing
+        // full prompt reprocessing and slowing responses. The recall detectors
+        // (broadened phrase list + structural/ordinal queries) cover the cases
+        // that need history; ordinary follow-ups are served by the recent raw
+        // turns already in context.
         let shouldRetrieveCurrentChat = hasVisibleUserText
+            && (shouldUseCurrentChatRecall(for: visibleUserText)
+                || isStructuralRecallQuery(visibleUserText))
         // Use speculative retrieval result if the query matches exactly; otherwise
         // fall back to a fresh retrieve call. Cache is cleared after each send.
         let memoryContext: String
