@@ -16,10 +16,12 @@ final class GemmaEngine: ObservableObject {
     private let modelExtension: String = "gguf"
 
     private let batchSize: UInt32 = 512
-    // Context window (n_ctx). Kept at 2048 (the original value). The budgeted
-    // prompt assembly + fitToContext clamp guarantee the prompt fits this window,
-    // so overflow can't recur regardless of n_ctx.
-    private let maxTokenCount: UInt32 = 2048
+    // Context window (n_ctx). 4096 (Gemma 2 trained at 8192) gives the budgeted
+    // prompt assembly real headroom for recall. Per-token/prefill cost scales
+    // with the ACTUAL tokens used, not this cap, so normal turns aren't slower;
+    // only KV cache grows (~400 MiB total, fine on 8 GB now the second tokenizer
+    // model is gone). fitToContext still guarantees the prompt fits this window.
+    private let maxTokenCount: UInt32 = 4096
     private let useGPU: Bool = true
 
     /// The configured context window (n_ctx) in tokens.
