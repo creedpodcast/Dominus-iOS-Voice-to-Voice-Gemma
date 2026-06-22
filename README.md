@@ -263,7 +263,7 @@ Voice latency fillers exist in `ThinkingFillerManager`, but current latency test
 2. Appends the user message.
 3. Handles memory undo phrases like "forget that".
 4. Builds profile context from `ProfileStore` (always injected; protected from trimming).
-5. Always runs current-chat retrieval (self-gating); for positional/ordinal recall also builds a verbatim transcript slice.
+5. Runs current-chat retrieval when the message looks like recall; for positional/ordinal recall also builds a verbatim transcript slice.
 6. Adds recent context cache, a grounding instruction + recall context, and ambient context. The unbounded rolling summary is no longer injected.
 7. Filters low-signal turns.
 8. Applies the structural recency cap, then enforces the real token budget via `fitToContext` so prompt + reply never exceed n_ctx.
@@ -303,9 +303,9 @@ The cap only stops at a sentence boundary, so normal responses are not cut mid-w
 
 The context window is `n_ctx = 4096`, with `1024` tokens reserved for the reply,
 leaving a roughly `3072`-token prompt budget. The assembled prompt is measured
-with the model's own tokenizer and is hard-clamped to that budget before
-generation, so prompt + reply can never exceed the window (the cause of the prior
-`LlamaError error 1` context overflow).
+with a conservative character-based token estimate and is hard-clamped to that
+budget before generation, so prompt + reply can never exceed the window (the
+cause of the prior `LlamaError error 1` context overflow).
 
 Key `ChatStore` / `GemmaEngine` values:
 
@@ -331,8 +331,8 @@ system identity
 
 Important behavior:
 
-- Retrieval always runs and self-gates: nothing is injected unless a candidate clears the semantic threshold.
-- `fitToContext` enforces the token budget with the real tokenizer — it drops the oldest turns first, then as a last resort tail-truncates the system prompt, shedding ambient and recall before the protected identity/profile text.
+- Retrieval runs only when the message looks like recall (a broadened phrase list plus a positional/ordinal detector), so ordinary turns aren't taxed with a memory pack or forced into full prompt reprocessing. Ordinary follow-ups rely on the recent raw turns already in context.
+- `fitToContext` enforces the token budget with a conservative character estimate — it drops the oldest turns first, then as a last resort tail-truncates the system prompt, shedding ambient and recall before the protected identity/profile text. (An exact tokenizer was tried but removed: it loaded a second full model on the GPU, which was too costly on 8 GB.)
 - The unbounded append-only rolling summary is no longer built or injected; out-of-window recall is served by verbatim RAG plus the transcript slice.
 - Low-signal turns ("ok", "yeah", "thanks") can be removed from LLM history.
 - The context inspector shows exactly what was assembled for the latest turn.
@@ -344,7 +344,7 @@ The memory system has two different roles:
 - Long-term Memory Journal: user-visible saved memories stored locally.
 - Current-chat recall: verbatim conversation exchanges are embedded after every turn and retrieved into the prompt by semantic similarity; each carries a `turnIndex` for chronological/positional ordering.
 
-Retrieval runs on every turn and self-gates on a semantic threshold, so it injects context only when something is genuinely relevant. Positional/ordinal questions ("what was the first thing I asked?") are answered from a verbatim transcript slice built directly from the in-memory conversation, rather than from vector similarity. Cross-chat long-term retrieval is not injected into every prompt; stable cross-chat user information belongs in `ProfileStore`.
+Retrieval runs when the latest message looks like recall (a broadened phrase list plus a positional/ordinal detector), keeping ordinary turns fast. Positional/ordinal questions ("what was the first thing I asked?") are answered from a verbatim transcript slice built directly from the in-memory conversation, rather than from vector similarity. Cross-chat long-term retrieval is not injected into every prompt; stable cross-chat user information belongs in `ProfileStore`.
 
 Memory components:
 
@@ -511,7 +511,7 @@ Local persisted data:
 
 ## Known Constraints
 
-- The context window is `n_ctx = 4096` with `1024` tokens reserved for the reply; `fitToContext` clamps the assembled prompt to the remaining budget using the model's real tokenizer, so the prompt can never overflow the window.
+- The context window is `n_ctx = 4096` with `1024` tokens reserved for the reply; `fitToContext` clamps the assembled prompt to the remaining budget using a conservative token estimate, so the prompt can never overflow the window.
 - Do not replace the persistent `GemmaEngine.llama` with a fresh llama instance per turn.
 - Keep `ChatStore`, `GemmaEngine`, `WhisperManager`, and `SpeechManager` on the main actor unless the app architecture is deliberately changed.
 - Be careful with audio session ownership. Voice mode depends on one coordinated `.playAndRecord` session and one shared speech/SFX engine.
