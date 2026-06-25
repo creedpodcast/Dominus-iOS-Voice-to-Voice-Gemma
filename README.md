@@ -10,7 +10,8 @@ The current local Xcode project is the source of truth for this document.
 
 Dominus currently supports:
 
-- On-device chat with streaming Gemma responses.
+- On-device chat with streaming Gemma responses (uncapped length).
+- Sticky-bottom chat scrolling: while pinned to the bottom the view follows streamed tokens; scrolling up detaches, and returning to the bottom re-attaches (works on iPhone and Mac Catalyst).
 - Push-to-talk voice-to-voice mode with automatic send after the user stops speaking.
 - WhisperKit live transcript preview and final transcription.
 - Silero VAD speech detection layered over raw microphone activity.
@@ -288,16 +289,12 @@ Gemma settings:
 | Main chat seed | `42` |
 | Side-channel temperature | usually `0.3` to `0.4` |
 
-Response length is softly capped by prompt size:
-
-| User input length | Soft response cap |
-|---|---:|
-| 0-5 words | `200` chars |
-| 6-15 words | `500` chars |
-| 16-40 words | `1200` chars |
-| 41+ words | uncapped |
-
-The cap only stops at a sentence boundary, so normal responses are not cut mid-word.
+Response length is uncapped. Replies stream to the model's natural stopping
+point (EOS); depth is shaped by the system prompt ("be concise for simple
+questions, more talkative when the user is working through ideas") rather than a
+hard character ceiling. The earlier word-count-based soft cap was tuned for the
+iPhone 13 Pro Max and has been removed now that the app runs on the iPhone 17
+Pro Max and Apple Silicon Macs.
 
 ## Context Strategy
 
@@ -389,7 +386,7 @@ The profile block is prepended to every prompt. In voice mode, if voice emojis a
 Major UI pieces:
 
 - Sidebar: conversations, profile, memory, audio settings.
-- Chat view: streamed bubbles, selectable text, copy/share/speak actions, generation stop.
+- Chat view: streamed bubbles, selectable text, copy/share/speak actions, generation stop, and sticky-bottom follow-the-stream scrolling driven by scroll geometry (offset-drop detaches, returning to the bottom re-attaches).
 - Input bar: text send and PTT entry.
 - Context ring: estimated prompt pressure and tap-to-open inspector.
 - Loading splash: model and voice readiness.
