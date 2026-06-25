@@ -691,19 +691,12 @@ final class ChatStore: ObservableObject {
 
             let stream = try await engine.streamChat(llmMessages, temperature: 0.7, seed: 42)
 
-            // Length-match the response to the question. Soft cap that only kicks
-            // in at a sentence boundary, so we never chop a sentence mid-word.
-            let responseCharCap: Int? = {
-                let wordCount = visibleUserText
-                    .split(whereSeparator: { $0.isWhitespace })
-                    .count
-                switch wordCount {
-                case 0...5:   return 200
-                case 6...15:  return 500
-                case 16...40: return 1200
-                default:      return nil
-                }
-            }()
+            // Free responses: no length cap. On iPhone 17 Pro Max / Mac there is
+            // ample headroom, so the AI streams to its natural stopping point (EOS)
+            // and matches depth to the moment via the system prompt rather than a
+            // hard character ceiling. (Was a word-count-based soft cap tuned for
+            // the 13 Pro Max.)
+            let responseCharCap: Int? = nil
 
             var assistantText = ""
             var ttsBuffer     = ""

@@ -29,6 +29,15 @@ private enum HeadphoneVolumeWarning: Equatable {
     }
 }
 
+/// A consistent snapshot of the chat scroll position. `offsetY` is the vertical
+/// scroll offset; `distanceFromBottom` is how far the bottom edge is below the
+/// fold. The two always come from the same scroll event, so comparing snapshots
+/// cleanly distinguishes a user scroll from content growth.
+private struct ChatScrollMetrics: Equatable {
+    var offsetY: CGFloat
+    var distanceFromBottom: CGFloat
+}
+
 struct ContentView: View {
 
     @StateObject private var store   = ChatStore()
@@ -50,6 +59,20 @@ struct ContentView: View {
     @State private var isWarmedUp: Bool = false
     @State private var warmPipelineRefreshTask: Task<Void, Never>?
     @State private var showContextInspector: Bool = false
+
+    // Sticky-bottom chat scrolling (Claude-Code style follow). While the user is
+    // pinned to the bottom, the view follows streamed tokens; if they scroll up
+    // it stops following until they scroll back down. Works on Catalyst/Mac too,
+    // where the ScrollView does not drift with growing content on its own.
+    @State private var isPinnedToBottom: Bool = true
+
+    private static let bottomAnchorID = "chatBottomAnchor"
+    /// How close (in points) to the bottom counts as "back at the bottom" for
+    /// re-attaching. Small, so the user has to deliberately return to the bottom.
+    private static let stickyBottomThreshold: CGFloat = 24
+    /// Minimum upward offset change treated as a deliberate scroll-up (filters
+    /// sub-pixel jitter).
+    private static let scrollUpEpsilon: CGFloat = 1
 
     // Rename sheet state
     @State private var showingRenameAlert = false
@@ -1668,6 +1691,14 @@ struct ContentView: View {
 
     // MARK: - Chat scroll view
 
+    /// Stable signature of the in-flight assistant text. Changes on every UI
+    /// batch flush during streaming, which drives the follow-the-stream scroll.
+    private var streamingSignature: String {
+        let msgs = store.selectedConversation()?.messages
+        guard let last = msgs?.last, last.role == .assistant else { return "" }
+        return "\(last.id.uuidString):\(last.content.count)"
+    }
+
     private var chatScrollView: some View {
         ScrollViewReader { proxy in
             ZStack {
@@ -1700,16 +1731,56 @@ struct ContentView: View {
                             )
                                 .id(msg.id)
                         }
+
+                        // Invisible bottom anchor we scroll to while following the stream.
+                        Color.clear
+                            .frame(height: 1)
+                            .id(Self.bottomAnchorID)
                     }
                     .padding()
                 }
+                // Track scroll position from authoritative scroll geometry. A drop
+                // in offsetY means the user dragged upward (content growth and our
+                // own auto-scroll only ever increase offsetY) → detach immediately.
+                // Re-attach only once the user brings the bottom back into view.
+                .onScrollGeometryChange(for: ChatScrollMetrics.self) { geo in
+                    let maxOffset = geo.contentSize.height
+                        - geo.containerSize.height
+                        + geo.contentInsets.top
+                        + geo.contentInsets.bottom
+                    return ChatScrollMetrics(
+                        offsetY: geo.contentOffset.y,
+                        distanceFromBottom: maxOffset - geo.contentOffset.y
+                    )
+                } action: { oldMetrics, newMetrics in
+                    if newMetrics.offsetY < oldMetrics.offsetY - Self.scrollUpEpsilon {
+                        // Deliberate scroll up — stop following.
+                        isPinnedToBottom = false
+                    }
+                    if newMetrics.distanceFromBottom < Self.stickyBottomThreshold {
+                        // Back at the bottom — re-link to the stream.
+                        isPinnedToBottom = true
+                    }
+                }
+                // New message added (user sends, or assistant placeholder appears):
+                // re-link to the bottom and bring the latest into view.
                 .onChange(of: store.selectedConversation()?.messages.count ?? 0) { _ in
                     guard let last = store.selectedConversation()?.messages.last else { return }
+                    isPinnedToBottom = true
                     if last.role == .assistant {
                         withAnimation(.easeOut(duration: 0.28)) {
                             proxy.scrollTo(last.id, anchor: .top)
                         }
+                    } else {
+                        withAnimation(.easeOut(duration: 0.28)) {
+                            proxy.scrollTo(Self.bottomAnchorID, anchor: .bottom)
+                        }
                     }
+                }
+                // Follow streamed tokens — only while the user is pinned to the bottom.
+                .onChange(of: streamingSignature) { _ in
+                    guard store.isGenerating, isPinnedToBottom else { return }
+                    proxy.scrollTo(Self.bottomAnchorID, anchor: .bottom)
                 }
 
                 // Status pill — floats at top of chat area for audio/transcription only.
