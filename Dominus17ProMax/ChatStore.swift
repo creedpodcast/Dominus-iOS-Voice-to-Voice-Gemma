@@ -1226,6 +1226,7 @@ final class ChatStore: ObservableObject {
             }
         }
         if changed {
+            objectWillChange.send()
             conversations[convoIndex].updatedAt = Date()
             saveToDisk()
         }
