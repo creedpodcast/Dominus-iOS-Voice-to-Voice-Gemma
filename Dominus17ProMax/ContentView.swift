@@ -231,6 +231,7 @@ struct ContentView: View {
 
     var body: some View {
         ZStack {
+            Color.black
             chatUI
 
             if pttState != .idle {
@@ -1519,6 +1520,7 @@ struct ContentView: View {
                 Divider()
                 inputBar
             }
+            .background(Color.black)
             .onChange(of: contextUsage) { usage in
                 guard !hasShownContextHint, usage >= 0.85 else { return }
                 hasShownContextHint = true
@@ -1539,6 +1541,7 @@ struct ContentView: View {
                 sidebarRow(for: convo)
             }
         }
+        .background(Color.black)
         .navigationTitle("Chats")
         .toolbar {
             ToolbarItem(placement: .navigationBarLeading) {
@@ -1687,6 +1690,7 @@ struct ContentView: View {
         .padding(.horizontal)
         .padding(.top, 10)
         .padding(.bottom, 8)
+        .background(Color.black)
     }
 
     // MARK: - Chat scroll view
@@ -1702,6 +1706,7 @@ struct ContentView: View {
     private var chatScrollView: some View {
         ScrollViewReader { proxy in
             ZStack {
+                Color.black
                 ScrollView {
                     VStack(spacing: 12) {
                         // In voice mode: show messages as-is (brackets visible so the
@@ -2185,8 +2190,8 @@ struct ChatBubble: View {
             if role == .assistant {
                 VStack(alignment: .leading, spacing: 4) {
                     bubbleView(
-                        background: isMemoryNotice ? Color(.systemGray3) : Color(.systemGray5),
-                        foreground: isMemoryNotice || isThinkingPlaceholder ? Color(.secondaryLabel) : .primary,
+                        background: isMemoryNotice ? Color(.systemGray3) : Color.black,
+                        foreground: isMemoryNotice || isThinkingPlaceholder ? Color(.secondaryLabel) : .white,
                         align: .leading
                     )
                     if !isMemoryNotice && !isThinkingPlaceholder {
@@ -2197,7 +2202,7 @@ struct ChatBubble: View {
             } else {
                 Spacer(minLength: 48)
                 VStack(alignment: .trailing, spacing: 4) {
-                    bubbleView(background: .blue, foreground: .white, align: .trailing)
+                    bubbleView(background: Color(red: 0.15, green: 0.15, blue: 0.15), foreground: .white, align: .trailing)
                 }
             }
         }

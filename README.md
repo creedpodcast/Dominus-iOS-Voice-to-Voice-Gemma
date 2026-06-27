@@ -27,6 +27,9 @@ Dominus currently supports:
 - A Memory Journal for long-term saved memories, plus current-chat recall and memory traces.
 - Local startup, voice-entry, voice-exit, user-finished, and AI-finished sound effects.
 - Audio settings for sound volumes, haptics, voice selection, speech rate, speech pitch, inactivity timeout, and orb appearance.
+- Full text selection (select all, copy, paste) for both user and AI messages.
+- Copy and share buttons for user messages (AI messages also have read-aloud).
+- Dark theme with black background, black AI bubbles, and grey user bubbles.
 
 ## Privacy Model
 
@@ -386,7 +389,7 @@ The profile block is prepended to every prompt. In voice mode, if voice emojis a
 Major UI pieces:
 
 - Sidebar: conversations, profile, memory, audio settings.
-- Chat view: streamed bubbles, selectable text, copy/share/speak actions, generation stop, and sticky-bottom follow-the-stream scrolling driven by scroll geometry (offset-drop detaches, returning to the bottom re-attaches).
+- Chat view: streamed bubbles, full text selection (select all, copy, paste) for user and AI messages, copy/share buttons for all messages, AI read-aloud, generation stop, and sticky-bottom follow-the-stream scrolling driven by scroll geometry (offset-drop detaches, returning to the bottom re-attaches). Dark theme with black background, black AI bubbles, and grey user bubbles.
 - Input bar: text send and PTT entry.
 - Context ring: estimated prompt pressure and tap-to-open inspector.
 - Loading splash: model and voice readiness.
