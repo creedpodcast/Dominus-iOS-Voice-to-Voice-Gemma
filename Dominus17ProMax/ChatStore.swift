@@ -112,8 +112,9 @@ extension Conversation {
 struct ChatMessage: Identifiable, Codable, Equatable {
     let id: UUID
     let role: Role
-    let content: String
+    var content: String
     let timestamp: Date
+    var wasVoiceGenerated: Bool = false
 
     enum Role: String, Codable {
         case user
@@ -124,12 +125,14 @@ struct ChatMessage: Identifiable, Codable, Equatable {
         id: UUID = UUID(),
         role: Role,
         content: String,
-        timestamp: Date = Date()
+        timestamp: Date = Date(),
+        wasVoiceGenerated: Bool = false
     ) {
         self.id = id
         self.role = role
         self.content = content
         self.timestamp = timestamp
+        self.wasVoiceGenerated = wasVoiceGenerated
     }
 }
 
@@ -464,7 +467,8 @@ final class ChatStore: ObservableObject {
     func send(
         _ userText: String,
         includeAmbientCues: Bool = false,
-        ambientDuration: TimeInterval? = nil
+        ambientDuration: TimeInterval? = nil,
+        isVoiceMode: Bool = false
     ) {
         // Title generation rides on the same LlamaService — cancel it first and await its
         // unwind so the new chat stream doesn't collide with an in-flight title stream.
@@ -484,7 +488,8 @@ final class ChatStore: ObservableObject {
             await self?._send(
                 userText,
                 includeAmbientCues: includeAmbientCues,
-                ambientDuration: ambientDuration
+                ambientDuration: ambientDuration,
+                isVoiceMode: isVoiceMode
             )
         }
     }
@@ -492,7 +497,8 @@ final class ChatStore: ObservableObject {
     private func _send(
         _ userText: String,
         includeAmbientCues: Bool,
-        ambientDuration: TimeInterval?
+        ambientDuration: TimeInterval?,
+        isVoiceMode: Bool = false
     ) async {
         loadModelIfNeeded()
         guard isLoaded else { return }
@@ -555,7 +561,7 @@ final class ChatStore: ObservableObject {
         // ── Build LLM context ──────────────────────────────────────────────
         // 1. User profile — always injected first. Pass voice-mode state so
         //    the profile's voice-only emoji directive (if enabled) is added.
-        let profileBlock = ProfileStore.shared.systemPromptBlock(voiceMode: shouldSpeakReply)
+        let profileBlock = ProfileStore.shared.systemPromptBlock(voiceMode: isVoiceMode)
 
         // 2. Retrieve older current-chat context only when the latest message asks for recall.
         let recentAssistantText = conversations[convoIndex].messages.reversed()
@@ -812,21 +818,22 @@ final class ChatStore: ObservableObject {
             // the system prompt asks for one-per-reply but the model often
             // ignores that. Text mode keeps multi-emoji replies intact.
             let cleanedText = stripRoboticOpener(cleanLlamaArtifacts(assistantText))
-            let finalDisplayText = shouldSpeakReply
+            let finalDisplayText = isVoiceMode
                 ? enforceSingleEmoji(in: cleanedText)
                 : cleanedText
             conversations[convoIndex].messages[assistantIndex] = ChatMessage(
                 id: assistantID,
                 role: .assistant,
                 content: finalDisplayText,
-                timestamp: assistantTS
+                timestamp: assistantTS,
+                wasVoiceGenerated: isVoiceMode
             )
 
             // Final orb-glyph publish for the completed reply. Streaming
             // batches already publish incrementally via
             // publishOrbPlacementsIfChanged, so this is mostly a safety net
             // for any glyphs added by the cleanup pass.
-            if shouldSpeakReply {
+            if isVoiceMode {
                 publishOrbPlacementsIfChanged(from: finalDisplayText)
                 print("🟣 OrbEmojiScanner: \(latestOrbPlacements.count) glyph(s) in final reply")
             } else {
@@ -1199,6 +1206,29 @@ final class ChatStore: ObservableObject {
         return result
             .replacingOccurrences(of: "  +", with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Strip emoji characters from all AI messages that were generated in voice
+    /// mode (`wasVoiceGenerated == true`). Called when voice mode exits so the
+    /// chat history reverts to text-only — the voice-only emoji directive should
+    /// not leave permanent artifacts in the conversation.
+    func stripVoiceModeEmojis() {
+        guard let convoIndex = indexForSelectedConversation() else { return }
+        var changed = false
+        for i in conversations[convoIndex].messages.indices {
+            let msg = conversations[convoIndex].messages[i]
+            guard msg.role == .assistant, msg.wasVoiceGenerated else { continue }
+            let stripped = msg.content.filter { !OrbEmojiScanner.isEmojiCharacter($0) }
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if stripped != msg.content {
+                conversations[convoIndex].messages[i].content = stripped
+                changed = true
+            }
+        }
+        if changed {
+            conversations[convoIndex].updatedAt = Date()
+            saveToDisk()
+        }
     }
 
     private func stripRoboticOpener(_ text: String) -> String {

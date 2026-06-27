@@ -682,6 +682,7 @@ struct ContentView: View {
         // call" moment where the brief bus shift is acceptable.
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         store.voiceEnabled = voiceWasEnabled
+        store.stripVoiceModeEmojis()
         pttState = .idle
     }
 
@@ -1415,7 +1416,8 @@ struct ContentView: View {
             store.send(
                 textForSend,
                 includeAmbientCues: true,
-                ambientDuration: whisper.lastRecordingDuration
+                ambientDuration: whisper.lastRecordingDuration,
+                isVoiceMode: true
             )
             pttState = .aiTalking
             // New round — reset the AI conclusion cue guard so it can fire
