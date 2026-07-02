@@ -378,21 +378,20 @@ It supports:
 
 - Structured fields for preferred name, role/work, app purpose, goals, and behavior preferences.
 - A free-text persona field for how Dominus should speak.
-- A voice-only emoji preference.
 - SwiftData persistence for facts.
-- UserDefaults persistence for persona and voice emoji preference.
+- UserDefaults persistence for persona.
 
-The profile block is prepended to every prompt. In voice mode, if voice emojis are enabled, the profile block adds an instruction to use one emoji per response for the orb.
+The profile block is prepended to every prompt. In voice mode, the profile block always adds an instruction to use one emoji per response for the orb (not user-configurable).
 
 ## UI Surface
 
 Major UI pieces:
 
 - Sidebar: conversations, profile, memory, audio settings.
-- Chat view: streamed bubbles, full text selection (select all, copy, paste) for user and AI messages, copy/share buttons for all messages, AI read-aloud, generation stop, and sticky-bottom follow-the-stream scrolling driven by scroll geometry (offset-drop detaches, returning to the bottom re-attaches). Dark theme with black background, black AI bubbles, and grey user bubbles.
+- Chat view: streamed bubbles, full text selection (select all, copy, paste) for user and AI messages, copy/share buttons for all messages, AI read-aloud, generation stop, an "AI can make mistakes" disclaimer under the latest AI reply, and sticky-bottom follow-the-stream scrolling driven by scroll geometry (offset-drop detaches, returning to the bottom re-attaches). Dark theme with black background, black AI bubbles, and grey user bubbles.
 - Input bar: text send and PTT entry.
 - Context ring: estimated prompt pressure and tap-to-open inspector.
-- Loading splash: model and voice readiness.
+- Loading splash: Dominus logo with a single combined progress bar (model, voice, and warmup readiness).
 - Voice overlay: black full-screen orb surface with state-dependent controls.
 - Audio settings: volumes, haptics, voice picker, speech rate/pitch, orb scale, halftone controls.
 - Memory Journal: long-term memory management.
@@ -482,7 +481,7 @@ Dominus17ProMax/
     Manifest.json
 
   Assets.xcassets/
-    App icon and accent color assets.
+    App icon, accent color, and DominusLogo (splash screen) assets.
 
   gemma-2-2b-it-Q4_K_M.gguf
     Bundled local LLM model (Git LFS).
@@ -497,6 +496,7 @@ Other repository folders:
 - `Archive/` contains old or reference voice work, including the prior SFSpeech recognizer file. It is not the active STT path.
 - `Build Stack Notes/` contains historical architecture/build notes.
 - `Packages/kokoro-swift/` is a local untracked Kokoro TTS experiment and is not referenced by the current Xcode project.
+- `Tools/` holds one-off design/build helper scripts, not referenced by the Xcode project: `icon_designer.html` (browser-based icon design sandbox) and `make_mac_icon.py` (regenerates the Mac Catalyst app-icon PNG tiles from `DominusLogo.png`).
 
 ## Persistence
 
@@ -505,7 +505,7 @@ Local persisted data:
 - Conversations: `ChatStore` saves `conversations.json` under the app documents directory.
 - Memory records: SwiftData store named `DominusMemory.store`.
 - Profile facts: SwiftData model for `ProfileFact`.
-- Profile persona and voice emoji preference: UserDefaults.
+- Profile persona: UserDefaults.
 - Audio/orb/speech settings: UserDefaults.
 - Recall/repetition bookkeeping: UserDefaults where applicable.
 

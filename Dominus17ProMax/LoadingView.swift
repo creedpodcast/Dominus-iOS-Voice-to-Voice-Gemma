@@ -3,10 +3,10 @@ import SwiftUI
 // MARK: - Splash loading screen (blocks all interaction until fully ready)
 
 struct SplashLoadingView: View {
-    let gemmaProgress: Double
-    let gemmaStatus: String
-    let whisperProgress: Double
-    let whisperStatus: String
+    /// Combined load progress across every feature the app warms up (0...1).
+    let progress: Double
+    /// Short status line under the bar (e.g. the current component being loaded).
+    let status: String
 
     var body: some View {
         ZStack {
@@ -15,53 +15,34 @@ struct SplashLoadingView: View {
             VStack(spacing: 0) {
                 Spacer()
 
-                // App title
-                VStack(spacing: 10) {
-                    Text("Dominus")
-                        .font(.system(size: 52, weight: .bold, design: .rounded))
-                        .foregroundStyle(.white)
-                    Text("On-device AI assistant")
-                        .font(.subheadline)
-                        .foregroundStyle(.white.opacity(0.4))
+                // Logo + title
+                VStack(spacing: 18) {
+                    Image("DominusLogo")
+                        .resizable()
+                        .renderingMode(.original)
+                        .scaledToFit()
+                        .frame(width: 132, height: 132)
+
+                    VStack(spacing: 8) {
+                        Text("Dominus")
+                            .font(.system(size: 52, weight: .bold, design: .rounded))
+                            .foregroundStyle(.white)
+                        Text("Local AI Chatbot")
+                            .font(.subheadline)
+                            .foregroundStyle(.white.opacity(0.4))
+                    }
                 }
 
                 Spacer()
 
-                // "Please Wait" spinner — always visible until both models are ready
-                VStack(spacing: 10) {
-                    ProgressView()
-                        .scaleEffect(1.4)
-                        .tint(.white.opacity(0.7))
-                    Text("Please Wait\u{2026}")
-                        .font(.footnote.weight(.medium))
-                        .foregroundStyle(.white.opacity(0.55))
-                        .kerning(0.5)
-                }
-                .padding(.bottom, 32)
-
-                // Per-component progress bars
-                VStack(spacing: 14) {
-                    LoadingBarView(
-                        icon: "cpu.fill",
-                        label: "Language Model",
-                        status: gemmaStatus,
-                        progress: gemmaProgress
-                    )
-                    LoadingBarView(
-                        icon: "waveform",
-                        label: "Voice Recognition",
-                        status: whisperStatus,
-                        progress: whisperProgress
-                    )
-                    LoadingBarView(
-                        icon: "memorychip",
-                        label: "Memory & Embeddings",
-                        status: gemmaProgress >= 1.0 ? "Ready" : "Waiting for model\u{2026}",
-                        progress: gemmaProgress >= 1.0 ? 1.0 : gemmaProgress * 0.6
-                    )
-                }
-                .padding(.horizontal, 28)
-                .padding(.bottom, 64)
+                // Single combined loading bar with a pulsing white glow
+                LoadingBarView(
+                    label: "Loading AI",
+                    status: status,
+                    progress: progress
+                )
+                .padding(.horizontal, 40)
+                .padding(.bottom, 72)
             }
         }
     }
@@ -99,66 +80,59 @@ struct StatusPillView: View {
 // MARK: - Per-component loading pill
 
 struct LoadingBarView: View {
-    let icon: String
     let label: String
     let status: String
     let progress: Double
 
+    /// Drives the pulsing glow on the filled portion of the bar.
+    @State private var pulse = false
+
+    private let barHeight: CGFloat = 6
+
     var body: some View {
-        HStack(alignment: .center, spacing: 10) {
-            Image(systemName: icon)
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.85))
-                .frame(width: 18)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 4) {
+                Text(label)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.white)
+                Spacer()
+                Text("\(Int((progress * 100).rounded()))%")
+                    .font(.system(size: 14, weight: .regular, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.6))
+                    .animation(nil, value: progress)
+            }
 
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 4) {
-                    Text(label)
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.white)
-                    Spacer()
-                    Text("\(Int((progress * 100).rounded()))%")
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.white.opacity(0.6))
-                        .animation(nil, value: progress)
-                }
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(Color.white.opacity(0.10))
+                        .frame(height: barHeight)
 
-                GeometryReader { geo in
-                    ZStack(alignment: .leading) {
-                        Capsule()
-                            .fill(Color.white.opacity(0.10))
-                            .frame(height: 3)
-                        Capsule()
-                            .fill(
-                                LinearGradient(
-                                    colors: [.blue, .cyan],
-                                    startPoint: .leading,
-                                    endPoint: .trailing
-                                )
-                            )
-                            .frame(width: max(0, geo.size.width * progress), height: 3)
-                            .animation(.linear(duration: 0.12), value: progress)
-                    }
-                }
-                .frame(height: 3)
-
-                if !status.isEmpty {
-                    Text(status)
-                        .font(.caption2)
-                        .foregroundStyle(.white.opacity(0.45))
-                        .lineLimit(1)
+                    Capsule()
+                        .fill(Color.white)
+                        .frame(width: max(0, geo.size.width * progress), height: barHeight)
+                        // Pulsing white glow
+                        .shadow(color: .white.opacity(pulse ? 0.9 : 0.35),
+                                radius: pulse ? 14 : 5)
+                        .shadow(color: .white.opacity(pulse ? 0.5 : 0.15),
+                                radius: pulse ? 22 : 9)
+                        .opacity(pulse ? 1.0 : 0.82)
+                        .animation(.linear(duration: 0.15), value: progress)
                 }
             }
+            .frame(height: barHeight)
+
+            if !status.isEmpty {
+                Text(status)
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.45))
+                    .lineLimit(1)
+            }
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
-        .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(Color.white.opacity(0.06))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .stroke(Color.white.opacity(0.08), lineWidth: 0.5)
-                )
-        )
+        .onAppear {
+            withAnimation(.easeInOut(duration: 1.1).repeatForever(autoreverses: true)) {
+                pulse = true
+            }
+        }
     }
 }

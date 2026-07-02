@@ -10,7 +10,6 @@ struct ProfileView: View {
     @State private var jobTitleDraft = ""
     @State private var goalDrafts = Array(repeating: "", count: 3)
     @State private var behaviorDrafts = Array(repeating: "", count: 3)
-    @State private var voiceEmojisDraft: Bool = true
 
     private let nameLimit = 40
     private let shortLimit = 120
@@ -62,19 +61,6 @@ struct ProfileView: View {
                     )
                 } header: {
                     Label("How Dominus Should Talk", systemImage: "bubble.left.and.bubble.right")
-                }
-
-                Section {
-                    Toggle(isOn: $voiceEmojisDraft) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Use emojis in voice mode")
-                            Text("Adds “Use an emoji at the end of every response.” to your profile only during voice-to-voice.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                } header: {
-                    Label("Voice-to-Voice Emojis", systemImage: "face.smiling")
                 }
 
                 Section {
@@ -167,7 +153,6 @@ struct ProfileView: View {
         jobTitleDraft = store.jobTitle
         goalDrafts = padded(store.goals, count: 3)
         behaviorDrafts = padded(store.behaviorNotes, count: 3)
-        voiceEmojisDraft = store.voiceEmojisEnabled
     }
 
     private func save() {
@@ -177,7 +162,6 @@ struct ProfileView: View {
         store.persona = limited(personaDraft, personaLimit)
         store.updateGoals(goalDrafts.map { limited($0, shortLimit) })
         store.updateBehaviorNotes(behaviorDrafts.map { limited($0, shortLimit) })
-        store.voiceEmojisEnabled = voiceEmojisDraft
     }
 
     private func clearDrafts() {

@@ -229,6 +229,24 @@ struct ContentView: View {
         store.isLoaded && whisper.modelReady && isWarmedUp
     }
 
+    /// Single combined progress (0...1) across every feature the splash waits on:
+    /// the language model, voice recognition, and final warmup.
+    private var combinedLoadProgress: Double {
+        let model   = store.isLoaded ? 1.0 : store.loadProgress
+        let voice   = whisper.modelReady ? 1.0 : whisper.loadProgress
+        let warmup  = isWarmedUp ? 1.0 : 0.0
+        // Weighted so the bar advances smoothly and the quick warmup is the last leg.
+        return min(1.0, model * 0.55 + voice * 0.35 + warmup * 0.10)
+    }
+
+    /// Status line shown under the combined loading bar.
+    private var combinedLoadStatus: String {
+        if !store.isLoaded { return store.loadStatus }
+        if !whisper.modelReady { return "Loading voice recognition\u{2026}" }
+        if !isWarmedUp { return "Warming up\u{2026}" }
+        return "Ready"
+    }
+
     var body: some View {
         ZStack {
             Color.black
@@ -268,10 +286,8 @@ struct ContentView: View {
 
             if !isFullyLoaded {
                 SplashLoadingView(
-                    gemmaProgress:  store.loadProgress,
-                    gemmaStatus:    store.loadStatus,
-                    whisperProgress: whisper.loadProgress,
-                    whisperStatus:  whisper.modelStatus
+                    progress: combinedLoadProgress,
+                    status: combinedLoadStatus
                 )
                 .transition(.opacity)
                 .zIndex(999)
@@ -1734,7 +1750,8 @@ struct ContentView: View {
                                 messageID: msg.id,
                                 role: msg.role,
                                 text: displayText,
-                                isStreaming: isStreamingAssistant
+                                isStreaming: isStreamingAssistant,
+                                isLastAssistantMessage: msg.role == .assistant && msg.id == allMsgs.last?.id
                             )
                                 .id(msg.id)
                         }
@@ -2093,6 +2110,44 @@ struct ContextInspectorSheet: View {
     }
 }
 
+// MARK: - Selectable Text (UIViewRepresentable for full text selection)
+
+struct SelectableText: UIViewRepresentable {
+    let text: String
+    let foregroundColor: UIColor?
+
+    init(text: String, foregroundColor: Color? = nil) {
+        self.text = text
+        self.foregroundColor = foregroundColor.map { UIColor($0) }
+    }
+
+    func makeUIView(context: Context) -> UITextView {
+        let textView = UITextView()
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.backgroundColor = .clear
+        textView.textContainerInset = .zero
+        textView.textContainer.lineFragmentPadding = 0
+        textView.font = .preferredFont(forTextStyle: .body)
+        textView.dataDetectorTypes = [.link, .phoneNumber]
+        textView.isScrollEnabled = false
+        return textView
+    }
+
+    func updateUIView(_ uiView: UITextView, context: Context) {
+        if uiView.text != text {
+            uiView.text = text
+        }
+        uiView.textColor = foregroundColor ?? .label
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: UITextView, context: Context) -> CGSize? {
+        let width = proposal.width ?? UIView.layoutFittingCompressedSize.width
+        let size = uiView.sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude))
+        return CGSize(width: size.width, height: size.height)
+    }
+}
+
 // MARK: - Chat Bubble
 
 struct CinematicStreamingText: View {
@@ -2167,6 +2222,7 @@ struct ChatBubble: View {
     let role: ChatMessage.Role
     let text: String
     var isStreaming: Bool = false
+    var isLastAssistantMessage: Bool = false
 
     @ObservedObject private var speech = SpeechManager.shared
     @State private var copied: Bool = false
@@ -2199,12 +2255,20 @@ struct ChatBubble: View {
                     if !isMemoryNotice && !isThinkingPlaceholder {
                         assistantActions
                     }
+                    if isLastAssistantMessage && !isMemoryNotice && !isThinkingPlaceholder {
+                        Text("Dominus is AI and can make mistakes.")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                            .padding(.top, 2)
+                            .padding(.leading, 6)
+                    }
                 }
                 Spacer(minLength: 48)
             } else {
                 Spacer(minLength: 48)
                 VStack(alignment: .trailing, spacing: 4) {
                     bubbleView(background: Color(red: 0.15, green: 0.15, blue: 0.15), foreground: .white, align: .trailing)
+                    userActions
                 }
             }
         }
@@ -2217,15 +2281,23 @@ struct ChatBubble: View {
     }
 
     private func bubbleView(background: Color, foreground: Color, align: Alignment) -> some View {
-        CinematicStreamingText(text: text, isStreaming: isStreaming && role == .assistant && !isMemoryNotice)
-            .textSelection(.enabled)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
-            .background(isMemoryNotice || isThinkingPlaceholder ? Color.clear : background)
-            .foregroundColor(foreground)
-            .opacity(isThinkingPlaceholder ? (thinkingPulse ? 0.35 : 0.75) : 1)
-            .clipShape(RoundedRectangle(cornerRadius: isMemoryNotice || isThinkingPlaceholder ? 0 : 18, style: .continuous))
-            .frame(maxWidth: screenWidth72, alignment: align)
+        Group {
+            if isThinkingPlaceholder {
+                Text(text)
+                    .foregroundColor(foreground)
+                    .opacity(thinkingPulse ? 0.35 : 0.75)
+            } else if isStreaming && role == .assistant && !isMemoryNotice {
+                CinematicStreamingText(text: text, isStreaming: true)
+                    .textSelection(.enabled)
+            } else {
+                SelectableText(text: text, foregroundColor: foreground)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(isMemoryNotice || isThinkingPlaceholder ? Color.clear : background)
+        .clipShape(RoundedRectangle(cornerRadius: isMemoryNotice || isThinkingPlaceholder ? 0 : 18, style: .continuous))
+        .frame(maxWidth: screenWidth72, alignment: align)
     }
 
     private var screenWidth72: CGFloat {
@@ -2281,5 +2353,30 @@ struct ChatBubble: View {
         }
         .foregroundStyle(.secondary)
         .padding(.leading, 6)
+    }
+
+    private var userActions: some View {
+        HStack(spacing: 22) {
+            Button {
+                UIPasteboard.general.string = text
+                withAnimation { copied = true }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) {
+                    withAnimation { copied = false }
+                }
+            } label: {
+                Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                    .font(.system(size: 18))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Copy message")
+
+            ShareLink(item: text) {
+                Image(systemName: "square.and.arrow.up")
+                    .font(.system(size: 18))
+            }
+            .accessibilityLabel("Share message")
+        }
+        .foregroundStyle(.secondary)
+        .padding(.trailing, 6)
     }
 }
