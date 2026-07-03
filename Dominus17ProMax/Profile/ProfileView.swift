@@ -143,6 +143,15 @@ struct ProfileView: View {
                     } label: {
                         Label("Privacy Policy", systemImage: "hand.raised")
                     }
+
+                    NavigationLink {
+                        LegalDocumentView(
+                            title: "Open Source Licenses",
+                            bodyText: LegalContent.openSourceLicensesText
+                        )
+                    } label: {
+                        Label("Open Source Licenses", systemImage: "chevron.left.slash.chevron.right")
+                    }
                 } header: {
                     Label("Legal", systemImage: "doc.plaintext")
                 }

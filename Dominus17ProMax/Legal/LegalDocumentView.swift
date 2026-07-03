@@ -6,7 +6,7 @@ import SwiftUI
 struct LegalDocumentView: View {
     let title: String
     let bodyText: String
-    let hostedURL: URL
+    var hostedURL: URL? = nil
 
     var body: some View {
         ScrollView {
@@ -16,8 +16,10 @@ struct LegalDocumentView: View {
                     .foregroundStyle(.primary)
                     .textSelection(.enabled)
 
-                Link("View the hosted version", destination: hostedURL)
-                    .font(.footnote)
+                if let hostedURL {
+                    Link("View the hosted version", destination: hostedURL)
+                        .font(.footnote)
+                }
             }
             .padding(20)
         }
