@@ -229,6 +229,8 @@ struct ContentView: View {
         store.isLoaded && whisper.modelReady && isWarmedUp
     }
 
+    @State private var hasAcceptedTerms = LegalAcceptance.hasAcceptedCurrentVersion
+
     /// Single combined progress (0...1) across every feature the splash waits on:
     /// the language model, voice recognition, and final warmup.
     private var combinedLoadProgress: Double {
@@ -291,6 +293,15 @@ struct ContentView: View {
                 )
                 .transition(.opacity)
                 .zIndex(999)
+                .allowsHitTesting(true)
+            }
+
+            if !hasAcceptedTerms {
+                TermsAcceptanceGate {
+                    withAnimation { hasAcceptedTerms = true }
+                }
+                .transition(.opacity)
+                .zIndex(1000)
                 .allowsHitTesting(true)
             }
         }

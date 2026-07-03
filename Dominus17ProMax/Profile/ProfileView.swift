@@ -122,6 +122,30 @@ struct ProfileView: View {
                         }
                     }
                 }
+
+                Section {
+                    NavigationLink {
+                        LegalDocumentView(
+                            title: "Terms of Use",
+                            bodyText: LegalContent.termsOfUseText,
+                            hostedURL: LegalContent.termsOfUseURL
+                        )
+                    } label: {
+                        Label("Terms of Use", systemImage: "doc.text")
+                    }
+
+                    NavigationLink {
+                        LegalDocumentView(
+                            title: "Privacy Policy",
+                            bodyText: LegalContent.privacyPolicyText,
+                            hostedURL: LegalContent.privacyPolicyURL
+                        )
+                    } label: {
+                        Label("Privacy Policy", systemImage: "hand.raised")
+                    }
+                } header: {
+                    Label("Legal", systemImage: "doc.plaintext")
+                }
             }
             .navigationTitle("Profile & Preferences")
             .navigationBarTitleDisplayMode(.inline)
