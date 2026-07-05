@@ -1,1 +1,2 @@
 Dominus17ProMax/gemma-2-2b-it-Q4_K_M.gguf filter=lfs diff=lfs merge=lfs -text
+Dominus17ProMax/openai_whisper_base_en.bundle/**/weights/weight.bin filter=lfs diff=lfs merge=lfs -text

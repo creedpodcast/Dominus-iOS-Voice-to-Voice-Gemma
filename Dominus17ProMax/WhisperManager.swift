@@ -7,7 +7,7 @@ import Combine
 /// Handles PTT voice recording and on-device transcription via WhisperKit.
 ///
 /// Flow:
-///   1. Call `loadModel()` once on app boot — downloads + caches the Whisper model.
+///   1. Call `loadModel()` once on app boot — loads the bundled Whisper model, no network required.
 ///   2. Call `startRecording()` when the user opens the PTT session.
 ///   3. Call `stopAndTranscribe()` when the user taps send — returns the full transcript.
 ///
@@ -15,6 +15,17 @@ import Combine
 /// (SFSpeechRecognizer) lives under `/Archive` and is no longer in the build;
 /// this manager owns audio session setup, recording, VAD amplitude monitoring,
 /// and transcription end-to-end.
+enum WhisperManagerError: LocalizedError {
+    case bundledModelMissing
+
+    var errorDescription: String? {
+        switch self {
+        case .bundledModelMissing:
+            return "Bundled Whisper model not found in app resources."
+        }
+    }
+}
+
 @MainActor
 final class WhisperManager: ObservableObject {
 
@@ -97,7 +108,7 @@ final class WhisperManager: ObservableObject {
 
     // MARK: - Model loading
 
-    /// Downloads and caches the Whisper base-English model (~145 MB, once only).
+    /// Loads the bundled Whisper base-English model (~142 MB) from the app bundle.
     /// Call from ContentView.task — safe to call multiple times.
     func loadModel() async {
         guard !modelReady, !isLoadingModel else { return }
@@ -122,7 +133,10 @@ final class WhisperManager: ObservableObject {
 
         do {
             modelStatus = "Loading Whisper model…"
-            whisperKit  = try await WhisperKit(model: "openai_whisper-base.en")
+            guard let modelFolderURL = Bundle.main.url(forResource: "openai_whisper_base_en", withExtension: "bundle") else {
+                throw WhisperManagerError.bundledModelMissing
+            }
+            whisperKit  = try await WhisperKit(modelFolder: modelFolderURL.path)
             progressTask.cancel()
             loadProgress   = 1.0
             modelReady     = true

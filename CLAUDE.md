@@ -4,7 +4,7 @@ This file gives coding agents the current project assumptions for Dominus.
 
 ## Project Overview
 
-Dominus is a SwiftUI iOS app for a fully local AI assistant. It runs a bundled Gemma 2 2B IT Q4_K_M GGUF model through `SwiftLlama`, uses WhisperKit for on-device STT, uses a bundled Silero VAD Core ML model for speech endpointing, speaks with Apple TTS through a custom `AVAudioEngine` path, and stores conversations, profile facts, and memory data locally.
+Dominus is a SwiftUI iOS app for a fully local AI assistant. It runs a bundled Gemma 2 2B IT Q4_K_M GGUF model through `SwiftLlama`, uses a bundled WhisperKit base.en Core ML model for on-device STT, uses a bundled Silero VAD Core ML model for speech endpointing, speaks with Apple TTS through a custom `AVAudioEngine` path, and stores conversations, profile facts, and memory data locally. No component requires a network connection.
 
 The current local Xcode project is the source of truth.
 
@@ -22,6 +22,7 @@ Required app resources:
 
 - `Dominus17ProMax/gemma-2-2b-it-Q4_K_M.gguf`
 - `Dominus17ProMax/SileroVADModel.mlpackage`
+- `Dominus17ProMax/openai_whisper_base_en.bundle/` (bundled WhisperKit model + tokenizer, loaded via `modelFolder:` — no network download)
 - `Dominus17ProMax/SoundEffects/*.wav`
 - Swift packages pinned by `Dominus17ProMax.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved`
 

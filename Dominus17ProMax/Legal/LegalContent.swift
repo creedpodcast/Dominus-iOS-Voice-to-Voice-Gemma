@@ -4,19 +4,19 @@ import Foundation
 /// The text mirrors the hosted versions exactly; bump `currentVersion`
 /// whenever the wording changes so previously-agreed users are re-prompted.
 enum LegalContent {
-    static let currentVersion = "2026-07-02"
+    static let currentVersion = "2026-07-05"
 
     static let termsOfUseURL = URL(string: "https://sites.google.com/view/dominus-terms-of-use/home")!
     static let privacyPolicyURL = URL(string: "https://sites.google.com/view/dominusprivacypolicy/home")!
 
     static let termsOfUseText = """
     DOMINUS — TERMS OF USE
-    Last Updated: July 2, 2026
+    Last Updated: July 5, 2026
 
     These Terms of Use ("Terms") are a legal agreement between you and Ethos Creed, an individual developer ("Developer," "we," "us," or "our"), governing your use of the Dominus mobile application (the "App"). By downloading, installing, or using the App, you agree to be bound by these Terms. If you do not agree, do not download, install, or use the App.
 
     1. ELIGIBILITY
-    The App is intended for users who are at least 17 years old. By using the App, you represent that you are at least 17 years of age. The App is not directed at children, and the Developer does not knowingly permit use by anyone under 17.
+    The App is intended for users who are at least 18 years old. By using the App, you represent that you are at least 18 years of age. The App is not directed at children, and the Developer does not knowingly permit use by anyone under 18.
 
     2. LICENSE GRANT
     Subject to your compliance with these Terms and the Usage Rules set forth in the Apple Media Services Terms and Conditions (App Store Terms of Service), the Developer grants you a limited, non-exclusive, non-transferable, revocable license to use the App for your personal, non-commercial purposes on any Apple-branded product that you own or control, as permitted by those Usage Rules.
@@ -89,7 +89,7 @@ enum LegalContent {
 
     static let privacyPolicyText = """
     DOMINUS — PRIVACY POLICY
-    Last Updated: July 1, 2026
+    Last Updated: July 5, 2026
 
     This Privacy Policy explains how the Dominus mobile application ("Dominus," "the App") handles information. Dominus is developed by Ethos Creed ("Developer," "we," "us").
 
@@ -130,8 +130,11 @@ enum LegalContent {
 
     None of these components send data to the Developer, to their original authors, or to any other party.
 
+    A NOTE ON VOICE DOWNLOADS
+    Apple's text-to-speech includes optional higher-quality Enhanced and Premium voices that are not installed on your device by default. If you choose one of these voices in your device's Settings app (Settings > Accessibility > Spoken Content > Voices), your device downloads that voice directly from Apple — a one-time, user-initiated download handled entirely by iOS, not by Dominus. Dominus has no part in that download and cannot access it. Once downloaded, that voice — like every other voice — performs speech synthesis entirely on-device, with nothing sent anywhere. The App's default voice requires no download at all.
+
     CHILDREN'S PRIVACY
-    Dominus is intended for users age 17 and older and is not directed at children. We do not knowingly collect any information from children, and because the App does not collect or transmit data from any user regardless of age, no children's data is collected, stored remotely, or shared.
+    Dominus is intended for users age 18 and older and is not directed at children. We do not knowingly collect any information from children, and because the App does not collect or transmit data from any user regardless of age, no children's data is collected, stored remotely, or shared.
 
     YOUR CONTROL OVER YOUR DATA
     Because all data is stored locally:

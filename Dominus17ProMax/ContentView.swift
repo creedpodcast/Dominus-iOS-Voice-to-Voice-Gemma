@@ -241,11 +241,17 @@ struct ContentView: View {
         return min(1.0, model * 0.55 + voice * 0.35 + warmup * 0.10)
     }
 
-    /// Status line shown under the combined loading bar.
+    /// Status line shown under the combined loading bar. Reflects overall
+    /// progress rather than which subsystem is loading, so it stays simple
+    /// and non-technical.
     private var combinedLoadStatus: String {
-        if !store.isLoaded { return store.loadStatus }
-        if !whisper.modelReady { return "Loading voice recognition\u{2026}" }
-        if !isWarmedUp { return "Warming up\u{2026}" }
+        guard store.isLoaded, whisper.modelReady, isWarmedUp else {
+            switch combinedLoadProgress {
+            case ..<0.3: return "Starting up\u{2026}"
+            case ..<0.7: return "Loading\u{2026}"
+            default:     return "Almost done\u{2026}"
+            }
+        }
         return "Ready"
     }
 

@@ -35,7 +35,7 @@ Dominus currently supports:
 
 Runtime inference is local. Gemma, Whisper transcription, Silero VAD, Apple TTS, profile storage, conversation storage, and memory storage all run on the device.
 
-Network access can still be needed during development or first setup for Swift Package resolution and for any model assets WhisperKit needs to fetch/cache. Once assets are present, the app logic is designed around on-device execution rather than cloud APIs.
+The WhisperKit model and tokenizer are bundled in the app (`openai_whisper_base_en.bundle`) and loaded via `modelFolder:`, so the app has no network dependency at runtime, including on first launch. Network access is only needed during development for Swift Package resolution, and optionally by iOS itself (not the app) if the user picks a higher-quality system TTS voice that isn't already downloaded.
 
 ## Platforms And Mac Catalyst
 
@@ -69,6 +69,8 @@ Required local app resources:
 
 - `Dominus17ProMax/gemma-2-2b-it-Q4_K_M.gguf` - Gemma 2 2B IT Q4_K_M model, about 1.6 GB (tracked via Git LFS).
 - `Dominus17ProMax/SileroVADModel.mlpackage` - bundled Core ML VAD model.
+- `Dominus17ProMax/openai_whisper_base_en.bundle/` - bundled WhisperKit base.en Core ML model + tokenizer, about 142 MB (weight files tracked via Git LFS).
+- `Dominus17ProMax/PrivacyInfo.xcprivacy` - required-reason API privacy manifest.
 - `Dominus17ProMax/SoundEffects/*.wav` - local cue sounds.
 - `Dominus17ProMax/Dominus17ProMax.entitlements` - app entitlements (microphone/audio input).
 - Swift packages from `Package.resolved`.
@@ -87,11 +89,12 @@ The Xcode project uses a file-system synchronized app group for `Dominus17ProMax
 
 Key Xcode settings:
 
-- Bundle identifier: `com.creed.dominus1`.
-- Deployment target in the project file: `26.5`.
+- Bundle identifier: `com.creed.dominusethos`.
+- Deployment target in the project file: `26.0`.
 - Default actor isolation: `MainActor`.
 - Microphone usage description is configured.
-- Speech recognition usage description remains configured, though active STT is WhisperKit rather than the old SFSpeech path.
+- Export compliance: `ITSAppUsesNonExemptEncryption = NO` (only standard/exempt encryption is used).
+- A `PrivacyInfo.xcprivacy` privacy manifest declares required-reason API usage (`UserDefaults`, file timestamp APIs).
 
 ## Runtime Architecture
 
@@ -168,7 +171,7 @@ This is the practical middle ground used by mature voice systems: endpoint on sp
 
 `WhisperManager`:
 
-- Loads `WhisperKit(model: "openai_whisper-base.en")`.
+- Loads `WhisperKit(modelFolder:)` pointing at the bundled `openai_whisper_base_en.bundle` resource, so no model download ever happens at runtime.
 - Uses `DecodingOptions(noSpeechThreshold: 0.7, chunkingStrategy: .vad)`.
 - Starts an AVAudioEngine input tap with the active hardware format.
 - Keeps raw samples for final transcription.
@@ -480,6 +483,14 @@ Dominus17ProMax/
     Data/com.apple.CoreML/weights/weight.bin
     Manifest.json
 
+  openai_whisper_base_en.bundle/
+    Bundled WhisperKit base.en Core ML model (AudioEncoder/MelSpectrogram/
+    TextDecoder .mlmodelc) plus tokenizer.json/tokenizer_config.json.
+    Weight files tracked via Git LFS.
+
+  PrivacyInfo.xcprivacy
+    Required-reason API privacy manifest.
+
   Assets.xcassets/
     App icon, accent color, and DominusLogo (splash screen) assets.
 
@@ -524,4 +535,4 @@ Local persisted data:
 
 Machine-generated files such as `.DS_Store`, Xcode `xcuserdata`, SwiftPM build folders, and the local `Packages/` experiment are ignored by the root `.gitignore`. Existing tracked machine-local files were removed from the Git index as part of this documentation cleanup while remaining available on disk.
 
-The repository's `origin` remote is `https://github.com/creedpodcast/Dominus-iOS-Voice-to-Voice-Gemma.git`. The large Gemma GGUF model is tracked with Git LFS.
+The repository's `origin` remote is `https://github.com/creedpodcast/Dominus-iOS-Voice-to-Voice-Gemma.git`. The large Gemma GGUF model and the bundled Whisper model's weight files are tracked with Git LFS.
