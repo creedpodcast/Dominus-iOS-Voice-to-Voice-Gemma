@@ -11,7 +11,7 @@ struct VoiceOrbOverlay: View {
 
     let orbColor:      Color
     let audioLevel:    Float
-    let status:        (icon: String, message: String)?
+    let status:        (icon: String, message: String, isError: Bool)?
     let isMicMuted:    Bool
     let isGenerating:  Bool   // kept for API parity; the stop button has been removed
     let isSpeaking:    Bool   // drives the orb's pulse + glow while the AI is talking
@@ -31,8 +31,9 @@ struct VoiceOrbOverlay: View {
 
             VStack {
                 if let status {
-                    StatusPillView(icon: status.icon, message: status.message)
+                    StatusPillView(icon: status.icon, message: status.message, isError: status.isError)
                         .padding(.top, 22)
+                        .padding(.horizontal, 24)
                         .transition(.move(edge: .top).combined(with: .opacity))
                 }
                 Spacer()

@@ -452,20 +452,29 @@ struct ContentView: View {
 
     /// Returns the pill to show while the app is doing something in the background.
     /// nil = nothing to show. Priority: most specific state first.
-    private var activeStatus: (icon: String, message: String)? {
+    private var activeStatus: (icon: String, message: String, isError: Bool)? {
+        // Surfaced mic/audio failures take priority — these paths used to fail
+        // with print-only logging, which made voice mode look broken with no
+        // explanation. Each subsystem clears its message on its next success.
+        if let message = whisper.micErrorMessage {
+            return ("exclamationmark.triangle.fill", message, true)
+        }
+        if let message = speechMgr.audioErrorMessage {
+            return ("exclamationmark.triangle.fill", message, true)
+        }
         // Mic / audio engine spinning up after PTT tap
         if whisper.isStartingRecording {
-            return ("mic", "Starting microphone\u{2026}")
+            return ("mic", "Starting microphone\u{2026}", false)
         }
         // Whisper running final transcription pass. User-facing copy stays
         // "Thinking" because the fast live-transcript path usually skips this,
         // and the next visible phase is AI preparation.
         if whisper.isTranscribing {
-            return ("brain", "Thinking\u{2026}")
+            return ("brain", "Thinking\u{2026}", false)
         }
         // TTS audio pipeline initialising (first-call warm-up or per-message replay)
         if speechMgr.isStartingPlayback {
-            return ("speaker.wave.2", "Starting audio\u{2026}")
+            return ("speaker.wave.2", "Starting audio\u{2026}", false)
         }
         return nil
     }
@@ -1827,8 +1836,9 @@ struct ContentView: View {
                 // Status pill — floats at top of chat area for audio/transcription only.
                 VStack {
                     if let status = activeStatus {
-                        StatusPillView(icon: status.icon, message: status.message)
+                        StatusPillView(icon: status.icon, message: status.message, isError: status.isError)
                             .padding(.top, 12)
+                            .padding(.horizontal, 24)
                             .transition(.move(edge: .top).combined(with: .opacity))
                     }
                     Spacer()

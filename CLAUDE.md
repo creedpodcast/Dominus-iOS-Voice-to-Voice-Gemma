@@ -124,6 +124,14 @@ Do not add casual `setCategory` or `setActive` calls in new audio code. Repeated
 
 `SpeechManager` uses `AVSpeechSynthesizer.write`, not `speak()`, so it can apply speaker-only gain and peak limiting through `AVAudioEngine`.
 
+Voice selection rules (do not regress these):
+
+- The app default voice is Daniel (en-GB), preinstalled on iOS and macOS. `AudioSettingsStore.defaultVoice()` upgrades to the best installed quality of Daniel automatically.
+- The iOS build running on a Mac ("Designed for iPad" compatibility mode, `ProcessInfo.isiOSAppOnMac`) cannot render premium ("maui") voices — the OS logs `Invalid maui voice identifier` and silently substitutes a junk voice. `SpeechManager.isRenderableVoice` filters premium there, and the voice picker hides them.
+- Any voice that produces zero audio buffers is session-blocklisted and the utterance retries once with the next usable voice (`handleUnrenderedUtterance`).
+- Mic and TTS failures must stay user-visible: `WhisperManager.micErrorMessage` and `SpeechManager.audioErrorMessage` render as a warning status pill in `ContentView.activeStatus`. Do not add new print-only failure paths in the voice pipeline.
+- The TTS text cleaner must never filter on `Unicode isEmoji` alone — ASCII digits 0-9 are classified as emoji (keycap sequences) and would be silently deleted from speech.
+
 ## Active Vs Archived Voice Code
 
 Active STT is `WhisperManager` plus `SileroVAD`. The old SFSpeech recognizer lives under `Archive/SpeechRecognitionManager.swift` and is not the current app path.

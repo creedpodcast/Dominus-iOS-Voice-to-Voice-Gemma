@@ -13,6 +13,22 @@ struct AudioSettingsView: View {
         NavigationStack {
             Form {
                 Section {
+                    NavigationLink {
+                        VoicePickerScreen()
+                    } label: {
+                        HStack {
+                            Label("AI voice", systemImage: "person.wave.2")
+                            Spacer()
+                            Text(currentVoiceDisplayName())
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                    }
+                } footer: {
+                    Text("Open to browse every English voice installed on this device, preview, and adjust speed and pitch.")
+                }
+
+                Section {
                     volumeSlider(
                         title: "Startup sound",
                         value: $settings.startupSoundVolume
@@ -77,22 +93,6 @@ struct AudioSettingsView: View {
                     }
                 } footer: {
                     Text("Plays right after you stop talking (while Dominus is thinking) and again when Dominus finishes speaking — just before the mic resumes.")
-                }
-
-                Section {
-                    NavigationLink {
-                        VoicePickerScreen()
-                    } label: {
-                        HStack {
-                            Label("AI voice", systemImage: "person.wave.2")
-                            Spacer()
-                            Text(currentVoiceDisplayName())
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                        }
-                    }
-                } footer: {
-                    Text("Open to browse every English voice installed on this device, preview, and adjust speed and pitch.")
                 }
 
                 Section {
@@ -201,7 +201,7 @@ struct AudioSettingsView: View {
         if let defaultVoice = AudioSettingsStore.defaultVoice() {
             return speechVoiceDisplayName(defaultVoice)
         }
-        return AudioSettingsStore.defaultVoiceLabel
+        return AudioSettingsStore.currentDefaultVoiceLabel
     }
 
     private func volumeSlider(title: String, value: Binding<Double>) -> some View {
@@ -304,10 +304,14 @@ struct VoicePickerScreen: View {
                 }
 
                 Button(role: .destructive) {
+                    // Full reset: default voice (Daniel) plus default speed
+                    // and pitch.
+                    settings.selectedVoiceIdentifier = nil
                     settings.speechRate = AudioSettingsStore.defaultSpeechRate
                     settings.speechPitch = AudioSettingsStore.defaultSpeechPitch
+                    SpeechManager.shared.refreshPreferredVoice()
                 } label: {
-                    Label("Reset speed & pitch", systemImage: "arrow.counterclockwise")
+                    Label("Reset to default settings", systemImage: "arrow.counterclockwise")
                 }
             } header: {
                 Text("Speed & pitch")
@@ -347,7 +351,7 @@ struct VoicePickerScreen: View {
     private func autoVoiceRow() -> some View {
         let isSelected = settings.selectedVoiceIdentifier == nil
         return HStack {
-            Label("Default: \(AudioSettingsStore.defaultVoiceLabel)", systemImage: "wand.and.stars")
+            Label("Default: \(AudioSettingsStore.currentDefaultVoiceLabel)", systemImage: "wand.and.stars")
             Spacer()
             if isSelected {
                 Image(systemName: "checkmark").foregroundStyle(.tint)
@@ -440,6 +444,11 @@ struct VoicePickerScreen: View {
     private func reloadInstalledVoices() {
         installedEnglishVoices = AVSpeechSynthesisVoice.speechVoices()
             .filter { $0.language.hasPrefix("en") }
+            // Premium voices can't render when the iOS build runs on a Mac —
+            // the OS silently substitutes a low-quality compact voice — so
+            // don't offer them as picks there. SpeechManager applies the same
+            // rule at playback for pins made on other devices.
+            .filter { !(ProcessInfo.processInfo.isiOSAppOnMac && $0.quality == .premium) }
             .sorted { lhs, rhs in
                 if lhs.quality.rawValue != rhs.quality.rawValue {
                     return lhs.quality.rawValue > rhs.quality.rawValue

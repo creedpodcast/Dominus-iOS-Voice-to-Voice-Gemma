@@ -46,18 +46,27 @@ final class AudioSettingsStore: ObservableObject {
         static let halftoneDotBlue:  Double = 1.0
         static let halftoneDensity:  Double = 1.0
         static let halftoneEmojiCoverage: Double = 0.80
-        // 44% on the exposed 0.35...0.80 speed slider.
-        static let speechRate: Double = 0.548
-        // 1.05 brightens the voice just enough to fix the "all voices sound deep"
+        // 40% on the exposed 0.35...0.80 speed slider.
+        static let speechRate: Double = 0.53
+        // 1.06 brightens the voice just enough to fix the "all voices sound deep"
         // complaint without making them sound artificial.
-        static let speechPitch: Double = 1.05
+        static let speechPitch: Double = 1.06
         static let userResponseConcludedVolume = 0.08
         static let aiResponseConcludedVolume   = 0.14
     }
 
-    static let defaultVoiceName = "Zoe"
-    static let defaultVoiceLanguage = "en-US"
-    static let defaultVoiceLabel = "Zoe (Premium)"
+    /// Daniel (en-GB) is the app default on every platform: he ships
+    /// preinstalled on both iOS and macOS, renders natively in the iOS-on-Mac
+    /// compatibility box (premium voices don't), and won listening tests. If
+    /// the user has downloaded a higher-quality Daniel, `defaultVoice()`
+    /// upgrades to it automatically.
+    static let defaultVoiceName = "Daniel"
+    static let defaultVoiceLanguage = "en-GB"
+    static let defaultVoiceLabel = "Daniel"
+
+    /// What "Default" means on the current platform. One voice everywhere now,
+    /// kept as a hook in case platforms ever diverge again.
+    static var currentDefaultVoiceLabel: String { defaultVoiceLabel }
 
     // Apple's documented bounds for AVSpeechUtterance.
     // We expose 0.30…0.70 to the user; the full 0.0…1.0 range includes
@@ -264,20 +273,20 @@ final class AudioSettingsStore: ObservableObject {
 
     static func defaultVoice() -> AVSpeechSynthesisVoice? {
         let voices = AVSpeechSynthesisVoice.speechVoices()
-        if let premiumZoe = voices.first(where: {
+        // Best installed quality of the default voice in its home language
+        // first (compact Daniel is always present; enhanced wins if the user
+        // downloaded it), then any English variant as a long-shot fallback.
+        let matches = voices.filter {
             $0.language == defaultVoiceLanguage
                 && $0.name.localizedCaseInsensitiveCompare(defaultVoiceName) == .orderedSame
-                && $0.quality == .premium
-        }) {
-            return premiumZoe
         }
-        if let zoe = voices.first(where: {
+        if let best = matches.max(by: { $0.quality.rawValue < $1.quality.rawValue }) {
+            return best
+        }
+        return voices.first(where: {
             $0.language.hasPrefix("en")
                 && $0.name.localizedCaseInsensitiveCompare(defaultVoiceName) == .orderedSame
-        }) {
-            return zoe
-        }
-        return nil
+        })
     }
 
     func voiceModeVolume(for resourceName: String) -> Double {

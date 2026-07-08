@@ -26,6 +26,15 @@ final class SpeechManager: NSObject, ObservableObject {
     private let synth = AVSpeechSynthesizer()
     private var preferredVoice: AVSpeechSynthesisVoice?
 
+    /// Voices that closed an utterance without producing a single audio
+    /// buffer. Premium neural voices appear in `speechVoices()` but cannot
+    /// render when the iOS build runs on a Mac ("Invalid maui voice
+    /// identifier" + zero-byte buffers) — the result is perfectly silent
+    /// playback with no thrown error. Once caught here, the voice is skipped
+    /// for the rest of the session and the utterance retries with the next
+    /// usable voice.
+    private var unrenderableVoiceIdentifiers: Set<String> = []
+
     // MARK: - High-gain audio pipeline
 
     private let audioEngine = AVAudioEngine()
@@ -78,6 +87,10 @@ final class SpeechManager: NSObject, ObservableObject {
         var scheduled: Int = 0
         var completed: Int = 0
         var allBuffersScheduled: Bool = false
+        /// Kept so a zero-audio render can be retried with a different voice.
+        let text: String
+        let voiceIdentifier: String?
+        let isRetry: Bool
     }
 
     /// True while any utterance is queued or actively playing
@@ -90,6 +103,13 @@ final class SpeechManager: NSObject, ObservableObject {
     /// True from the moment `speak(_:for:)` is called until the synthesizer
     /// fires its `didStart` callback — the brief window where audio is initialising.
     @Published var isStartingPlayback: Bool = false
+
+    /// Most recent audio-pipeline failure, phrased for the user (voice
+    /// unavailable, engine start failure, session activation failure).
+    /// nil while the pipeline is healthy. Cleared automatically the next
+    /// time a TTS buffer actually reaches the engine, so a transient
+    /// failure doesn't leave a stale warning up.
+    @Published var audioErrorMessage: String?
 
     /// Fires once when ALL queued utterances have finished playing.
     var onAllSpeechFinished: (() -> Void)?
@@ -107,18 +127,37 @@ final class SpeechManager: NSObject, ObservableObject {
     }
 
     /// Honor the user's pinned voice when it's installed; otherwise use the
-    /// app default voice, Zoe Premium when available. Returning nil here is
-    /// safe — callers cope with `AVSpeechSynthesisVoice(language: "en-US")`.
+    /// app default voice (Daniel, preinstalled everywhere). Returning nil here
+    /// is safe — callers cope with `AVSpeechSynthesisVoice(language: "en-US")`.
     private func resolvePreferredVoice() -> AVSpeechSynthesisVoice? {
+        // The pinned voice goes through the same renderability gate as the
+        // automatic picks. Handing the synthesizer a premium identifier in
+        // iOS-on-Mac mode does NOT fail loudly — macOS logs "Invalid maui
+        // voice identifier" and silently substitutes a low-quality compact
+        // voice, which is worse than our own fallback. The saved selection
+        // is never overwritten, so the Catalyst app and iPhone still use it.
         if let id = AudioSettingsStore.shared.selectedVoiceIdentifier,
-           let v = AVSpeechSynthesisVoice(identifier: id) {
+           let v = AVSpeechSynthesisVoice(identifier: id),
+           isRenderableVoice(v) {
             return v
         }
-        if let defaultVoice = AudioSettingsStore.defaultVoice() {
+        if let defaultVoice = AudioSettingsStore.defaultVoice(),
+           isRenderableVoice(defaultVoice) {
             print("🎙 Default voice selected:", defaultVoice.name, "|", defaultVoice.language, "| quality:", defaultVoice.quality.rawValue)
             return defaultVoice
         }
         return pickFallbackEnglishVoice()
+    }
+
+    /// Gate for every voice pick (pinned, default, and fallback): skip
+    /// anything caught rendering zero audio this session, and never use
+    /// premium neural voices when the iOS build runs on a Mac — the
+    /// compatibility layer can't render them ("Invalid maui voice
+    /// identifier") and substitutes a low-quality compact voice instead.
+    private func isRenderableVoice(_ voice: AVSpeechSynthesisVoice) -> Bool {
+        if unrenderableVoiceIdentifiers.contains(voice.identifier) { return false }
+        if ProcessInfo.processInfo.isiOSAppOnMac && voice.quality == .premium { return false }
+        return true
     }
 
     /// Clamp to Apple's documented `AVSpeechUtterance.rate` bounds so a stale
@@ -167,6 +206,7 @@ final class SpeechManager: NSObject, ObservableObject {
             try session.setActive(true, options: .notifyOthersOnDeactivation)
         } catch {
             print("❌ Voice-mode session lock failed:", error.localizedDescription)
+            audioErrorMessage = "Audio couldn't start. Close other audio apps and try again."
         }
     }
 
@@ -195,23 +235,45 @@ final class SpeechManager: NSObject, ObservableObject {
         }
     }
 
-    func enqueue(_ text: String) {
+    func enqueue(_ text: String, isRetry: Bool = false) {
         let cleaned = clean(text)
-        guard hasSpeakableContent(cleaned) else { return }
+        guard hasSpeakableContent(cleaned) else {
+            // Nothing will ever play for this request — don't leave the
+            // "Starting audio…" state armed forever.
+            isStartingPlayback  = false
+            nowPlayingMessageID = nil
+            return
+        }
 
         prepareAudioSessionForSpeech()
+
+        if preferredVoice == nil {
+            // The system voice list may not have been populated at init on a
+            // fresh device's first launch. Re-resolve before falling back so
+            // one cold start doesn't pin the voice to nil for the whole session.
+            preferredVoice = resolvePreferredVoice()
+        }
+        guard let voice = preferredVoice ?? AVSpeechSynthesisVoice(language: "en-US") else {
+            // A nil voice makes `synth.write` produce zero buffers with no
+            // error — the exact "AI replies but stays silent" failure.
+            print("❌ SpeechManager: no usable TTS voice — skipping utterance")
+            audioErrorMessage = "No speech voice available. Download one in Settings → Accessibility → Spoken Content → Voices."
+            isStartingPlayback  = false
+            nowPlayingMessageID = nil
+            return
+        }
 
         let utt    = AVSpeechUtterance(string: cleaned)
         utt.rate   = currentSpeechRate()
         utt.pitchMultiplier = currentSpeechPitch()
         utt.volume = speechUtteranceVolume()
-        utt.voice  = preferredVoice ?? AVSpeechSynthesisVoice(language: "en-US")
+        utt.voice  = voice
         utt.preUtteranceDelay  = 0
         utt.postUtteranceDelay = 0
 
         outstandingUtterances += 1
         isSpeaking = true
-        scheduleUtteranceThroughEngine(utt)
+        scheduleUtteranceThroughEngine(utt, text: cleaned, isRetry: isRetry)
     }
 
     /// Speak `text` and tag the playback with `id` so per-message UI can show a
@@ -222,6 +284,20 @@ final class SpeechManager: NSObject, ObservableObject {
         nowPlayingMessageID  = id
         isStartingPlayback   = true
         enqueue(text)
+
+        // Watchdog: if the synthesizer never delivers a single buffer (broken
+        // voice, engine that failed to start), playback would hang in
+        // "starting" forever with no sound and no error. Give it a generous
+        // window, then reset state and tell the user instead of staying silent.
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            guard let self,
+                  self.nowPlayingMessageID == id,
+                  self.isStartingPlayback else { return }
+            print("❌ SpeechManager: no audio produced within 4 s — resetting playback")
+            self.audioErrorMessage = "Voice playback didn't start. Try again, or pick a voice in Settings → Accessibility → Spoken Content."
+            self.stopAndClear()
+        }
     }
 
     /// Play a bundled SFX wav through the SAME audio engine as TTS so the
@@ -349,9 +425,13 @@ final class SpeechManager: NSObject, ObservableObject {
 
     // MARK: - Engine pipeline
 
-    private func scheduleUtteranceThroughEngine(_ utt: AVSpeechUtterance) {
+    private func scheduleUtteranceThroughEngine(_ utt: AVSpeechUtterance, text: String, isRetry: Bool) {
         let utteranceKey = ObjectIdentifier(utt)
-        bufferQueue[utteranceKey] = BufferQueueState()
+        bufferQueue[utteranceKey] = BufferQueueState(
+            text: text,
+            voiceIdentifier: utt.voice?.identifier,
+            isRetry: isRetry
+        )
 
         // `synth.write` calls the callback once per output buffer. A buffer with
         // `frameLength == 0` signals end-of-utterance. The synthesiser invokes
@@ -371,6 +451,14 @@ final class SpeechManager: NSObject, ObservableObject {
         // Zero-length buffer is the synthesizer's end-of-utterance marker.
         if buffer.frameLength == 0 {
             if var state = bufferQueue[utteranceKey] {
+                if state.scheduled == 0 {
+                    // The synthesizer closed the utterance without producing
+                    // any audio — the chosen voice is listed but can't render
+                    // here. Blocklist it and retry with the next usable voice.
+                    bufferQueue.removeValue(forKey: utteranceKey)
+                    handleUnrenderedUtterance(state)
+                    return
+                }
                 state.allBuffersScheduled = true
                 bufferQueue[utteranceKey] = state
                 checkUtteranceCompletion(utteranceKey)
@@ -397,6 +485,10 @@ final class SpeechManager: NSObject, ObservableObject {
 
         if isStartingPlayback {
             isStartingPlayback = false
+        }
+        // Audio is demonstrably flowing end-to-end — retire any stale warning.
+        if audioErrorMessage != nil {
+            audioErrorMessage = nil
         }
 
         // `.dataPlayedBack` fires after the buffer has actually finished playing
@@ -440,6 +532,29 @@ final class SpeechManager: NSObject, ObservableObject {
         }
     }
 
+    /// Recovery path for a voice that rendered zero audio (e.g. "Invalid maui
+    /// voice identifier" when a premium voice is used by the iOS build on a
+    /// Mac). Blocklists the voice, forces re-resolution, and re-enqueues the
+    /// text once. A second zero-audio render gives up and surfaces an error
+    /// instead of looping.
+    private func handleUnrenderedUtterance(_ state: BufferQueueState) {
+        if let id = state.voiceIdentifier {
+            print("❌ SpeechManager: voice \(id) produced no audio — blocklisting for this session")
+            unrenderableVoiceIdentifiers.insert(id)
+        }
+        preferredVoice = nil    // next enqueue re-resolves against the blocklist
+
+        if state.isRetry {
+            audioErrorMessage = "The selected voice can't play on this device. Pick a different voice in Audio settings."
+            handleUtteranceCompleted()
+            return
+        }
+        // Undo this utterance's bookkeeping, then re-enqueue — enqueue
+        // re-increments and the retry gets a fresh BufferQueueState.
+        outstandingUtterances = max(0, outstandingUtterances - 1)
+        enqueue(state.text, isRetry: true)
+    }
+
     private func handleBufferCompletion(for utteranceKey: ObjectIdentifier) {
         if var state = bufferQueue[utteranceKey] {
             state.completed += 1
@@ -460,6 +575,7 @@ final class SpeechManager: NSObject, ObservableObject {
             if audioEngine.isRunning { return }
             do { try audioEngine.start() } catch {
                 print("❌ TTS engine restart failed:", error.localizedDescription)
+                audioErrorMessage = "Voice playback stopped working. Try again or restart the app."
             }
             return
         }
@@ -522,6 +638,7 @@ final class SpeechManager: NSObject, ObservableObject {
             engineConfigured = true
         } catch {
             print("❌ TTS engine start failed:", error.localizedDescription)
+            audioErrorMessage = "Voice playback couldn't start. Try again or restart the app."
         }
     }
 
@@ -697,11 +814,18 @@ final class SpeechManager: NSObject, ObservableObject {
         s = s.replacingOccurrences(of: "\\.\\.\\.", with: "\u{2026}", options: .regularExpression)
 
         // 6. Strip emoji and non-speech Unicode (ZWJ, variation selectors, etc.)
+        //    CAREFUL: Unicode classifies the ASCII digits 0-9 (plus # and *)
+        //    as `isEmoji` because of keycap sequences like 1️⃣ — filtering on
+        //    `isEmoji` alone silently deletes every number from spoken text.
+        //    Only strip scalars that actually render as emoji: default emoji
+        //    presentation, or emoji-capable symbols above the ASCII/technical
+        //    range.
         s = s.unicodeScalars.filter { scalar in
-            !scalar.properties.isEmojiPresentation &&
-            !scalar.properties.isEmoji &&
-            scalar.value != 0xFE0F &&   // variation selector-16
-            scalar.value != 0x200D      // ZWJ
+            let rendersAsEmoji = scalar.properties.isEmojiPresentation ||
+                (scalar.properties.isEmoji && scalar.value > 0x238C)
+            return !rendersAsEmoji &&
+                scalar.value != 0xFE0F &&   // variation selector-16
+                scalar.value != 0x200D      // ZWJ
         }
         .map(String.init)
         .joined()
@@ -750,15 +874,18 @@ final class SpeechManager: NSObject, ObservableObject {
     private func pickFallbackEnglishVoice() -> AVSpeechSynthesisVoice? {
         let allVoices = AVSpeechSynthesisVoice.speechVoices()
 
-        let english = allVoices.filter { $0.language.hasPrefix("en") }
+        let english = allVoices.filter { $0.language.hasPrefix("en") && isRenderableVoice($0) }
         print("🎙 Available English voices:")
         english.forEach { print("   \($0.name) | \($0.language) | quality: \($0.quality.rawValue)") }
 
         let preferredNames = ["Evan", "Nathan", "Tom", "Reed", "Aaron", "Gordon", "Fred"]
         for name in preferredNames {
-            if let v = allVoices.first(where: {
+            // Same name can exist at several qualities (compact "Evan" vs
+            // "Evan (Enhanced)") — take the best one that can render here.
+            let candidates = english.filter {
                 $0.language == "en-US" && $0.name.hasPrefix(name)
-            }) {
+            }
+            if let v = candidates.max(by: { $0.quality.rawValue < $1.quality.rawValue }) {
                 print("🎙 Voice selected:", v.name, "|", v.language, "| quality:", v.quality.rawValue)
                 return v
             }

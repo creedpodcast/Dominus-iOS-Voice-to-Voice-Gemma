@@ -53,18 +53,24 @@ struct SplashLoadingView: View {
 struct StatusPillView: View {
     let icon: String
     let message: String
+    /// Error pills drop the spinner (nothing is in progress) and tint the
+    /// icon so a failure reads differently from routine activity.
+    var isError: Bool = false
 
     var body: some View {
         HStack(spacing: 8) {
-            ProgressView()
-                .scaleEffect(0.72)
-                .tint(.white)
+            if !isError {
+                ProgressView()
+                    .scaleEffect(0.72)
+                    .tint(.white)
+            }
             Image(systemName: icon)
                 .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.7))
+                .foregroundStyle(isError ? Color.yellow : Color.white.opacity(0.7))
             Text(message)
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.white)
+                .multilineTextAlignment(.leading)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 8)

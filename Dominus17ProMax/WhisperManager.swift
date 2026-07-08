@@ -43,6 +43,10 @@ final class WhisperManager: ObservableObject {
     @Published var isMicMuted:      Bool   = false
     @Published var modelReady:      Bool   = false
     @Published var isLoadingModel:  Bool   = false
+    /// Most recent microphone failure, phrased for the user (permission
+    /// denied, input device not ready). nil while the mic is healthy.
+    /// Cleared automatically the next time recording starts successfully.
+    @Published var micErrorMessage: String?
     @Published var loadProgress:    Double = 0.0
     @Published var modelStatus:     String = "Whisper not loaded"
     @Published var liveTranscript:  String = ""
@@ -182,20 +186,30 @@ final class WhisperManager: ObservableObject {
         }
     }
 
+    /// User-facing path to re-enable microphone access, per platform.
+    private static var micPermissionHelp: String {
+#if targetEnvironment(macCatalyst)
+        "Microphone access is off. Enable it in System Settings → Privacy & Security → Microphone."
+#else
+        "Microphone access is off. Enable it in Settings → Dominus → Microphone."
+#endif
+    }
+
     func startRecording() {
         guard !isRecording else { return }
 
-#if targetEnvironment(macCatalyst)
-        // On Mac, starting the audio engine does NOT reliably trigger the
-        // microphone permission prompt the way it does on iOS. Request it
-        // explicitly: if undetermined, show the prompt and retry once granted;
-        // if denied, bail with a clear log. iPhone path is unchanged (this
-        // whole block compiles out there).
+        // Starting the audio engine does not reliably trigger the microphone
+        // permission prompt on every platform (Mac Catalyst never prompts, and
+        // on iOS the first engine start can race the dialog and read a 0 Hz
+        // input format). Request it explicitly on both platforms: if
+        // undetermined, show the prompt and retry once granted; if denied,
+        // surface an error the UI can display instead of failing silently.
         switch AVAudioApplication.shared.recordPermission {
         case .granted:
             break
         case .denied:
-            print("❌ WhisperManager: microphone access denied. Enable it in System Settings → Privacy & Security → Microphone.")
+            print("❌ WhisperManager: microphone access denied.")
+            micErrorMessage = Self.micPermissionHelp
             isStartingRecording = false
             return
         case .undetermined:
@@ -206,6 +220,7 @@ final class WhisperManager: ObservableObject {
                         self.startRecording()
                     } else {
                         print("❌ WhisperManager: microphone permission was not granted.")
+                        self.micErrorMessage = Self.micPermissionHelp
                     }
                 }
             }
@@ -213,7 +228,6 @@ final class WhisperManager: ObservableObject {
         @unknown default:
             break
         }
-#endif
 
         isStartingRecording = true
         recordedSamples = []
@@ -255,6 +269,7 @@ final class WhisperManager: ObservableObject {
             isStartingRecording = false
             recordingStartedAt  = nil
             print("⚠️ WhisperManager: input format not ready (\(hardwareFormat.sampleRate) Hz, \(hardwareFormat.channelCount) ch) — mic permission or device pending.")
+            micErrorMessage = "Microphone isn't ready yet. Tap the voice button to try again."
             return
         }
 
@@ -298,11 +313,13 @@ final class WhisperManager: ObservableObject {
             isRecording         = true
             isStartingRecording = false
             recordingStartedAt  = Date()
+            micErrorMessage     = nil
             print("✅ WhisperManager: recording started")
             startLiveTranscriptionTimer()
         } catch {
             isStartingRecording = false
             recordingStartedAt  = nil
+            micErrorMessage     = "Microphone couldn't start. Try again."
             print("❌ WhisperManager: audio engine failed:", error)
         }
     }
